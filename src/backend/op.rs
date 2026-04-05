@@ -7,13 +7,17 @@ use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContex
 pub struct OpBackend;
 
 impl OpBackend {
+    fn text_field_assignment(field_name: &str, value: &str) -> String {
+        format!("{field_name}[text]={value}")
+    }
+
     fn migration_field_assignments(ctx: &StoreContext) -> Vec<String> {
-        let mut assignments = vec![format!(
-            "{MIGRATED_FROM_FIELD_NAME}={}",
-            ctx.migrated_from()
+        let mut assignments = vec![Self::text_field_assignment(
+            MIGRATED_FROM_FIELD_NAME,
+            &ctx.migrated_from(),
         )];
         if let Some(project) = ctx.project.as_deref() {
-            assignments.push(format!("{PROJECT_FIELD_NAME}={project}"));
+            assignments.push(Self::text_field_assignment(PROJECT_FIELD_NAME, project));
         }
         assignments
     }
@@ -263,7 +267,7 @@ mod tests {
 
         let assignments = OpBackend::migration_field_assignments(&ctx);
 
-        assert!(assignments.contains(&"migrated_from=/tmp/example/service".to_string()));
-        assert!(assignments.contains(&"project=example".to_string()));
+        assert!(assignments.contains(&"migrated_from[text]=/tmp/example/service".to_string()));
+        assert!(assignments.contains(&"project[text]=example".to_string()));
     }
 }
