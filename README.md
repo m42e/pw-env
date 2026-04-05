@@ -4,6 +4,19 @@
 
 The tool is designed for local development workflows where projects keep a checked-in or local `.env` shape, but secret values come from a secure backend.
 
+## Documentation
+
+The interactive manual is published with GitHub Pages at [m42e.github.io/pw-manager-env-rs](https://m42e.github.io/pw-manager-env-rs/).
+
+To preview the manual locally:
+
+```bash
+python3 -m venv .venv-docs
+source .venv-docs/bin/activate
+pip install -r docs/requirements.txt
+mkdocs serve
+```
+
 ## Features
 
 - Resolves empty `.env` entries from a default backend by key name
@@ -22,19 +35,19 @@ The tool is designed for local development workflows where projects keep a check
 Install the latest matching prebuilt release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/m42e/pw-manager-env-rs/main/scripts/install.sh | bash
+curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash
 ```
 
 Install a specific release version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/m42e/pw-manager-env-rs/main/scripts/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash -s -- --version v0.1.0
 ```
 
 Install into a custom directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/m42e/pw-manager-env-rs/main/scripts/install.sh | bash -s -- --dir "$HOME/.local/bin"
+curl -fsSL https://m42e.github.io/pw-manager-env-rs/install.sh | bash -s -- --dir "$HOME/.local/bin"
 ```
 
 The installer currently supports these prebuilt targets:
