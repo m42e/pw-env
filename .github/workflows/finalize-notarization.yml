@@ -48,26 +48,44 @@ jobs:
             artifact_prefix="notarization-$SELECTED_TAG-"
           fi
 
-          mapfile -t artifacts < <(
-            gh api "repos/$GH_REPO/actions/artifacts" --paginate \
-              --jq ".artifacts[] | select((.expired | not) and (.name | startswith(\"$artifact_prefix\"))) | @base64"
-          )
+          artifacts_file="$RUNNER_TEMP/notarization-artifacts.txt"
+          gh api "repos/$GH_REPO/actions/artifacts" --paginate \
+            --jq ".artifacts[] | select((.expired | not) and (.name | startswith(\"$artifact_prefix\"))) | @base64" \
+            > "$artifacts_file"
 
-          if [ "${#artifacts[@]}" -eq 0 ]; then
+          artifact_count=$(grep -c '.' "$artifacts_file" || true)
+          total_count=0
+          accepted_count=0
+          pending_count=0
+          failed_count=0
+          skipped_count=0
+
+          echo "Artifact prefix: $artifact_prefix"
+          echo "Found $artifact_count pending notarization artifact(s)."
+          printf '%s\n' "- Artifact prefix: $artifact_prefix" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "- Pending notarization artifacts found: $artifact_count" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$artifact_count" -eq 0 ]; then
             echo "No pending macOS notarization artifacts found."
             printf '%s\n' '- No pending notarization artifacts found.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          for encoded_artifact in "${artifacts[@]}"; do
+          while IFS= read -r encoded_artifact; do
+            [ -n "$encoded_artifact" ] || continue
+
+            total_count=$((total_count + 1))
             artifact_json=$(printf '%s' "$encoded_artifact" | base64 --decode)
             artifact_id=$(jq -r '.id' <<<"$artifact_json")
             artifact_name=$(jq -r '.name' <<<"$artifact_json")
             run_id=$(jq -r '.workflow_run.id // empty' <<<"$artifact_json")
 
+            echo "Checking artifact $artifact_name (id=$artifact_id, run_id=${run_id:-none})"
+
             if [ -z "$run_id" ]; then
               echo "Artifact $artifact_name is missing workflow run information; skipping."
               printf '%s\n' "- Skipped $artifact_name because the source workflow run is unavailable." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
               continue
             fi
 
@@ -81,25 +99,26 @@ jobs:
               echo "Artifact $artifact_name does not contain notarization metadata; deleting it."
               printf '%s\n' "- Deleted $artifact_name because it did not contain a metadata JSON file." >> "$GITHUB_STEP_SUMMARY"
               gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+              skipped_count=$((skipped_count + 1))
               rm -rf "$workdir"
               continue
             fi
 
             tag=$(jq -r '.tag' "$metadata_file")
-            echo "Processing $tag"
-
             checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
             target=$(jq -r '.target' "$metadata_file")
             binary=$(jq -r '.binary' "$metadata_file")
             archive=$(jq -r '.archive' "$metadata_file")
             asset_name=$(jq -r '.asset_name' "$metadata_file")
             submission_id=$(jq -r '.submission_id' "$metadata_file")
+            submitted_at=$(jq -r '.submitted_at // "unknown"' "$metadata_file")
             response_file="$workdir/${target}-notary-info.json"
             asset_dir="$workdir/${target}"
             package_dir="$asset_dir/package"
             asset_path="$asset_dir/$asset_name"
             binary_path="$package_dir/$binary"
+
+            echo "Processing tag=$tag target=$target asset=$asset_name submission_id=$submission_id submitted_at=$submitted_at"
 
             xcrun notarytool info "$submission_id" \
               --apple-id "$APPLE_ID" \
@@ -109,9 +128,14 @@ jobs:
 
             status=$(jq -r '.status // "Unknown"' "$response_file")
             status_summary=$(jq -r '.statusSummary // empty' "$response_file")
+            echo "Apple status for $tag $target: $status"
+            if [ -n "$status_summary" ]; then
+              echo "Apple status summary: $status_summary"
+            fi
 
             case "$status" in
               Accepted)
+                echo "Notarization accepted for $tag $target; downloading release asset and stapling binary."
                 mkdir -p "$package_dir"
                 gh release download "$tag" -R "$GH_REPO" --pattern "$asset_name" --dir "$asset_dir"
 
@@ -126,6 +150,7 @@ jobs:
                     echo "Unsupported archive format $archive for $artifact_name"
                     printf '%s\n' "- $tag $target: unsupported archive format $archive." >> "$GITHUB_STEP_SUMMARY"
                     gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+                    failed_count=$((failed_count + 1))
                     rm -rf "$workdir"
                     continue
                     ;;
@@ -135,6 +160,7 @@ jobs:
                   echo "Packaged binary $binary_path is missing for $artifact_name"
                   printf '%s\n' "- $tag $target: packaged binary was missing after download." >> "$GITHUB_STEP_SUMMARY"
                   gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+                  failed_count=$((failed_count + 1))
                   rm -rf "$workdir"
                   continue
                 fi
@@ -154,16 +180,32 @@ jobs:
 
                 gh release upload "$tag" -R "$GH_REPO" "$asset_path" --clobber
                 gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+                accepted_count=$((accepted_count + 1))
+                echo "Completed $tag $target; release asset replaced and artifact deleted."
                 printf '%s\n' "- $tag $target: notarization accepted and release asset updated." >> "$GITHUB_STEP_SUMMARY"
                 ;;
               "In Progress")
+                pending_count=$((pending_count + 1))
+                echo "Still pending: $tag $target at $checked_at"
                 printf '%s\n' "- $tag $target: still in progress at $checked_at." >> "$GITHUB_STEP_SUMMARY"
                 ;;
               *)
+                failed_count=$((failed_count + 1))
+                echo "Terminal notarization status for $tag $target: $status"
                 printf '%s\n' "- $tag $target: terminal status $status. ${status_summary:-No summary provided.}" >> "$GITHUB_STEP_SUMMARY"
                 gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
                 ;;
             esac
 
             rm -rf "$workdir"
-          done
+          done < "$artifacts_file"
+
+          echo "Finalize summary: total=$total_count accepted=$accepted_count pending=$pending_count failed=$failed_count skipped=$skipped_count"
+          printf '%s\n' '' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "- Summary: total=$total_count accepted=$accepted_count pending=$pending_count failed=$failed_count skipped=$skipped_count" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$pending_count" -eq 0 ]; then
+            echo "All checked notarization submissions are complete or terminal."
+          else
+            echo "At least one notarization submission is still pending."
+          fi
