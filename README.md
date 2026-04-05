@@ -16,7 +16,39 @@ The tool is designed for local development workflows where projects keep a check
 
 ## Install
 
-Build from source with Cargo:
+Install the latest matching prebuilt release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/m42e/pw-manager-env-rs/main/scripts/install.sh | bash
+```
+
+Install a specific release version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/m42e/pw-manager-env-rs/main/scripts/install.sh | bash -s -- --version v0.1.0
+```
+
+Install into a custom directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/m42e/pw-manager-env-rs/main/scripts/install.sh | bash -s -- --dir "$HOME/.local/bin"
+```
+
+The installer currently supports these prebuilt targets:
+
+- macOS Apple Silicon
+- macOS Intel
+- Linux x86_64
+- Linux arm64
+- Windows x86_64 when run from a POSIX shell environment such as Git Bash
+
+To inspect what would be downloaded without installing:
+
+```bash
+./scripts/install.sh --dry-run
+```
+
+Build from source with Cargo instead:
 
 ```bash
 cargo build --release
