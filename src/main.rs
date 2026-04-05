@@ -129,7 +129,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 
             let env_file = env_file::EnvFile::parse(&env_path)?;
 
-            let likely_secrets = env_file.likely_secret_entries();
+            let likely_secrets = pending_migration_entries(&env_file)?;
             if !likely_secrets.is_empty() {
                 eprintln!(
                     "pw-env: warning: likely plaintext secrets found in .env: {}. Run `pw-env migrate` to secure them.",
@@ -159,7 +159,11 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 }
             }
 
-            info!("Exported {} variables from {}", resolved.len(), env_path.display());
+            info!(
+                "Exported {} variables from {}",
+                resolved.len(),
+                env_path.display()
+            );
             Ok(())
         }
 
@@ -174,7 +178,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             eprintln!("Backend: {}", config.effective_backend(&dir));
             eprintln!();
 
-            let likely_secrets = env_file.likely_secret_entries();
+            let likely_secrets = pending_migration_entries(&env_file)?;
             if !likely_secrets.is_empty() {
                 eprintln!(
                     "Warning: likely plaintext secrets found in .env: {}",
@@ -189,6 +193,9 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                     env_file::EntryKind::Empty => "  (resolve from backend)".to_string(),
                     env_file::EntryKind::OpReference(r) => format!("  (1Password: {r})"),
                     env_file::EntryKind::BwReference(r) => format!("  (Bitwarden: {r})"),
+                    env_file::EntryKind::Plaintext(_) if entry.no_migrate => {
+                        "  (plaintext value, no-migrate)".to_string()
+                    }
                     env_file::EntryKind::Plaintext(_) if entry.is_likely_secret() => {
                         "  ⚠ PLAINTEXT SECRET (run `pw-env migrate`)".to_string()
                     }
@@ -200,13 +207,20 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 
             // Resolve
             let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
-            eprintln!("Resolved {}/{} entries:", resolved.len(), env_file.resolvable_entries().len());
+            eprintln!(
+                "Resolved {}/{} entries:",
+                resolved.len(),
+                env_file.resolvable_entries().len()
+            );
             for key in resolved.keys() {
                 eprintln!("  {} = ****", key);
             }
 
             // Also print as export statements for piping
-            print!("{}", output::format_exports(&resolved, output::ShellSyntax::Posix));
+            print!(
+                "{}",
+                output::format_exports(&resolved, output::ShellSyntax::Posix)
+            );
 
             Ok(())
         }
@@ -255,10 +269,18 @@ fn summarize_entry_keys(entries: &[&env_file::EnvEntry]) -> String {
     }
 }
 
+fn pending_migration_entries<'a>(
+    env_file: &'a env_file::EnvFile,
+) -> Result<Vec<&'a env_file::EnvEntry>> {
+    let reviewed = config::Config::reviewed_migration_entry_fingerprints(&env_file.path)?;
+    Ok(env_file.likely_secret_entries_unreviewed(&reviewed))
+}
+
 fn resolve_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     match dir {
         Some(d) => {
-            let canonical = d.canonicalize()
+            let canonical = d
+                .canonicalize()
                 .with_context(|| format!("Directory not found: {}", d.display()))?;
             Ok(canonical)
         }
@@ -335,14 +357,14 @@ fn check_config(config: &config::Config, dir: &std::path::Path) {
         eprintln!("  GPG file pattern: {}", config.defaults.gpg.file_pattern);
         eprintln!("  Projects configured: {}", config.projects.len());
         if let Some(local_override) = config::Config::project_override_path(dir) {
-            eprintln!(
-                "  Project override file: {}",
-                local_override.display()
-            );
+            eprintln!("  Project override file: {}", local_override.display());
         }
     } else {
         eprintln!("Configuration: not found (using defaults)");
-        eprintln!("  Create one with: pw-env config-template > {}", config_path.display());
+        eprintln!(
+            "  Create one with: pw-env config-template > {}",
+            config_path.display()
+        );
     }
 }
 
@@ -483,8 +505,7 @@ fn setup_logging(config: &config::Config) {
     use tracing_subscriber::EnvFilter;
 
     let log_level = &config.log.level;
-    let filter = EnvFilter::try_new(log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     if let Some(ref log_file_path) = config.log.file {
         // Expand ~ in path
@@ -526,4 +547,3 @@ fn setup_logging(config: &config::Config) {
         .with_target(false)
         .init();
 }
-

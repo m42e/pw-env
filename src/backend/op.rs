@@ -2,15 +2,16 @@ use anyhow::{Context, Result, bail};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{
-    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext,
-};
+use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
 
 pub struct OpBackend;
 
 impl OpBackend {
     fn migration_field_assignments(ctx: &StoreContext) -> Vec<String> {
-        let mut assignments = vec![format!("{MIGRATED_FROM_FIELD_NAME}={}", ctx.migrated_from())];
+        let mut assignments = vec![format!(
+            "{MIGRATED_FROM_FIELD_NAME}={}",
+            ctx.migrated_from()
+        )];
         if let Some(project) = ctx.project.as_deref() {
             assignments.push(format!("{PROJECT_FIELD_NAME}={project}"));
         }
@@ -27,17 +28,23 @@ impl OpBackend {
         // Ensure no interactive prompts corrupt our stdout
         cmd.stdin(std::process::Stdio::null());
         debug!("Running: op {}", args.join(" "));
-        let output = cmd.output().context("Failed to execute `op` CLI. Is 1Password CLI installed?")?;
+        let output = cmd
+            .output()
+            .context("Failed to execute `op` CLI. Is 1Password CLI installed?")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("op command failed: {stderr}");
         }
-        let stdout = String::from_utf8(output.stdout)
-            .context("op output was not valid UTF-8")?;
+        let stdout = String::from_utf8(output.stdout).context("op output was not valid UTF-8")?;
         Ok(stdout.trim().to_string())
     }
 
-    fn get_item_field(item: &str, field: &str, vault: Option<&str>, account: Option<&str>) -> Result<String> {
+    fn get_item_field(
+        item: &str,
+        field: &str,
+        vault: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<String> {
         let mut args = vec!["item", "get", item, "--fields", field, "--reveal"];
         let vault_arg;
         if let Some(v) = vault {
@@ -95,8 +102,8 @@ impl OpBackend {
                 .and_then(|i| i.as_str())
                 .ok_or_else(|| anyhow::anyhow!("1Password item missing id"))?;
             let full_json = Self::run_op(&["item", "get", id, "--format=json"], account)?;
-            let full_item: serde_json::Value = serde_json::from_str(&full_json)
-                .context("Failed to parse op item get JSON")?;
+            let full_item: serde_json::Value =
+                serde_json::from_str(&full_json).context("Failed to parse op item get JSON")?;
 
             if let Some(fields) = full_item.get("fields").and_then(|f| f.as_array()) {
                 for field in fields {
@@ -134,7 +141,12 @@ impl Backend for OpBackend {
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             debug!("Resolving key '{key}' as field on item '{item}'");
             let label_arg = format!("label={key}");
-            Self::get_item_field(item, label_arg.as_str(), op_config.vault.as_deref(), account)
+            Self::get_item_field(
+                item,
+                label_arg.as_str(),
+                op_config.vault.as_deref(),
+                account,
+            )
         } else if let Some(ref vault) = op_config.vault {
             // Search for an item named after the key in the configured vault
             debug!("Resolving key '{key}' as item in vault '{vault}'");
@@ -143,7 +155,9 @@ impl Backend for OpBackend {
                 Ok(value) => Ok(value),
                 Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
                     if let Some(ref project) = ctx.project {
-                        debug!("Multiple items match '{key}', disambiguating by project '{project}'");
+                        debug!(
+                            "Multiple items match '{key}', disambiguating by project '{project}'"
+                        );
                         Self::resolve_by_project(key, project, Some(vault), account)
                     } else {
                         Err(e)
@@ -158,7 +172,9 @@ impl Backend for OpBackend {
                 Ok(value) => Ok(value),
                 Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
                     if let Some(ref project) = ctx.project {
-                        debug!("Multiple items match '{key}', disambiguating by project '{project}'");
+                        debug!(
+                            "Multiple items match '{key}', disambiguating by project '{project}'"
+                        );
                         Self::resolve_by_project(key, project, None, account)
                     } else {
                         Err(e)
@@ -173,7 +189,10 @@ impl Backend for OpBackend {
         let op_config = ctx.config.effective_op(ctx.dir);
         let account = op_config.account.as_deref();
         let metadata_assignments = Self::migration_field_assignments(ctx);
-        let metadata_refs: Vec<&str> = metadata_assignments.iter().map(|assignment| assignment.as_str()).collect();
+        let metadata_refs: Vec<&str> = metadata_assignments
+            .iter()
+            .map(|assignment| assignment.as_str())
+            .collect();
 
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             // Try to edit the existing item first, adding/updating the field
@@ -198,7 +217,13 @@ impl Backend for OpBackend {
 
         let field_assignment = format!("password={value}");
         let title_arg = format!("--title={key}");
-        let mut args = vec!["item", "create", "--category=login", title_arg.as_str(), field_assignment.as_str()];
+        let mut args = vec![
+            "item",
+            "create",
+            "--category=login",
+            title_arg.as_str(),
+            field_assignment.as_str(),
+        ];
         args.extend_from_slice(&metadata_refs);
         args.extend_from_slice(&vault_refs);
         Self::run_op(&args, account)?;

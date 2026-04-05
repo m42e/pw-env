@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use crate::backend::{self, ResolveContext};
 use crate::config::Config;
-use crate::env_file::{EnvEntry, EntryKind, EnvFile};
+use crate::env_file::{EntryKind, EnvEntry, EnvFile};
 
 /// Walk up from `dir` to find a `.git` directory, returning the containing folder.
 fn find_git_root(dir: &Path) -> Option<PathBuf> {
@@ -69,7 +69,11 @@ pub fn resolve_env_file(
     // Resolve op:// references
     if !op_entries.is_empty() {
         let backend = backend::create_backend("op")?;
-        let ctx = ResolveContext { dir, config, project: project.clone() };
+        let ctx = ResolveContext {
+            dir,
+            config,
+            project: project.clone(),
+        };
         for entry in &op_entries {
             let reference = match &entry.kind {
                 EntryKind::OpReference(r) => Some(r.as_str()),
@@ -90,7 +94,11 @@ pub fn resolve_env_file(
     // Resolve bw:// references
     if !bw_entries.is_empty() {
         let backend = backend::create_backend("bw")?;
-        let ctx = ResolveContext { dir, config, project: project.clone() };
+        let ctx = ResolveContext {
+            dir,
+            config,
+            project: project.clone(),
+        };
         for entry in &bw_entries {
             let reference = match &entry.kind {
                 EntryKind::BwReference(r) => Some(r.as_str()),
@@ -112,7 +120,11 @@ pub fn resolve_env_file(
     if !default_entries.is_empty() {
         // For GPG backend, resolve all at once since it decrypts the whole file
         if default_backend_name == "gpg" {
-            let ctx = ResolveContext { dir, config, project: project.clone() };
+            let ctx = ResolveContext {
+                dir,
+                config,
+                project: project.clone(),
+            };
             match crate::backend::gpg::GpgBackend::resolve_all(&ctx) {
                 Ok(all_values) => {
                     for entry in &default_entries {
@@ -130,7 +142,11 @@ pub fn resolve_env_file(
             }
         } else {
             let backend = backend::create_backend(default_backend_name)?;
-            let ctx = ResolveContext { dir, config, project: project.clone() };
+            let ctx = ResolveContext {
+                dir,
+                config,
+                project: project.clone(),
+            };
             for entry in &default_entries {
                 match backend.resolve(&entry.key, None, &ctx) {
                     Ok(value) => {

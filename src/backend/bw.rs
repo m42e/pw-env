@@ -2,9 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{
-    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext,
-};
+use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
 
 pub struct BwBackend;
 
@@ -25,15 +23,15 @@ impl BwBackend {
         fields
     }
 
-    fn upsert_custom_field(
-        item: &mut serde_json::Value,
-        name: &str,
-        value: &str,
-        field_type: u8,
-    ) {
+    fn upsert_custom_field(item: &mut serde_json::Value, name: &str, value: &str, field_type: u8) {
         let fields = item
             .as_object_mut()
-            .and_then(|object| object.entry("fields").or_insert_with(|| serde_json::json!([])).as_array_mut())
+            .and_then(|object| {
+                object
+                    .entry("fields")
+                    .or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut()
+            })
             .expect("Bitwarden item fields must be an array");
 
         if let Some(existing) = fields.iter_mut().find(|field| {
@@ -65,8 +63,7 @@ impl BwBackend {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("bw command failed: {stderr}");
         }
-        let stdout = String::from_utf8(output.stdout)
-            .context("bw output was not valid UTF-8")?;
+        let stdout = String::from_utf8(output.stdout).context("bw output was not valid UTF-8")?;
         Ok(stdout.trim().to_string())
     }
 
@@ -92,12 +89,20 @@ impl BwBackend {
     fn extract_field_from_value(item: &serde_json::Value, field_name: &str) -> Result<String> {
         // Check login fields first
         if field_name == "password" {
-            if let Some(password) = item.get("login").and_then(|l| l.get("password")).and_then(|p| p.as_str()) {
+            if let Some(password) = item
+                .get("login")
+                .and_then(|l| l.get("password"))
+                .and_then(|p| p.as_str())
+            {
                 return Ok(password.to_string());
             }
         }
         if field_name == "username" {
-            if let Some(username) = item.get("login").and_then(|l| l.get("username")).and_then(|u| u.as_str()) {
+            if let Some(username) = item
+                .get("login")
+                .and_then(|l| l.get("username"))
+                .and_then(|u| u.as_str())
+            {
                 return Ok(username.to_string());
             }
         }
@@ -181,7 +186,9 @@ impl Backend for BwBackend {
                     let item_json = Self::run_bw(&["get", "item", item])?;
                     return Self::extract_field_from_item(&item_json, field);
                 } else {
-                    bail!("Invalid bw:// reference format: {ref_str}. Expected bw://[folder/]item/field");
+                    bail!(
+                        "Invalid bw:// reference format: {ref_str}. Expected bw://[folder/]item/field"
+                    );
                 }
             }
         }
@@ -203,7 +210,9 @@ impl Backend for BwBackend {
                     if err_msg.contains("more than one") {
                         // Multiple matches — try disambiguation by project
                         if let Some(ref project) = ctx.project {
-                            debug!("Multiple items match '{key}', disambiguating by project '{project}'");
+                            debug!(
+                                "Multiple items match '{key}', disambiguating by project '{project}'"
+                            );
                             return Self::resolve_by_project(key, project);
                         }
                         return Err(e);
@@ -246,7 +255,9 @@ impl Backend for BwBackend {
                 for field in &metadata_fields {
                     if let (Some(name), Some(field_value), Some(field_type)) = (
                         field.get("name").and_then(|field_name| field_name.as_str()),
-                        field.get("value").and_then(|field_value| field_value.as_str()),
+                        field
+                            .get("value")
+                            .and_then(|field_value| field_value.as_str()),
                         field.get("type").and_then(|field_type| field_type.as_u64()),
                     ) {
                         Self::upsert_custom_field(&mut item, name, field_value, field_type as u8);
@@ -368,9 +379,15 @@ mod tests {
 
         BwBackend::upsert_custom_field(&mut item, "project", "new", 0);
 
-        let fields = item.get("fields").and_then(|value| value.as_array()).unwrap();
+        let fields = item
+            .get("fields")
+            .and_then(|value| value.as_array())
+            .unwrap();
         assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].get("value").and_then(|value| value.as_str()), Some("new"));
+        assert_eq!(
+            fields[0].get("value").and_then(|value| value.as_str()),
+            Some("new")
+        );
     }
 }
 

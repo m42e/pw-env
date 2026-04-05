@@ -93,6 +93,15 @@ Value handling works like this:
 - `KEY=bw://[folder/]item/field` resolves through Bitwarden
 - `KEY=plaintext` is treated as plaintext and left as-is until migrated
 
+To keep a plaintext entry out of warnings and `pw-env migrate`, mark it with `no-migrate` either on the same line or on the comment line directly above it:
+
+```dotenv
+LOG_LEVEL=debug # no-migrate
+
+# no-migrate
+LOCAL_ONLY_TOKEN=dev-token
+```
+
 Warnings for plaintext secrets use a simple heuristic based on secret-like key names such as `API_KEY` or `PASSWORD`, embedded credentials in URLs, and high-entropy token-like values.
 
 For the GPG backend, empty keys are resolved from an encrypted env file such as `.env.gpg`.
@@ -270,7 +279,7 @@ Main subcommands:
 - `pw-env init <bash|zsh|fish>` prints shell hook code
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
 - `pw-env load [dir]` prints a human-readable resolution summary and export statements
-- `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from `.env`
+- `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from `.env`; entries marked with `no-migrate` are skipped
 - `pw-env check` checks available backends and active configuration
 - `pw-env approvals list` lists approved project-local override files and hashes
 - `pw-env approvals approve <path>` stores the current hash for a `.pw-env.toml` file or project directory after validating the file
@@ -296,9 +305,11 @@ pw-env migrate
 The tool will:
 
 - detect plaintext entries
-- prompt before storing each one
+- ignore entries marked with `# no-migrate` or a preceding `# no-migrate` comment
+- open a TUI multi-select with likely secrets preselected so you can choose exactly which entries to store
 - store `project` metadata using the Git root folder name and `migrated_from` metadata with the source directory path
 - verify the value was stored successfully
+- remember which remaining plaintext entries you reviewed so unchanged false positives are not suggested again later
 - rewrite `.env` with migrated keys cleared
 
 After migration, the file becomes:

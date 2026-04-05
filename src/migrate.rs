@@ -1,5 +1,7 @@
-use anyhow::Result;
-use std::io::{self, Write};
+use anyhow::{Context, Result};
+use dialoguer::{MultiSelect, theme::ColorfulTheme};
+use std::collections::BTreeSet;
+use std::io::IsTerminal;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -17,7 +19,7 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     let plaintext_entries = env_file.plaintext_entries();
 
     if plaintext_entries.is_empty() {
-        eprintln!("No plaintext values found in .env — nothing to migrate.");
+        eprintln!("No plaintext values found in .env that require migration.");
         return Ok(());
     }
 
@@ -50,10 +52,31 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     eprintln!();
 
     let backend_name = config.effective_backend(dir);
-    eprintln!(
-        "These will be stored in the '{}' backend.",
-        backend_name
-    );
+    eprintln!("These will be stored in the '{}' backend.", backend_name);
+
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        anyhow::bail!("pw-env migrate requires an interactive terminal to select entries");
+    }
+
+    let selected_indexes = prompt_for_entries(&plaintext_entries, backend_name)?;
+    if selected_indexes.is_empty() {
+        eprintln!("No entries selected for migration.");
+    }
+
+    let selected_fingerprints = plaintext_entries
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| selected_indexes.contains(index))
+        .filter_map(|(_, entry)| entry.review_fingerprint())
+        .collect::<Vec<_>>();
+    let skipped_fingerprints = plaintext_entries
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !selected_indexes.contains(index))
+        .filter_map(|(_, entry)| entry.review_fingerprint())
+        .collect::<Vec<_>>();
+
+    Config::forget_reviewed_migration_entries(&env_path, selected_fingerprints)?;
 
     let backend = backend::create_backend(backend_name)?;
     let project = resolve::detect_project_name(dir);
@@ -62,66 +85,54 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
         config,
         project: project.clone(),
     };
-    let resolve_ctx = ResolveContext { dir, config, project };
+    let resolve_ctx = ResolveContext {
+        dir,
+        config,
+        project,
+    };
     let mut migrated_keys: Vec<&str> = Vec::new();
 
-    for entry in &plaintext_entries {
-        eprint!(
-            "Store '{}' in {}? [y/N/q] ",
-            entry.key,
-            backend.name()
-        );
-        io::stderr().flush()?;
+    for (index, entry) in plaintext_entries.iter().enumerate() {
+        if !selected_indexes.contains(&index) {
+            eprintln!("  Kept in .env: {}", entry.key);
+            continue;
+        }
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let answer = input.trim().to_lowercase();
+        let value = strip_quotes(&entry.raw_value);
+        info!("Storing '{}' in {}", entry.key, backend.name());
 
-        match answer.as_str() {
-            "y" | "yes" => {
-                // Extract the actual value (strip quotes)
-                let value = strip_quotes(&entry.raw_value);
-                info!("Storing '{}' in {}", entry.key, backend.name());
-
-                match backend.store(&entry.key, &value, &store_ctx) {
-                    Ok(()) => {
-                        // Verify the value was stored
-                        match backend.has(&entry.key, &resolve_ctx) {
-                            Ok(true) => {
-                                eprintln!("  Stored and verified: {}", entry.key);
-                                migrated_keys.push(&entry.key);
-                            }
-                            Ok(false) => {
-                                warn!("Stored '{}' but verification failed — keeping in .env", entry.key);
-                                eprintln!(
-                                    "  Warning: stored '{}' but could not verify. Keeping in .env.",
-                                    entry.key
-                                );
-                            }
-                            Err(e) => {
-                                warn!("Verification error for '{}': {e}", entry.key);
-                                eprintln!(
-                                    "  Warning: verification error for '{}': {e}. Keeping in .env.",
-                                    entry.key
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to store '{}': {e}", entry.key);
-                        eprintln!("  Error storing '{}': {e}", entry.key);
-                    }
+        match backend.store(&entry.key, &value, &store_ctx) {
+            Ok(()) => match backend.has(&entry.key, &resolve_ctx) {
+                Ok(true) => {
+                    eprintln!("  Stored and verified: {}", entry.key);
+                    migrated_keys.push(&entry.key);
                 }
-            }
-            "q" | "quit" => {
-                eprintln!("Migration aborted.");
-                break;
-            }
-            _ => {
-                eprintln!("  Skipped: {}", entry.key);
+                Ok(false) => {
+                    warn!(
+                        "Stored '{}' but verification failed — keeping in .env",
+                        entry.key
+                    );
+                    eprintln!(
+                        "  Warning: stored '{}' but could not verify. Keeping in .env.",
+                        entry.key
+                    );
+                }
+                Err(e) => {
+                    warn!("Verification error for '{}': {e}", entry.key);
+                    eprintln!(
+                        "  Warning: verification error for '{}': {e}. Keeping in .env.",
+                        entry.key
+                    );
+                }
+            },
+            Err(e) => {
+                warn!("Failed to store '{}': {e}", entry.key);
+                eprintln!("  Error storing '{}': {e}", entry.key);
             }
         }
     }
+
+    Config::remember_reviewed_migration_entries(&env_path, skipped_fingerprints)?;
 
     if !migrated_keys.is_empty() {
         eprintln!();
@@ -130,10 +141,7 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
             migrated_keys.len()
         );
         env_file.rewrite_with_cleared_keys(&migrated_keys)?;
-        info!(
-            "Cleared {} migrated values from .env",
-            migrated_keys.len()
-        );
+        info!("Cleared {} migrated values from .env", migrated_keys.len());
         eprintln!("Done. Migrated values have been removed from .env.");
     }
 
@@ -156,4 +164,40 @@ fn strip_quotes(value: &str) -> String {
     } else {
         v.to_string()
     }
+}
+
+fn prompt_for_entries(
+    entries: &[&crate::env_file::EnvEntry],
+    backend_name: &str,
+) -> Result<BTreeSet<usize>> {
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let masked = mask_value(&entry.raw_value);
+            let label = if entry.is_likely_secret() {
+                " [likely secret]"
+            } else {
+                ""
+            };
+            format!("{} = {}{}", entry.key, masked, label)
+        })
+        .collect::<Vec<_>>();
+
+    let defaults = entries
+        .iter()
+        .map(|entry| entry.is_likely_secret())
+        .collect::<Vec<_>>();
+
+    let selected = MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "Select the plaintext entries to store in the '{}' backend",
+            backend_name
+        ))
+        .items(&items)
+        .defaults(&defaults)
+        .report(false)
+        .interact()
+        .context("Migration selection was interrupted")?;
+
+    Ok(selected.into_iter().collect())
 }

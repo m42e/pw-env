@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,8 @@ pub enum EntryKind {
 pub struct EnvEntry {
     pub key: String,
     pub raw_value: String,
+    pub trailing_comment: Option<String>,
+    pub no_migrate: bool,
     pub kind: EntryKind,
 }
 
@@ -58,19 +61,30 @@ impl EnvFile {
             .with_context(|| format!("Failed to open .env file: {}", path.display()))?;
         let reader = BufReader::new(file);
         let mut lines = Vec::new();
+        let mut pending_no_migrate = false;
 
         for line_result in reader.lines() {
             let line = line_result.context("Failed to read line from .env file")?;
             let trimmed = line.trim();
 
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+            if trimmed.is_empty() {
+                pending_no_migrate = false;
                 lines.push(EnvLine::Comment(line));
                 continue;
             }
 
-            if let Some((key, value)) = trimmed.split_once('=') {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
+            if trimmed.starts_with('#') {
+                pending_no_migrate = pending_no_migrate || comment_has_no_migrate_marker(trimmed);
+                lines.push(EnvLine::Comment(line));
+                continue;
+            }
+
+            if let Some((key, value, trailing_comment)) = parse_entry_line(&line) {
+                let no_migrate = pending_no_migrate
+                    || trailing_comment
+                        .as_deref()
+                        .is_some_and(comment_has_no_migrate_marker);
+                pending_no_migrate = false;
 
                 // Strip surrounding quotes for classification, but keep raw_value as-is
                 let unquoted = strip_quotes(&value);
@@ -79,9 +93,12 @@ impl EnvFile {
                 lines.push(EnvLine::Entry(EnvEntry {
                     key,
                     raw_value: value,
+                    trailing_comment,
+                    no_migrate,
                     kind,
                 }));
             } else {
+                pending_no_migrate = false;
                 // Lines without '=' are treated as comments/passthrough
                 lines.push(EnvLine::Comment(line));
             }
@@ -108,7 +125,7 @@ impl EnvFile {
     pub fn plaintext_entries(&self) -> Vec<&EnvEntry> {
         self.entries()
             .into_iter()
-            .filter(|e| matches!(e.kind, EntryKind::Plaintext(_)))
+            .filter(|e| matches!(e.kind, EntryKind::Plaintext(_)) && !e.no_migrate)
             .collect()
     }
 
@@ -116,7 +133,27 @@ impl EnvFile {
     pub fn likely_secret_entries(&self) -> Vec<&EnvEntry> {
         self.entries()
             .into_iter()
-            .filter(|e| e.is_likely_secret())
+            .filter(|e| e.is_likely_secret() && !e.no_migrate)
+            .collect()
+    }
+
+    pub fn likely_secret_entries_unreviewed<'a>(
+        &'a self,
+        reviewed_fingerprints: &std::collections::BTreeSet<String>,
+    ) -> Vec<&'a EnvEntry> {
+        self.entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.is_likely_secret()
+                    && !entry.no_migrate
+                    && match &entry.kind {
+                        EntryKind::Plaintext(value) => {
+                            let fingerprint = review_fingerprint(&entry.key, value);
+                            !reviewed_fingerprints.contains(&fingerprint)
+                        }
+                        _ => true,
+                    }
+            })
             .collect()
     }
 
@@ -141,9 +178,19 @@ impl EnvFile {
                 EnvLine::Entry(entry) => {
                     if keys_to_clear.contains(&entry.key.as_str()) {
                         // Write key with empty value
-                        output.push_str(&format!("{}=\n", entry.key));
+                        output.push_str(&format_entry_line(
+                            &entry.key,
+                            "",
+                            entry.trailing_comment.as_deref(),
+                        ));
+                        output.push('\n');
                     } else {
-                        output.push_str(&format!("{}={}\n", entry.key, entry.raw_value));
+                        output.push_str(&format_entry_line(
+                            &entry.key,
+                            &entry.raw_value,
+                            entry.trailing_comment.as_deref(),
+                        ));
+                        output.push('\n');
                     }
                 }
             }
@@ -153,7 +200,6 @@ impl EnvFile {
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())
     }
-
 }
 
 impl EnvEntry {
@@ -163,6 +209,58 @@ impl EnvEntry {
             _ => false,
         }
     }
+
+    pub fn review_fingerprint(&self) -> Option<String> {
+        match &self.kind {
+            EntryKind::Plaintext(value) => Some(review_fingerprint(&self.key, value)),
+            _ => None,
+        }
+    }
+}
+
+fn parse_entry_line(line: &str) -> Option<(String, String, Option<String>)> {
+    let trimmed = line.trim();
+    let (key, raw_value) = trimmed.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    let (value, trailing_comment) = split_value_and_comment(raw_value);
+    Some((key.to_string(), value.trim().to_string(), trailing_comment))
+}
+
+fn split_value_and_comment(value: &str) -> (String, Option<String>) {
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '#' if !in_single_quotes && !in_double_quotes => {
+                let raw_value = value[..index].trim_end().to_string();
+                let comment = value[index..].trim_start().to_string();
+                return (raw_value, Some(comment));
+            }
+            _ => {}
+        }
+    }
+
+    (value.to_string(), None)
+}
+
+fn comment_has_no_migrate_marker(comment: &str) -> bool {
+    comment.to_ascii_lowercase().contains("no-migrate")
+}
+
+fn format_entry_line(key: &str, raw_value: &str, trailing_comment: Option<&str>) -> String {
+    let mut line = format!("{key}={raw_value}");
+    if let Some(comment) = trailing_comment {
+        line.push(' ');
+        line.push_str(comment);
+    }
+    line
 }
 
 fn strip_quotes(value: &str) -> String {
@@ -284,9 +382,10 @@ fn looks_like_high_entropy_secret(value: &str) -> bool {
         return false;
     }
 
-    if !trimmed.chars().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '/' | '+' | '=' | '-' | '_' | '.')
-    }) {
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '+' | '=' | '-' | '_' | '.'))
+    {
         return false;
     }
 
@@ -310,6 +409,14 @@ fn shannon_entropy(value: &str) -> f64 {
         .sum()
 }
 
+fn review_fingerprint(key: &str, value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    hasher.update([0]);
+    hasher.update(value.trim().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,19 +429,13 @@ mod tests {
     #[test]
     fn test_classify_op_reference() {
         let val = "op://Private/MyApp/api-key";
-        assert_eq!(
-            classify_value(val),
-            EntryKind::OpReference(val.to_string())
-        );
+        assert_eq!(classify_value(val), EntryKind::OpReference(val.to_string()));
     }
 
     #[test]
     fn test_classify_bw_reference() {
         let val = "bw://env-secrets/myapp/password";
-        assert_eq!(
-            classify_value(val),
-            EntryKind::BwReference(val.to_string())
-        );
+        assert_eq!(classify_value(val), EntryKind::BwReference(val.to_string()));
     }
 
     #[test]
@@ -358,6 +459,8 @@ mod tests {
         let entry = EnvEntry {
             key: "API_KEY".to_string(),
             raw_value: "dev-value".to_string(),
+            trailing_comment: None,
+            no_migrate: false,
             kind: EntryKind::Plaintext("dev-value".to_string()),
         };
 
@@ -369,6 +472,8 @@ mod tests {
         let entry = EnvEntry {
             key: "SESSION".to_string(),
             raw_value: "Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string(),
+            trailing_comment: None,
+            no_migrate: false,
             kind: EntryKind::Plaintext("Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string()),
         };
 
@@ -380,6 +485,8 @@ mod tests {
         let entry = EnvEntry {
             key: "DATABASE_URL".to_string(),
             raw_value: "postgres://app:s3cr3t@db.internal/app".to_string(),
+            trailing_comment: None,
+            no_migrate: false,
             kind: EntryKind::Plaintext("postgres://app:s3cr3t@db.internal/app".to_string()),
         };
 
@@ -391,6 +498,8 @@ mod tests {
         let entry = EnvEntry {
             key: "LOG_LEVEL".to_string(),
             raw_value: "debug".to_string(),
+            trailing_comment: None,
+            no_migrate: false,
             kind: EntryKind::Plaintext("debug".to_string()),
         };
 
@@ -405,11 +514,15 @@ mod tests {
                 EnvLine::Entry(EnvEntry {
                     key: "API_KEY".to_string(),
                     raw_value: "dev-value".to_string(),
+                    trailing_comment: None,
+                    no_migrate: false,
                     kind: EntryKind::Plaintext("dev-value".to_string()),
                 }),
                 EnvLine::Entry(EnvEntry {
                     key: "LOG_LEVEL".to_string(),
                     raw_value: "debug".to_string(),
+                    trailing_comment: None,
+                    no_migrate: false,
                     kind: EntryKind::Plaintext("debug".to_string()),
                 }),
             ],
@@ -422,5 +535,116 @@ mod tests {
             .collect();
 
         assert_eq!(detected, vec!["API_KEY"]);
+    }
+
+    #[test]
+    fn test_filters_reviewed_likely_secret_entries() {
+        let env_file = EnvFile {
+            path: PathBuf::from(".env"),
+            lines: vec![
+                EnvLine::Entry(EnvEntry {
+                    key: "API_KEY".to_string(),
+                    raw_value: "dev-value".to_string(),
+                    trailing_comment: None,
+                    no_migrate: false,
+                    kind: EntryKind::Plaintext("dev-value".to_string()),
+                }),
+                EnvLine::Entry(EnvEntry {
+                    key: "SESSION".to_string(),
+                    raw_value: "Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string(),
+                    trailing_comment: None,
+                    no_migrate: false,
+                    kind: EntryKind::Plaintext("Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string()),
+                }),
+            ],
+        };
+
+        let reviewed = std::collections::BTreeSet::from([match &env_file.lines[0] {
+            EnvLine::Entry(entry) => entry.review_fingerprint().unwrap(),
+            EnvLine::Comment(_) => panic!("expected env entry"),
+        }]);
+
+        let detected: Vec<&str> = env_file
+            .likely_secret_entries_unreviewed(&reviewed)
+            .into_iter()
+            .map(|entry| entry.key.as_str())
+            .collect();
+
+        assert_eq!(detected, vec!["SESSION"]);
+    }
+
+    #[test]
+    fn test_parse_entry_line_splits_inline_comment() {
+        let (key, value, trailing_comment) =
+            parse_entry_line("API_KEY=secret-value # no-migrate").expect("entry should parse");
+
+        assert_eq!(key, "API_KEY");
+        assert_eq!(value, "secret-value");
+        assert_eq!(trailing_comment.as_deref(), Some("# no-migrate"));
+    }
+
+    #[test]
+    fn test_parse_entry_line_keeps_hash_inside_quotes() {
+        let (_, value, trailing_comment) =
+            parse_entry_line("API_KEY=\"secret#value\" # no-migrate").expect("entry should parse");
+
+        assert_eq!(value, "\"secret#value\"");
+        assert_eq!(trailing_comment.as_deref(), Some("# no-migrate"));
+    }
+
+    #[test]
+    fn test_preceding_no_migrate_comment_marks_next_entry_only() {
+        let path = write_test_env("# no-migrate\nAPI_KEY=secret-value\nOTHER_KEY=second-value\n");
+        let env_file = EnvFile::parse(&path).expect("parse should succeed");
+        std::fs::remove_file(&path).expect("temp file should be removable");
+
+        let entries = env_file.entries();
+        assert!(entries[0].no_migrate);
+        assert!(!entries[1].no_migrate);
+
+        let plaintext_keys: Vec<&str> = env_file
+            .plaintext_entries()
+            .into_iter()
+            .map(|entry| entry.key.as_str())
+            .collect();
+        assert_eq!(plaintext_keys, vec!["OTHER_KEY"]);
+    }
+
+    #[test]
+    fn test_blank_line_clears_pending_no_migrate_marker() {
+        let path = write_test_env("# no-migrate\n\nAPI_KEY=secret-value\n");
+        let env_file = EnvFile::parse(&path).expect("parse should succeed");
+        std::fs::remove_file(&path).expect("temp file should be removable");
+
+        let entry = env_file.entries()[0];
+        assert!(!entry.no_migrate);
+    }
+
+    #[test]
+    fn test_rewrite_preserves_inline_comments() {
+        let path = write_test_env("KEEP_ME=value # no-migrate\nCLEAR_ME=secret\n");
+        let env_file = EnvFile::parse(&path).expect("parse should succeed");
+        env_file
+            .rewrite_with_cleared_keys(&["CLEAR_ME"])
+            .expect("rewrite should succeed");
+
+        let rewritten = std::fs::read_to_string(&path).expect("rewritten file should be readable");
+        std::fs::remove_file(&path).expect("temp file should be removable");
+
+        assert_eq!(rewritten, "KEEP_ME=value # no-migrate\nCLEAR_ME=\n");
+    }
+
+    fn write_test_env(contents: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("pw-env-test-{}-{}.env", std::process::id(), unique));
+
+        std::fs::write(&path, contents).expect("temp env file should be writable");
+        path
     }
 }

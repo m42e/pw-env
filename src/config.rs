@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -169,11 +169,19 @@ struct ApprovedProjectConfigs {
     approved_hashes: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ReviewedMigrations {
+    #[serde(default)]
+    reviewed_entry_fingerprints: BTreeMap<String, BTreeSet<String>>,
+}
+
 impl Config {
     pub fn config_path() -> PathBuf {
         // Prefer XDG_CONFIG_HOME, then ~/.config (Unix convention for CLI tools)
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg).join("pw-manager-env").join("config.toml");
+            return PathBuf::from(xdg)
+                .join("pw-manager-env")
+                .join("config.toml");
         }
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("~"))
@@ -205,7 +213,9 @@ impl Config {
         let mut config = Self::load()?;
 
         if let Some((project_dir, override_path)) = Self::project_override_file(dir) {
-            if let Some(local_override) = ProjectDirectoryOverride::load_if_approved(&override_path)? {
+            if let Some(local_override) =
+                ProjectDirectoryOverride::load_if_approved(&override_path)?
+            {
                 config.projects.push(ProjectOverride {
                     path: project_dir.to_string_lossy().into_owned(),
                     backend: local_override.backend,
@@ -242,7 +252,9 @@ impl Config {
         };
 
         Ok(ProjectOverrideApprovalStatus {
-            approved_hash: approvals.approved_hash(&override_path).map(ToOwned::to_owned),
+            approved_hash: approvals
+                .approved_hash(&override_path)
+                .map(ToOwned::to_owned),
             override_path,
             current_hash,
         })
@@ -271,6 +283,28 @@ impl Config {
             approvals.save()?;
         }
         Ok(removed)
+    }
+
+    pub fn reviewed_migration_entry_fingerprints(env_path: &Path) -> Result<BTreeSet<String>> {
+        Ok(ReviewedMigrations::load()?.fingerprints(env_path))
+    }
+
+    pub fn remember_reviewed_migration_entries(
+        env_path: &Path,
+        fingerprints: impl IntoIterator<Item = String>,
+    ) -> Result<()> {
+        let mut reviewed = ReviewedMigrations::load()?;
+        reviewed.remember(env_path, fingerprints);
+        reviewed.save()
+    }
+
+    pub fn forget_reviewed_migration_entries(
+        env_path: &Path,
+        fingerprints: impl IntoIterator<Item = String>,
+    ) -> Result<()> {
+        let mut reviewed = ReviewedMigrations::load()?;
+        reviewed.forget(env_path, fingerprints);
+        reviewed.save()
     }
 
     /// Find a project override matching the given directory (exact match or parent match).
@@ -440,12 +474,13 @@ impl ApprovedProjectConfigs {
 
     fn save_to_path(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory {}", parent.display())
+            })?;
         }
 
-        let contents = serde_json::to_string_pretty(self)
-            .context("Failed to serialize approval store")?;
+        let contents =
+            serde_json::to_string_pretty(self).context("Failed to serialize approval store")?;
         std::fs::write(path, contents)
             .with_context(|| format!("Failed to write approval store to {}", path.display()))
     }
@@ -475,9 +510,100 @@ impl ApprovedProjectConfigs {
     }
 
     fn path() -> Option<PathBuf> {
+        dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
+            dir.join("pw-manager-env")
+                .join("approved-project-configs.json")
+        })
+    }
+}
+
+impl ReviewedMigrations {
+    fn load() -> Result<Self> {
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "Failed to read reviewed migration store from {}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&contents).with_context(|| {
+            format!(
+                "Failed to parse reviewed migration store from {}",
+                path.display()
+            )
+        })
+    }
+
+    fn save(&self) -> Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+
+        self.save_to_path(&path)
+    }
+
+    fn save_to_path(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory {}", parent.display())
+            })?;
+        }
+
+        let contents = serde_json::to_string_pretty(self)
+            .context("Failed to serialize reviewed migration store")?;
+        std::fs::write(path, contents).with_context(|| {
+            format!(
+                "Failed to write reviewed migration store to {}",
+                path.display()
+            )
+        })
+    }
+
+    fn remember(&mut self, env_path: &Path, fingerprints: impl IntoIterator<Item = String>) {
+        let entry = self
+            .reviewed_entry_fingerprints
+            .entry(normalize_path(env_path))
+            .or_default();
+        entry.extend(fingerprints);
+    }
+
+    fn forget(&mut self, env_path: &Path, fingerprints: impl IntoIterator<Item = String>) {
+        let normalized_path = normalize_path(env_path);
+        let Some(entry) = self.reviewed_entry_fingerprints.get_mut(&normalized_path) else {
+            return;
+        };
+
+        for fingerprint in fingerprints {
+            entry.remove(&fingerprint);
+        }
+
+        if entry.is_empty() {
+            self.reviewed_entry_fingerprints.remove(&normalized_path);
+        }
+    }
+
+    fn fingerprints(&self, env_path: &Path) -> BTreeSet<String> {
+        self.reviewed_entry_fingerprints
+            .get(&normalize_path(env_path))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn path() -> Option<PathBuf> {
         dirs::state_dir()
             .or_else(dirs::data_local_dir)
-            .map(|dir| dir.join("pw-manager-env").join("approved-project-configs.json"))
+            .map(|dir| dir.join("pw-manager-env").join("reviewed-migrations.json"))
     }
 }
 
@@ -499,12 +625,13 @@ fn normalize_path(path: &Path) -> String {
 
 fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
     let candidate = if path.is_dir() {
-        Config::project_override_path(path)
-            .ok_or_else(|| anyhow::anyhow!(
+        Config::project_override_path(path).ok_or_else(|| {
+            anyhow::anyhow!(
                 "No {} file found for {}",
                 PROJECT_OVERRIDE_FILE_NAME,
                 path.display()
-            ))?
+            )
+        })?
     } else {
         path.to_path_buf()
     };
@@ -664,7 +791,10 @@ vault = "Work"
         let local_override: ProjectDirectoryOverride = toml::from_str(toml_str).unwrap();
         assert_eq!(local_override.backend.as_deref(), Some("op"));
         assert_eq!(local_override.item.as_deref(), Some("service-a-env"));
-        assert_eq!(local_override.op.and_then(|op| op.vault), Some("Work".to_string()));
+        assert_eq!(
+            local_override.op.and_then(|op| op.vault),
+            Some("Work".to_string())
+        );
     }
 
     #[test]
@@ -682,7 +812,10 @@ vault = "Work"
         approvals.save_to_path(&store_path).unwrap();
 
         let loaded = ApprovedProjectConfigs::load_from_path(&store_path).unwrap();
-        assert_eq!(loaded.approved_hash(&override_path), Some(approved_hash.as_str()));
+        assert_eq!(
+            loaded.approved_hash(&override_path),
+            Some(approved_hash.as_str())
+        );
         assert_eq!(loaded.entries().len(), 1);
 
         let mut loaded = loaded;
@@ -701,7 +834,36 @@ vault = "Work"
 
         let parsed = validate_project_override(&override_path).unwrap();
         assert_eq!(parsed.backend.as_deref(), Some("op"));
-        assert_eq!(parsed.op.and_then(|config| config.vault), Some("Work".to_string()));
+        assert_eq!(
+            parsed.op.and_then(|config| config.vault),
+            Some("Work".to_string())
+        );
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_reviewed_migrations_round_trip_and_forget() {
+        let test_dir = unique_test_dir("reviewed-migrations");
+        let env_path = test_dir.join(".env");
+        let store_path = test_dir.join("reviewed-migrations.json");
+
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(&env_path, "API_KEY=value\n").unwrap();
+
+        let mut reviewed = ReviewedMigrations::default();
+        reviewed.remember(&env_path, ["fp-1".to_string(), "fp-2".to_string()]);
+        reviewed.save_to_path(&store_path).unwrap();
+
+        let loaded = ReviewedMigrations::load_from_path(&store_path).unwrap();
+        assert_eq!(
+            loaded.fingerprints(&env_path),
+            BTreeSet::from(["fp-1".to_string(), "fp-2".to_string()])
+        );
+
+        let mut loaded = loaded;
+        loaded.forget(&env_path, ["fp-1".to_string(), "fp-2".to_string()]);
+        assert!(loaded.fingerprints(&env_path).is_empty());
 
         let _ = fs::remove_dir_all(&test_dir);
     }

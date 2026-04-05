@@ -76,18 +76,12 @@ mod tests {
 
     #[test]
     fn test_shell_escape_with_spaces() {
-        assert_eq!(
-            shell_escape_single_quote("hello world"),
-            "hello world"
-        );
+        assert_eq!(shell_escape_single_quote("hello world"), "hello world");
     }
 
     #[test]
     fn test_shell_escape_with_double_quotes() {
-        assert_eq!(
-            shell_escape_single_quote("say \"hello\""),
-            "say \"hello\""
-        );
+        assert_eq!(shell_escape_single_quote("say \"hello\""), "say \"hello\"");
     }
 
     #[test]

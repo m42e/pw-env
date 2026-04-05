@@ -4,9 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing::debug;
 
-use super::{
-    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext,
-};
+use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
 
 pub struct GpgBackend;
 
@@ -106,10 +104,7 @@ impl GpgBackend {
     fn load_all(ctx: &ResolveContext) -> Result<HashMap<String, String>> {
         let path = Self::gpg_file_path(ctx.dir, ctx.config);
         if !path.exists() {
-            bail!(
-                "GPG encrypted file not found: {}",
-                path.display()
-            );
+            bail!("GPG encrypted file not found: {}", path.display());
         }
         let content = Self::decrypt_file(&path)?;
         Ok(Self::parse_env_content(&content))
@@ -118,10 +113,7 @@ impl GpgBackend {
     fn load_all_stored_secrets(ctx: &ResolveContext) -> Result<BTreeMap<String, StoredSecret>> {
         let path = Self::gpg_file_path(ctx.dir, ctx.config);
         if !path.exists() {
-            bail!(
-                "GPG encrypted file not found: {}",
-                path.display()
-            );
+            bail!("GPG encrypted file not found: {}", path.display());
         }
         let content = Self::decrypt_file(&path)?;
         Ok(Self::parse_stored_secrets(&content))
@@ -135,7 +127,10 @@ impl GpgBackend {
                 content.push('\n');
             }
             if let Some(migrated_from) = secret.migrated_from.as_deref() {
-                content.push_str(&Self::metadata_comment(MIGRATED_FROM_FIELD_NAME, migrated_from));
+                content.push_str(&Self::metadata_comment(
+                    MIGRATED_FROM_FIELD_NAME,
+                    migrated_from,
+                ));
                 content.push('\n');
             }
             content.push_str(&format!("{key}={}\n", secret.value));
@@ -144,11 +139,7 @@ impl GpgBackend {
     }
 
     /// Encrypt content and write to the GPG file.
-    fn encrypt_to_file(
-        content: &str,
-        path: &PathBuf,
-        recipient: &str,
-    ) -> Result<()> {
+    fn encrypt_to_file(content: &str, path: &PathBuf, recipient: &str) -> Result<()> {
         debug!("Encrypting content to GPG file: {}", path.display());
         let mut cmd = Command::new("gpg");
         cmd.args([
@@ -164,7 +155,9 @@ impl GpgBackend {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().context("Failed to execute `gpg` for encryption")?;
+        let mut child = cmd
+            .spawn()
+            .context("Failed to execute `gpg` for encryption")?;
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
             stdin.write_all(content.as_bytes())?;
@@ -276,7 +269,10 @@ PLAIN=value
 
         let stored = GpgBackend::parse_stored_secrets(content);
 
-        assert_eq!(stored.get("API_KEY").unwrap().project.as_deref(), Some("service-a"));
+        assert_eq!(
+            stored.get("API_KEY").unwrap().project.as_deref(),
+            Some("service-a")
+        );
         assert_eq!(
             stored.get("API_KEY").unwrap().migrated_from.as_deref(),
             Some("/tmp/work/service-a")

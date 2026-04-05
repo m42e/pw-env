@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+dialoguer = "0.12"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
