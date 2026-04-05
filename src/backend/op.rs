@@ -1,0 +1,206 @@
+use anyhow::{Context, Result, bail};
+use std::process::Command;
+use tracing::{debug, info, warn};
+
+use super::{Backend, ResolveContext, StoreContext};
+
+pub struct OpBackend;
+
+impl OpBackend {
+    /// Run `op` with the given arguments, optionally scoped to an account.
+    fn run_op(args: &[&str], account: Option<&str>) -> Result<String> {
+        let mut cmd = Command::new("op");
+        cmd.args(args);
+        if let Some(acct) = account {
+            cmd.arg("--account").arg(acct);
+        }
+        // Ensure no interactive prompts corrupt our stdout
+        cmd.stdin(std::process::Stdio::null());
+        debug!("Running: op {}", args.join(" "));
+        let output = cmd.output().context("Failed to execute `op` CLI. Is 1Password CLI installed?")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("op command failed: {stderr}");
+        }
+        let stdout = String::from_utf8(output.stdout)
+            .context("op output was not valid UTF-8")?;
+        Ok(stdout.trim().to_string())
+    }
+
+    /// Resolve a key when multiple items share the same name, by checking
+    /// the "project" custom field on each candidate item.
+    fn resolve_by_project(
+        key: &str,
+        project: &str,
+        vault: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<String> {
+        // List all items (optionally filtered by vault) as JSON
+        let mut args = vec!["item", "list", "--format=json"];
+        let vault_arg;
+        if let Some(v) = vault {
+            vault_arg = format!("--vault={v}");
+            args.push(&vault_arg);
+        }
+        let list_json = Self::run_op(&args, account)?;
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&list_json).context("Failed to parse op item list JSON")?;
+
+        // Filter by items whose title matches the key
+        let matching: Vec<&serde_json::Value> = items
+            .iter()
+            .filter(|item| item.get("title").and_then(|t| t.as_str()) == Some(key))
+            .collect();
+
+        if matching.is_empty() {
+            bail!("No 1Password items found with title '{key}'");
+        }
+
+        if matching.len() == 1 {
+            let id = matching[0]
+                .get("id")
+                .and_then(|i| i.as_str())
+                .ok_or_else(|| anyhow::anyhow!("1Password item missing id"))?;
+            return Self::run_op(&["item", "get", id, "--fields", "label=password"], account);
+        }
+
+        // Multiple matches — check each item's "project" field
+        info!(
+            "Found {} items named '{key}', disambiguating by project '{project}'",
+            matching.len()
+        );
+        for item_summary in &matching {
+            let id = item_summary
+                .get("id")
+                .and_then(|i| i.as_str())
+                .ok_or_else(|| anyhow::anyhow!("1Password item missing id"))?;
+            let full_json = Self::run_op(&["item", "get", id, "--format=json"], account)?;
+            let full_item: serde_json::Value = serde_json::from_str(&full_json)
+                .context("Failed to parse op item get JSON")?;
+
+            if let Some(fields) = full_item.get("fields").and_then(|f| f.as_array()) {
+                for field in fields {
+                    let label = field.get("label").and_then(|l| l.as_str());
+                    if label == Some("project") || label == Some("Project") {
+                        if field.get("value").and_then(|v| v.as_str()) == Some(project) {
+                            debug!("Matched item '{id}' by project field '{project}'");
+                            return Self::run_op(
+                                &["item", "get", id, "--fields", "label=password"],
+                                account,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        bail!(
+            "Multiple 1Password items found for '{key}' but none have a 'project' field matching '{project}'"
+        );
+    }
+}
+
+impl Backend for OpBackend {
+    fn resolve(&self, key: &str, reference: Option<&str>, ctx: &ResolveContext) -> Result<String> {
+        let op_config = ctx.config.effective_op(ctx.dir);
+        let account = op_config.account.as_deref();
+
+        if let Some(ref_str) = reference {
+            // Direct op:// reference
+            if ref_str.starts_with("op://") {
+                debug!("Resolving 1Password reference: {ref_str}");
+                return Self::run_op(&["read", ref_str], account);
+            }
+        }
+
+        // Key-based lookup: look up as a field on the configured item, or as an item name
+        if let Some(item) = ctx.config.effective_item(ctx.dir) {
+            debug!("Resolving key '{key}' as field on item '{item}'");
+            let label_arg = format!("label={key}");
+            let mut args = vec!["item", "get", item, "--fields", label_arg.as_str()];
+            let vault_arg;
+            if let Some(ref vault) = op_config.vault {
+                vault_arg = format!("--vault={vault}");
+                args.push(&vault_arg);
+            }
+            Self::run_op(&args, account)
+        } else if let Some(ref vault) = op_config.vault {
+            // Search for an item named after the key in the configured vault
+            debug!("Resolving key '{key}' as item in vault '{vault}'");
+            let vault_arg = format!("--vault={vault}");
+            let result = Self::run_op(
+                &["item", "get", key, "--fields", "label=password", &vault_arg],
+                account,
+            );
+            match result {
+                Ok(value) => Ok(value),
+                Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
+                    if let Some(ref project) = ctx.project {
+                        debug!("Multiple items match '{key}', disambiguating by project '{project}'");
+                        Self::resolve_by_project(key, project, Some(vault), account)
+                    } else {
+                        Err(e)
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            debug!("Resolving key '{key}' as item (no vault configured)");
+            let result = Self::run_op(&["item", "get", key, "--fields", "label=password"], account);
+            match result {
+                Ok(value) => Ok(value),
+                Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
+                    if let Some(ref project) = ctx.project {
+                        debug!("Multiple items match '{key}', disambiguating by project '{project}'");
+                        Self::resolve_by_project(key, project, None, account)
+                    } else {
+                        Err(e)
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()> {
+        let op_config = ctx.config.effective_op(ctx.dir);
+        let account = op_config.account.as_deref();
+
+        if let Some(item) = ctx.config.effective_item(ctx.dir) {
+            // Try to edit the existing item first, adding/updating the field
+            debug!("Storing key '{key}' as field on item '{item}'");
+            let field_assignment = format!("{key}={value}");
+            let result = Self::run_op(&["item", "edit", item, &field_assignment], account);
+            if result.is_ok() {
+                return Ok(());
+            }
+            warn!("Failed to edit item '{item}', trying to create new item");
+        }
+
+        // Create a new item with the key as the item name
+        let vault_args: Vec<String> = op_config
+            .vault
+            .as_ref()
+            .map(|v| vec![format!("--vault={v}")])
+            .unwrap_or_default();
+        let vault_refs: Vec<&str> = vault_args.iter().map(|s| s.as_str()).collect();
+
+        let field_assignment = format!("password={value}");
+        let title_arg = format!("--title={key}");
+        let mut args = vec!["item", "create", "--category=login", title_arg.as_str(), field_assignment.as_str()];
+        args.extend_from_slice(&vault_refs);
+        Self::run_op(&args, account)?;
+        Ok(())
+    }
+
+    fn has(&self, key: &str, ctx: &ResolveContext) -> Result<bool> {
+        match self.resolve(key, None, ctx) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "1Password"
+    }
+}
