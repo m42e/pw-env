@@ -27,6 +27,48 @@ pub fn detect_project_name(dir: &Path) -> Option<String> {
         .or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
 }
 
+fn format_credential_fetch_audit(
+    env_path: &Path,
+    dir: &Path,
+    project: Option<&str>,
+    backend: &str,
+    key: &str,
+) -> String {
+    let project_root = find_git_root(dir).unwrap_or_else(|| dir.to_path_buf());
+    let project_name = project
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            project_root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    format!(
+        "AUDIT credential_fetch project={} project_root={} folder={} env_file={} backend={} key={}",
+        project_name,
+        project_root.display(),
+        dir.display(),
+        env_path.display(),
+        backend,
+        key
+    )
+}
+
+fn log_credential_fetch_audit(
+    env_path: &Path,
+    dir: &Path,
+    project: Option<&str>,
+    backend: &str,
+    key: &str,
+) {
+    info!(
+        "{}",
+        format_credential_fetch_audit(env_path, dir, project, backend, key)
+    );
+}
+
 /// Resolve all entries from an .env file to their secret values.
 /// Returns a map of KEY -> resolved_value.
 pub fn resolve_env_file(
@@ -84,6 +126,13 @@ pub fn resolve_env_file(
             match backend.resolve(&entry.key, reference, &ctx) {
                 Ok(value) => {
                     info!("Resolved {} via 1Password", entry.key);
+                    log_credential_fetch_audit(
+                        &env_file.path,
+                        dir,
+                        project.as_deref(),
+                        backend.name(),
+                        &entry.key,
+                    );
                     resolved.insert(entry.key.clone(), value);
                 }
                 Err(e) => {
@@ -109,6 +158,13 @@ pub fn resolve_env_file(
             match backend.resolve(&entry.key, reference, &ctx) {
                 Ok(value) => {
                     info!("Resolved {} via Bitwarden", entry.key);
+                    log_credential_fetch_audit(
+                        &env_file.path,
+                        dir,
+                        project.as_deref(),
+                        backend.name(),
+                        &entry.key,
+                    );
                     resolved.insert(entry.key.clone(), value);
                 }
                 Err(e) => {
@@ -132,6 +188,13 @@ pub fn resolve_env_file(
                     for entry in &default_entries {
                         if let Some(value) = all_values.get(&entry.key) {
                             info!("Resolved {} via GPG", entry.key);
+                            log_credential_fetch_audit(
+                                &env_file.path,
+                                dir,
+                                project.as_deref(),
+                                "GPG",
+                                &entry.key,
+                            );
                             resolved.insert(entry.key.clone(), value.clone());
                         } else {
                             warn!("Key '{}' not found in GPG encrypted file", entry.key);
@@ -153,6 +216,13 @@ pub fn resolve_env_file(
                 match backend.resolve(&entry.key, None, &ctx) {
                     Ok(value) => {
                         info!("Resolved {} via {}", entry.key, backend.name());
+                        log_credential_fetch_audit(
+                            &env_file.path,
+                            dir,
+                            project.as_deref(),
+                            backend.name(),
+                            &entry.key,
+                        );
                         resolved.insert(entry.key.clone(), value);
                     }
                     Err(e) => {
@@ -168,4 +238,46 @@ pub fn resolve_env_file(
     }
 
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_credential_fetch_audit;
+    use std::fs;
+
+    #[test]
+    fn formats_audit_log_with_folder_and_env_file() {
+        let unique = format!(
+            "pw-env-audit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("current time should be after unix epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let dir = root.join("service");
+        let env_path = dir.join(".env");
+
+        fs::create_dir_all(root.join(".git")).expect("should create git root marker");
+        fs::create_dir_all(&dir).expect("should create working directory");
+
+        let line = format_credential_fetch_audit(
+            &env_path,
+            &dir,
+            Some("pw-manager-env-rs"),
+            "1Password",
+            "DATABASE_URL",
+        );
+
+        assert!(line.contains("AUDIT credential_fetch"));
+        assert!(line.contains("project=pw-manager-env-rs"));
+        assert!(line.contains(&format!("project_root={}", root.display())));
+        assert!(line.contains(&format!("folder={}", dir.display())));
+        assert!(line.contains(&format!("env_file={}", env_path.display())));
+        assert!(line.contains("backend=1Password"));
+        assert!(line.contains("key=DATABASE_URL"));
+
+        fs::remove_dir_all(&root).expect("should clean up temp directories");
+    }
 }

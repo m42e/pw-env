@@ -601,6 +601,7 @@ file_pattern = ".env.gpg"
 # Log level: trace, debug, info, warn, error
 level = "info"
 # Log file path (optional, defaults to ~/.local/state/pw-manager-env/pw-env.log)
+# Successful credential fetches are also written here as AUDIT lines without secret values.
 # file = "~/.local/state/pw-manager-env/pw-env.log"
 
 [updates]

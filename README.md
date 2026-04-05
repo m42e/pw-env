@@ -227,6 +227,12 @@ Top-level sections:
 - `[updates]` configures automatic release checks
 - `[[projects]]` defines per-path overrides
 
+Audit logging for credential fetches:
+
+- Successful secret resolutions are written to the normal pw-env log file as `AUDIT credential_fetch ...` lines
+- Audit entries include the detected project, project root, working folder, `.env` path, backend, and credential key name
+- Secret values are never written to the audit log
+
 Automatic release checks:
 
 - Run on interactive commands except `pw-env export`
