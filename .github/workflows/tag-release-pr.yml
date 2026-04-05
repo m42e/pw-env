@@ -1,0 +1,59 @@
+name: Tag Release PR
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    name: Tag merged release
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      startsWith(github.event.pull_request.head.ref, 'release/v') &&
+      contains(github.event.pull_request.labels.*.name, 'release')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify branch name matches version
+        run: |
+          branch="${{ github.event.pull_request.head.ref }}"
+          expected="release/v${{ steps.version.outputs.version }}"
+          if [ "$branch" != "$expected" ]; then
+            echo "::error::Branch $branch does not match expected $expected"
+            exit 1
+          fi
+
+      - name: Verify tag does not exist
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists"
+            exit 1
+          fi
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Dispatch release workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release.yml --field tag="${{ steps.version.outputs.tag }}"

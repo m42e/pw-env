@@ -1,0 +1,83 @@
+name: Prepare Release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v (e.g. 1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    name: Prepare release v${{ inputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version format
+        run: |
+          if ! echo "${{ inputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Version must be in semver format (e.g. 1.2.3)"
+            exit 1
+          fi
+
+      - name: Check tag does not exist
+        run: |
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ inputs.version }} already exists"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install git-cliff
+        uses: kenji-miyake/setup-git-cliff@v2
+
+      - name: Update version in Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
+          cargo check --quiet 2>/dev/null || cargo update -p pw-manager-env-rs
+
+      - name: Generate release notes
+        run: |
+          mkdir -p release-notes
+          git-cliff --config .github/cliff.toml --tag "v${{ inputs.version }}" --unreleased --strip header \
+            -o "release-notes/v${{ inputs.version }}.md"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes/v${{ inputs.version }}.md
+
+      - name: Create release branch and open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch="release/v${{ inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add Cargo.toml Cargo.lock release-notes/
+          git commit -m "chore: prepare release v${{ inputs.version }}"
+          git push origin "$branch"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Release v${{ inputs.version }}" \
+            --body "Automated release preparation for **v${{ inputs.version }}**.
+
+          ## Checklist
+          - [ ] Version bump looks correct
+          - [ ] Release notes are accurate
+          - [ ] CI passes" \
+            --label release
