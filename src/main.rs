@@ -59,6 +59,12 @@ enum Commands {
         #[command(subcommand)]
         command: ApprovalCommands,
     },
+    /// Download and replace the current binary with a released build
+    Update {
+        /// Release version to install (for example 0.2.8 or v0.2.8)
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Print the default configuration file template
     ConfigTemplate,
 }
@@ -266,6 +272,8 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 
         Commands::Approvals { command } => handle_approvals(command),
 
+        Commands::Update { version } => release::update(version.as_deref()),
+
         Commands::ConfigTemplate => {
             print!("{}", config_template());
             Ok(())
@@ -274,7 +282,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 }
 
 fn maybe_check_for_release_update(command: &Commands, config: &config::Config) {
-    if matches!(command, Commands::Export { .. }) {
+    if matches!(command, Commands::Export { .. } | Commands::Update { .. }) {
         return;
     }
 

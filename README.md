@@ -51,6 +51,18 @@ To inspect what would be downloaded without installing:
 ./scripts/install.sh --dry-run
 ```
 
+To update an existing installation in place:
+
+```bash
+pw-env update
+```
+
+To install a specific released version over the current binary:
+
+```bash
+pw-env update --version v0.2.8
+```
+
 Build from source with Cargo instead:
 
 ```bash
@@ -238,6 +250,7 @@ Automatic release checks:
 - Run on interactive commands except `pw-env export`
 - Check the latest GitHub release at most once per configured interval
 - Print a one-time notice per newer version until you upgrade or another release appears
+- `pw-env update` downloads the matching release asset for the current platform and replaces the running binary in place
 
 Example:
 
