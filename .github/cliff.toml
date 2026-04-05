@@ -7,7 +7,7 @@ header = ""
 body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
-{% for commit in commits %}
+{% for commit in commits -%}
 - {{ commit.message | split(pat="\n") | first | trim }}\
   {% if commit.scope %} *({{ commit.scope }})* {% endif %}\
   ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/commit/{{ commit.id }}))\
