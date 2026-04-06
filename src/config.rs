@@ -458,7 +458,7 @@ impl Config {
         io::stderr().flush()?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        read_stdin_line(&mut input)?;
         let answer = input.trim().to_ascii_lowercase();
 
         match answer.as_str() {
@@ -608,7 +608,7 @@ impl ProjectDirectoryOverride {
             return Ok(Some(local_override));
         }
 
-        if !io::stdin().is_terminal() {
+        if !stdin_is_terminal() {
             let state = if previously_approved.is_some() {
                 "changed since its last approval"
             } else {
@@ -632,7 +632,7 @@ impl ProjectDirectoryOverride {
         io::stderr().flush()?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        read_stdin_line(&mut input)?;
         let answer = input.trim().to_ascii_lowercase();
         if answer != "y" && answer != "yes" {
             eprintln!("Skipping project override: {}", path.display());
@@ -711,6 +711,10 @@ impl ApprovedProjectConfigs {
     }
 
     fn path() -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(p) = TEST_APPROVAL_STORE_PATH.with(|v| v.borrow().clone()) {
+            return Some(p);
+        }
         dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
             dir.join("pw-env")
                 .join("approved-project-configs.json")
@@ -833,6 +837,10 @@ impl ApprovedSecretFetches {
     }
 
     fn path() -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(p) = TEST_SECRET_FETCH_STORE_PATH.with(|v| v.borrow().clone()) {
+            return Some(p);
+        }
         dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
             dir.join("pw-env")
                 .join("approved-secret-fetches.json")
@@ -924,6 +932,10 @@ impl ReviewedMigrations {
     }
 
     fn path() -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(p) = TEST_REVIEWED_MIGRATIONS_PATH.with(|v| v.borrow().clone()) {
+            return Some(p);
+        }
         dirs::state_dir()
             .or_else(dirs::data_local_dir)
             .map(|dir| dir.join("pw-env").join("reviewed-migrations.json"))
@@ -984,7 +996,36 @@ fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
 }
 
 fn stdin_is_terminal() -> bool {
-    cfg!(not(test)) && std::io::stdin().is_terminal()
+    #[cfg(test)]
+    {
+        return MOCK_IS_TERMINAL.with(|v| v.get());
+    }
+    #[allow(unreachable_code)]
+    std::io::stdin().is_terminal()
+}
+
+fn read_stdin_line(buf: &mut String) -> io::Result<usize> {
+    #[cfg(test)]
+    if let Some(line) = MOCK_STDIN_LINE.with(|m| m.borrow_mut().take()) {
+        *buf = line;
+        return Ok(buf.len());
+    }
+    io::stdin().read_line(buf)
+}
+
+#[cfg(test)]
+use std::cell::{Cell, RefCell};
+
+#[cfg(test)]
+thread_local! {
+    static MOCK_IS_TERMINAL: Cell<bool> = const { Cell::new(false) };
+    static MOCK_STDIN_LINE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Per-test override for the `ApprovedProjectConfigs` store path.
+    static TEST_APPROVAL_STORE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Per-test override for the `ApprovedSecretFetches` store path.
+    static TEST_SECRET_FETCH_STORE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Per-test override for the `ReviewedMigrations` store path.
+    static TEST_REVIEWED_MIGRATIONS_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 fn resolve_secret_fetch_target(path: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -2106,5 +2147,305 @@ vault = "Work"
 
         assert!(removed);
         assert!(approvals.entries().is_empty());
+    }
+
+    // ── Tests that exercise the Config-level approval APIs with isolated stores ──
+
+    fn set_test_approval_store(dir: &std::path::Path) {
+        TEST_APPROVAL_STORE_PATH
+            .with(|v| *v.borrow_mut() = Some(dir.join("approved-project-configs.json")));
+    }
+
+    fn set_test_secret_fetch_store(dir: &std::path::Path) {
+        TEST_SECRET_FETCH_STORE_PATH
+            .with(|v| *v.borrow_mut() = Some(dir.join("approved-secret-fetches.json")));
+    }
+
+    fn set_test_reviewed_migrations_store(dir: &std::path::Path) {
+        TEST_REVIEWED_MIGRATIONS_PATH
+            .with(|v| *v.borrow_mut() = Some(dir.join("reviewed-migrations.json")));
+    }
+
+    #[test]
+    fn approved_project_configs_contains_entry_after_approval() {
+        let test_dir = unique_test_dir("apc-entries-after-approval");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        Config::approve_project_override(&override_path).unwrap();
+        let configs = Config::approved_project_configs().unwrap();
+        let canonical = override_path.canonicalize().unwrap();
+        let found = configs.iter().any(|e| e.path == canonical);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(found, "approved_project_configs() should contain the newly approved entry");
+    }
+
+    #[test]
+    fn revoke_project_override_approval_returns_true_for_approved_entry() {
+        let test_dir = unique_test_dir("revoke-proj-override-true");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        Config::approve_project_override(&override_path).unwrap();
+        let result = Config::revoke_project_override_approval(&override_path).unwrap();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result, "revoking an approved override should return true");
+    }
+
+    #[test]
+    fn approved_secret_fetches_contains_entry_after_approval() {
+        let test_dir = unique_test_dir("asf-entries-after-approval");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
+
+        Config::approve_secret_fetch(&env_path, SecretFetchApprovalMode::CurrentEnvHash).unwrap();
+        let fetches = Config::approved_secret_fetches().unwrap();
+        let project_dir = test_dir.canonicalize().unwrap();
+        let found = fetches
+            .iter()
+            .any(|e| e.project_path == project_dir && !e.project_wide);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(found, "approved_secret_fetches() should contain the newly approved entry");
+    }
+
+    #[test]
+    fn revoke_secret_fetch_approval_returns_true_for_approved_entry() {
+        let test_dir = unique_test_dir("revoke-sf-true");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
+
+        Config::approve_secret_fetch(&env_path, SecretFetchApprovalMode::CurrentEnvHash).unwrap();
+        let result = Config::revoke_secret_fetch_approval(&env_path).unwrap();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result, "revoking an approved secret fetch should return true");
+    }
+
+    // ── Tests for ensure_secret_fetch_approved interactive/non-interactive paths ─
+
+    #[test]
+    fn ensure_secret_fetch_approved_non_interactive_error_mentions_interactive_session() {
+        let test_dir = unique_test_dir("ensure-sf-msg");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
+
+        // Provide mock stdin "y" so that if we accidentally enter the interactive path
+        // (L431 delete-! mutant, or L987→true mutant) we get Ok(()) instead of Err,
+        // which makes the assertion fail and kills the mutant.
+        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
+        let result = Config::ensure_secret_fetch_approved(&env_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("interactive"),
+            "expected 'interactive session' message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_secret_fetch_approved_y_answer_approves_hash() {
+        let test_dir = unique_test_dir("ensure-sf-y");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
+
+        MOCK_IS_TERMINAL.with(|v| v.set(true));
+        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
+        let result = Config::ensure_secret_fetch_approved(&env_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_ok(), "answer 'y' should approve and return Ok(())");
+    }
+
+    #[test]
+    fn ensure_secret_fetch_approved_a_answer_approves_project_wide() {
+        let test_dir = unique_test_dir("ensure-sf-a");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
+
+        MOCK_IS_TERMINAL.with(|v| v.set(true));
+        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("a\n".to_string()));
+        let result = Config::ensure_secret_fetch_approved(&env_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_ok(), "answer 'a' should approve project-wide and return Ok(())");
+    }
+
+    // ── Tests for project_override_file ancestor traversal (L582, L586) ────────
+
+    #[test]
+    fn project_override_path_finds_file_in_ancestor_at_git_root() {
+        let test_dir = unique_test_dir("ancestor-override");
+        let repo_dir = test_dir.join("repo");
+        let subdir = repo_dir.join("src").join("lib");
+
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(repo_dir.join(PROJECT_OVERRIDE_FILE_NAME), "backend = \"op\"\n").unwrap();
+
+        let result = Config::project_override_path(&subdir);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_some(), "should find override in ancestor git root");
+        assert!(result.unwrap().ends_with(PROJECT_OVERRIDE_FILE_NAME));
+    }
+
+    // ── Tests for ProjectDirectoryOverride::load_if_approved (L597, L606, L611, L637) ─
+
+    #[test]
+    fn load_if_approved_returns_some_for_pre_approved_hash() {
+        let test_dir = unique_test_dir("load-if-approved-some");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"bw\"\n").unwrap();
+
+        Config::approve_project_override(&override_path).unwrap();
+        let result = ProjectDirectoryOverride::load_if_approved(&override_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some(), "pre-approved file should load as Some");
+    }
+
+    #[test]
+    fn load_if_approved_returns_none_for_unapproved_in_non_terminal() {
+        let test_dir = unique_test_dir("load-if-approved-none");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        // MOCK_IS_TERMINAL defaults to false; file not pre-approved
+        let result = ProjectDirectoryOverride::load_if_approved(&override_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "unapproved file in non-terminal should return None");
+    }
+
+    #[test]
+    fn load_if_approved_non_terminal_ignores_mock_stdin_y() {
+        // Provides mock stdin "y" so if we accidentally enter the interactive path
+        // (L611 delete-! mutant) the function returns Some instead of None, killing the mutant.
+        let test_dir = unique_test_dir("load-if-approved-non-term-y");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"op\"\n").unwrap();
+
+        // MOCK_IS_TERMINAL = false (default): non-interactive path should be taken
+        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
+        let result = ProjectDirectoryOverride::load_if_approved(&override_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_none(),
+            "non-interactive path must return None without reading stdin"
+        );
+    }
+
+    #[test]
+    fn load_if_approved_y_answer_in_terminal_returns_some() {
+        let test_dir = unique_test_dir("load-if-approved-y");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"bw\"\n").unwrap();
+
+        MOCK_IS_TERMINAL.with(|v| v.set(true));
+        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
+        let result = ProjectDirectoryOverride::load_if_approved(&override_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some(), "answer 'y' should approve and return Some");
+    }
+
+    #[test]
+    fn load_if_approved_yes_answer_in_terminal_returns_some() {
+        let test_dir = unique_test_dir("load-if-approved-yes");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
+        let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
+        fs::write(&override_path, "backend = \"bw\"\n").unwrap();
+
+        MOCK_IS_TERMINAL.with(|v| v.set(true));
+        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("yes\n".to_string()));
+        let result = ProjectDirectoryOverride::load_if_approved(&override_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some(), "answer 'yes' should approve and return Some");
+    }
+
+    // ── Tests for ReviewedMigrations round-trip through Config (L483, L490, L499, L845, L872) ─
+
+    #[test]
+    fn remember_and_reviewed_migration_entries_round_trip() {
+        let test_dir = unique_test_dir("rm-round-trip-config");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_reviewed_migrations_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        fs::write(&env_path, "KEY=value\n").unwrap();
+
+        let unique_fp = format!("test-fp-{}-{}", std::process::id(), {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        });
+
+        Config::remember_reviewed_migration_entries(&env_path, [unique_fp.clone()]).unwrap();
+        let fps = Config::reviewed_migration_entry_fingerprints(&env_path).unwrap();
+        Config::forget_reviewed_migration_entries(&env_path, [unique_fp.clone()]).unwrap();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(
+            fps.contains(&unique_fp),
+            "fingerprint should be retrievable after remember()"
+        );
+    }
+
+    // ── Test for ReviewedMigrations::path (L927) ──────────────────────────────
+
+    #[test]
+    fn reviewed_migrations_path_is_some_and_points_to_expected_file() {
+        let path = ReviewedMigrations::path();
+        assert!(
+            path.is_some(),
+            "ReviewedMigrations::path() should return Some on this platform"
+        );
+        let p = path.unwrap();
+        assert!(
+            p.to_string_lossy().contains("pw-env"),
+            "path should contain 'pw-env', got: {}",
+            p.display()
+        );
+        assert!(
+            p.to_string_lossy().ends_with("reviewed-migrations.json"),
+            "path should end with reviewed-migrations.json, got: {}",
+            p.display()
+        );
     }
 }
