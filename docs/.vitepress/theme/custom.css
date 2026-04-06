@@ -117,7 +117,12 @@ body::before {
 }
 
 .VPHero.has-image .container {
-  align-items: start;
+  align-items: center;
+  gap: clamp(2.5rem, 5vw, 5rem);
+}
+
+.VPHero .main {
+  max-width: 40rem;
 }
 
 .VPHero .name,
@@ -159,6 +164,22 @@ body::before {
 
 .VPHero .image {
   position: relative;
+  flex: 0 0 clamp(15rem, 24vw, 20rem);
+  display: flex;
+  justify-content: center;
+  padding-top: clamp(0.5rem, 1.8vw, 1.75rem);
+}
+
+.VPHero .image-container {
+  width: 100%;
+  max-width: clamp(15rem, 24vw, 20rem);
+  margin: 0 auto;
+}
+
+.VPHero .image-src {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 .VPHero .image::after {
@@ -225,11 +246,15 @@ body::before {
 }
 
 .home-callout--accent {
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.1), rgba(255, 255, 255, 0.92));
+  background: rgba(248, 251, 255, 0.96);
+  border-color: rgba(37, 99, 235, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
 }
 
 .dark .home-callout--accent {
-  background: linear-gradient(135deg, rgba(138, 180, 255, 0.12), rgba(15, 23, 42, 0.8));
+  background: rgba(15, 23, 42, 0.82);
+  border-color: rgba(138, 180, 255, 0.2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .home-callout strong {
@@ -369,6 +394,15 @@ body::before {
 }
 
 @media (max-width: 960px) {
+  .VPHero.has-image .container {
+    align-items: start;
+    gap: 2rem;
+  }
+
+  .VPHero .image {
+    padding-top: 0;
+  }
+
   .home-intro-grid,
   .fast-path-grid {
     grid-template-columns: 1fr;
