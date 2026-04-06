@@ -4,7 +4,7 @@ The main config file lives at `~/.config/pw-env/config.toml` unless `XDG_CONFIG_
 
 ## Default template
 
-```toml title="~/.config/pw-env/config.toml"
+```toml [~/.config/pw-env/config.toml]
 # pw-env configuration
 # Place this file at ~/.config/pw-env/config.toml
 
@@ -88,7 +88,7 @@ check_interval_hours = 24
 
 For a repository-specific override, create `.pw-env.toml` in the project root or a parent directory inside the repository.
 
-```toml title=".pw-env.toml"
+```toml [.pw-env.toml]
 backend = "op"
 item = "api-server-env"
 

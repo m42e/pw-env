@@ -1,120 +1,134 @@
 ---
-title: pw-env
-hide:
-  - toc
+layout: home
+
+hero:
+  name: Keep .env in your project.
+  text: Keep secrets out of it.
+  tagline: pw-env resolves empty env keys from 1Password, Bitwarden, or GPG-backed files, then streams the results straight into your shell.
+  image:
+    src: /assets/images/pw-env-mark.svg
+    alt: pw-env
+  actions:
+    - theme: brand
+      text: Install pw-env
+      link: /getting-started/installation
+    - theme: alt
+      text: Build your first project flow
+      link: /getting-started/first-project
+
+features:
+  - title: Secrets stay in the backend
+    details: Empty values and explicit references are resolved at runtime. pw-env exports resolved keys to stdout instead of writing a generated .env file back to disk.
+  - title: Works with the shell you already use
+    details: Use pw-env export for one-off loading, or install a shell hook with pw-env init bash, pw-env init zsh, or pw-env init fish.
+  - title: Built for mixed env files
+    details: Secret-like plaintext values can be migrated into the backend, while safe local values can stay in the file with # no-migrate.
+  - title: Trust is explicit
+    details: Project-local overrides in .pw-env.toml and credential fetching from .env are approved separately and re-checked when the file contents change.
 ---
 
-<div class="home-hero" markdown="1">
-<div class="home-hero__copy" markdown="1">
-
-<span class="home-hero__eyebrow">pw-env manual</span>
-
-# Keep .env in your project. Keep secrets out of it.
-
-pw-env resolves empty env keys from 1Password, Bitwarden, or GPG-backed files, then streams the results straight into your shell.
-
-<div class="home-hero__actions">
-  <a class="md-button md-button--primary" href="getting-started/installation/">Install pw-env</a>
-  <a class="md-button" href="getting-started/first-project/">Build your first project flow</a>
+<div class="home-strip">
+  <span>Rust CLI</span>
+  <span>1Password, Bitwarden, and GPG</span>
+  <span>Shell-first local development</span>
 </div>
-</div>
-<div class="home-hero__panel" markdown="1">
-<h3>Example</h3>
 
-```console title="Load the current directory into bash"
+<div class="home-intro-grid">
+  <div class="home-callout home-callout--accent">
+    <strong>Why it exists</strong>
+    <p>pw-env keeps the project-facing ergonomics of a normal .env file while moving secret resolution to the edge of your shell session.</p>
+  </div>
+  <div class="home-callout">
+    <strong>What changes in practice</strong>
+    <p>Developers keep checked-in env shape, approvals stay explicit, and secret values stop drifting into repositories and local plaintext copies.</p>
+  </div>
+</div>
+
+<div class="example-panel">
+
+## Example
+
+```console [Load the current directory into bash]
 $ eval "$(pw-env export . --shell bash)"
 ```
 
-```dotenv title=".env"
+```dotenv [.env]
 DATABASE_URL=
 API_KEY=op://Development/my-app/api_key
 LOG_LEVEL=debug # no-migrate
 ```
 
-```bash title="Environment"
+```bash [Environment]
 DATABASE_URL=sqlite:///example.db
 API_KEY=XdASdf923.....
 LOG_LEVEL=debug # no-migrate
 ```
 
 </div>
-</div>
 
-## Highlights
+## Fast path
 
-<div class="card-grid" markdown="1">
-
-<div class="card" markdown="1">
-### Secrets stay in the backend
-
-Empty values and explicit references are resolved at runtime. pw-env exports resolved keys to stdout instead of writing a generated `.env` file back to disk.
-</div>
-
-<div class="card" markdown="1">
-### Works with the shell you already use
-
-Use `pw-env export` for one-off loading, or install a shell hook with `pw-env init bash`, `pw-env init zsh`, or `pw-env init fish`.
-</div>
-
-<div class="card" markdown="1">
-### Built for mixed env files
-
-Secret-like plaintext values can be migrated into the backend, while safe local values can stay in the file with `# no-migrate`.
-</div>
-
-<div class="card" markdown="1">
-### Trust is explicit
-
-Project-local overrides in `.pw-env.toml` and credential fetching from `.env` are approved separately and re-checked when the file contents change.
-</div>
-
+<div class="fast-path-grid">
+  <div class="fast-path-step">
+    <span>01</span>
+    <strong>Shape the project env</strong>
+    <p>Leave secret keys empty or point them at a specific backend reference.</p>
+  </div>
+  <div class="fast-path-step">
+    <span>02</span>
+    <strong>Pick a default backend</strong>
+    <p>Resolve empty values through 1Password, Bitwarden, or a GPG-backed env file.</p>
+  </div>
+  <div class="fast-path-step">
+    <span>03</span>
+    <strong>Load on demand or on cd</strong>
+    <p>Export once for a shell session or install a hook that follows your working directory.</p>
+  </div>
 </div>
 
 ## Install
 
-=== "Standalone installer"
+::: code-group
 
-    ```console
-    $ curl -fsSL https://m42e.de/pw-env/install.sh | bash
-    ```
+```console [Standalone installer]
+$ curl -fsSL https://m42e.de/pw-env/install.sh | bash
+```
 
-=== "Specific release"
+```console [Specific release]
+$ curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --version v0.2.8
+```
 
-    ```console
-    $ curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --version v0.2.8
-    ```
+```console [Build from source]
+$ cargo build --release
+$ ./target/release/pw-env --help
+```
 
-=== "Build from source"
-
-    ```console
-    $ cargo build --release
-    $ ./target/release/pw-env --help
-    ```
+:::
 
 ## Learn the flow
 
 <div class="manual-grid">
-  <a class="manual-card" href="getting-started/installation/">
+  <a class="manual-card" href="/getting-started/installation">
     <strong>Installation</strong>
     <span>Install the binary, check supported targets, and preview the manual locally.</span>
   </a>
-  <a class="manual-card" href="getting-started/first-project/">
+  <a class="manual-card" href="/getting-started/first-project">
     <strong>First project</strong>
-    <span>Set up a `.env`, choose a backend, and run your first export.</span>
+    <span>Set up a .env, choose a backend, and run your first export.</span>
   </a>
-  <a class="manual-card" href="guides/migrate-secrets/">
+  <a class="manual-card" href="/guides/migrate-secrets">
     <strong>Migrate plaintext secrets</strong>
     <span>Move existing values into 1Password, Bitwarden, or GPG without rewriting safe local settings.</span>
   </a>
-  <a class="manual-card" href="guides/approvals/">
+  <a class="manual-card" href="/guides/approvals">
     <strong>Approvals and trust</strong>
-    <span>Understand `.pw-env.toml` approvals, `.env` hash approvals, and project-wide fetch grants.</span>
+    <span>Understand .pw-env.toml approvals, .env hash approvals, and project-wide fetch grants.</span>
   </a>
-  <a class="manual-card" href="concepts/resolution-model/">
+  <a class="manual-card" href="/concepts/resolution-model">
     <strong>Resolution model</strong>
     <span>See how pw-env classifies entries and routes them to the correct backend.</span>
   </a>
-  <a class="manual-card" href="reference/cli/">
+  <a class="manual-card" href="/reference/cli">
     <strong>CLI reference</strong>
     <span>Browse the commands, usage forms, and the approvals subcommands in one place.</span>
   </a>
@@ -129,10 +143,10 @@ my-service/
 └── .git/
 ```
 
-```dotenv title=".env"
+```dotenv [.env]
 DATABASE_URL=
 API_KEY=bw://env-secrets/my-service/api_key
 LOG_LEVEL=debug # no-migrate
 ```
 
-Use a global config for defaults, and add `.pw-env.toml` only when a project needs a local override. The local override is discovered by walking upward from the current directory until the repository root.
+Use a global config for defaults, and add .pw-env.toml only when a project needs a local override. The local override is discovered by walking upward from the current directory until the repository root.

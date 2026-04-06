@@ -1,3 +1,6 @@
 /target
 /site
-/.venv-docs
+/node_modules
+/docs/.vitepress/cache
+/docs/public/install.sh
+

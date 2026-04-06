@@ -407,10 +407,8 @@ cargo run -- check
 To preview the manual locally:
 
 ```bash
-python3 -m venv .venv-docs
-source .venv-docs/bin/activate
-pip install -r docs/requirements.txt
-mkdocs serve
+npm install
+npm run docs:dev
 ```
 
 ## Release

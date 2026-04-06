@@ -4,23 +4,21 @@ pw-env supports one-off exports and persistent shell hooks.
 
 ## One-off loading
 
-=== "bash"
+::: code-group
 
-    ```console
-    $ eval "$(pw-env export . --shell bash)"
-    ```
+```console [bash]
+$ eval "$(pw-env export . --shell bash)"
+```
 
-=== "zsh"
+```console [zsh]
+$ eval "$(pw-env export . --shell zsh)"
+```
 
-    ```console
-    $ eval "$(pw-env export . --shell zsh)"
-    ```
+```console [fish]
+$ pw-env export . --shell fish | source
+```
 
-=== "fish"
-
-    ```console
-    $ pw-env export . --shell fish | source
-    ```
+:::
 
 If the current directory does not contain a `.env` file, `pw-env export` returns nothing.
 
@@ -28,29 +26,23 @@ If the current directory does not contain a `.env` file, `pw-env export` returns
 
 Install the generated hook into your shell startup file.
 
-=== "bash"
+::: code-group
 
-    ```console
-    $ eval "$(pw-env init bash)"
-    ```
+```console [bash]
+$ eval "$(pw-env init bash)"
+```
 
-    Add the same line to `~/.bashrc`.
+```console [zsh]
+$ eval "$(pw-env init zsh)"
+```
 
-=== "zsh"
+```console [fish]
+$ pw-env init fish | source
+```
 
-    ```console
-    $ eval "$(pw-env init zsh)"
-    ```
+:::
 
-    Add the same line to `~/.zshrc`.
-
-=== "fish"
-
-    ```console
-    $ pw-env init fish | source
-    ```
-
-    Add the same line to `~/.config/fish/config.fish`.
+Add the same command to `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish` for the shell you use.
 
 ## What the generated hook does
 

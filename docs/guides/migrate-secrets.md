@@ -6,7 +6,7 @@ pw-env does not rewrite plaintext values automatically. Migration is an explicit
 
 Mark values that should remain plaintext with `no-migrate` either on the same line or on the comment line directly above the entry.
 
-```dotenv title=".env"
+```dotenv [.env]
 LOG_LEVEL=debug # no-migrate
 
 # no-migrate
@@ -33,7 +33,7 @@ Entries that look like secrets are selected by default in the prompt.
 
 Before migration:
 
-```dotenv title=".env"
+```dotenv [.env]
 DATABASE_URL=postgres://user:pass@localhost:5432/app
 API_KEY=super-secret-token
 LOG_LEVEL=debug # no-migrate
@@ -41,7 +41,7 @@ LOG_LEVEL=debug # no-migrate
 
 After a successful migration:
 
-```dotenv title=".env"
+```dotenv [.env]
 DATABASE_URL=
 API_KEY=
 LOG_LEVEL=debug # no-migrate

@@ -4,23 +4,21 @@ pw-env ships prebuilt binaries for macOS, Linux, and Windows, and it can also be
 
 ## Install a release build
 
-=== "Latest release"
+::: code-group
 
-    ```console
-    $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash
-    ```
+```console [Latest release]
+$ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash
+```
 
-=== "Specific version"
+```console [Specific version]
+$ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --version v0.2.8
+```
 
-    ```console
-    $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --version v0.2.8
-    ```
+```console [Custom install directory]
+$ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --dir "$HOME/.local/bin"
+```
 
-=== "Custom install directory"
-
-    ```console
-    $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --dir "$HOME/.local/bin"
-    ```
+:::
 
 If you already have `pw-env` installed, you can also update the current binary in place with `pw-env update`. See [Updating pw-env](../guides/update.md).
 
@@ -56,16 +54,14 @@ $ pw-env config-template
 ## Preview this manual locally
 
 ```console
-$ python3 -m venv .venv-docs
-$ source .venv-docs/bin/activate
-$ pip install -r docs/requirements.txt
-$ mkdocs serve
+$ npm install
+$ npm run docs:dev
 ```
 
 For a production-style build instead of the live preview server:
 
 ```console
-$ mkdocs build --strict
+$ npm run docs:build
 ```
 
 The static site is written to `site/`, which is what the GitHub Pages workflow publishes.

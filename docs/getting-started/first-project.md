@@ -6,14 +6,14 @@ The fastest way to adopt pw-env is to keep the shape of your `.env` file, then l
 
 Use empty values for variables that should be loaded from the default backend:
 
-```dotenv title=".env"
+```dotenv [.env]
 DATABASE_URL=
 API_KEY=
 ```
 
 Mix in explicit references when a key should always come from a specific backend:
 
-```dotenv title=".env"
+```dotenv [.env]
 DATABASE_URL=op://Development/my-app/database_url
 API_KEY=bw://env-secrets/my-app/api_key
 LOG_LEVEL=debug
@@ -31,50 +31,48 @@ $ pw-env config-template > ~/.config/pw-env/config.toml
 
 Pick a default backend for empty values.
 
-=== "1Password"
+::: code-group
 
-    ```toml title="~/.config/pw-env/config.toml"
-    [defaults]
-    backend = "op"
+```toml [1Password: ~/.config/pw-env/config.toml]
+[defaults]
+backend = "op"
 
-    [defaults.op]
-    vault = "Development"
-    ```
+[defaults.op]
+vault = "Development"
+```
 
-=== "Bitwarden"
+```toml [Bitwarden: ~/.config/pw-env/config.toml]
+[defaults]
+backend = "bw"
 
-    ```toml title="~/.config/pw-env/config.toml"
-    [defaults]
-    backend = "bw"
+[defaults.bw]
+folder = "env-secrets"
+```
 
-    [defaults.bw]
-    folder = "env-secrets"
-    ```
+```toml [GPG: ~/.config/pw-env/config.toml]
+[defaults]
+backend = "gpg"
 
-=== "GPG"
+[defaults.gpg]
+file_pattern = ".env.gpg"
+recipient = "your-email@example.com"
+```
 
-    ```toml title="~/.config/pw-env/config.toml"
-    [defaults]
-    backend = "gpg"
-
-    [defaults.gpg]
-    file_pattern = ".env.gpg"
-    recipient = "your-email@example.com"
-    ```
+:::
 
 ## 3. Export the values into your shell
 
-=== "bash or zsh"
+::: code-group
 
-    ```console
-    $ eval "$(pw-env export . --shell bash)"
-    ```
+```console [bash or zsh]
+$ eval "$(pw-env export . --shell bash)"
+```
 
-=== "fish"
+```console [fish]
+$ pw-env export . --shell fish | source
+```
 
-    ```console
-    $ pw-env export . --shell fish | source
-    ```
+:::
 
 The first time a project `.env` would trigger secret fetching, pw-env asks you to approve it. The default approval is tied to the current `.env` hash, so changing the file causes a new approval prompt.
 
