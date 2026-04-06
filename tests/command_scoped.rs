@@ -164,10 +164,10 @@ fn setup_logging_creates_debug_log_when_file_configured() {
     // A non-secret plaintext entry causes resolve_env_file to emit a debug
     // "No resolvable entries" message, which should appear in the log file.
     std::fs::write(project_dir.join(".env"), "GREETING=hello\n").unwrap();
-    let config_content = format!(
-        "[log]\nlevel = \"debug\"\nfile = \"{}\"\n",
-        log_file.display()
-    );
+    // Use forward slashes so the path is valid in a TOML quoted string on all
+    // platforms — Windows backslashes would be treated as TOML escape sequences.
+    let log_file_toml = log_file.to_string_lossy().replace('\\', "/");
+    let config_content = format!("[log]\nlevel = \"debug\"\nfile = \"{log_file_toml}\"\n");
     std::fs::write(
         xdg_config_home.join("pw-env").join("config.toml"),
         &config_content,
