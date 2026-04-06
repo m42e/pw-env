@@ -6,7 +6,10 @@ pub fn generate_hook(shell: &str) -> String {
         "bash" => generate_bash_hook(),
         "zsh" => generate_zsh_hook(),
         "fish" => generate_fish_hook(),
-        other => format!("# Unsupported shell: {other}\n# Supported shells: bash, zsh, fish\n"),
+        "powershell" => generate_powershell_hook(),
+        other => format!(
+            "# Unsupported shell: {other}\n# Supported shells: bash, zsh, fish, powershell\n"
+        ),
     }
 }
 
@@ -219,6 +222,84 @@ __pw_env_hook
     .to_string()
 }
 
+fn generate_powershell_hook() -> String {
+    r#"# pw-env shell hook for PowerShell
+# Add to your PowerShell profile: Invoke-Expression (& pw-env init powershell)
+
+if (-not $global:__pw_env_initialized) {
+    $global:__pw_env_initialized = $true
+    $global:__pw_env_previous_keys = @()
+    $global:__pw_env_previous_commands = @()
+    $global:__pw_env_saved_functions = @{}
+    $global:__pw_env_last_location = $null
+    $global:__pw_env_original_prompt = (Get-Command prompt).ScriptBlock
+}
+
+function __pw_env_clear_state {
+    foreach ($key in $global:__pw_env_previous_keys) {
+        Remove-Item -Path ("Env:" + $key) -ErrorAction SilentlyContinue
+    }
+    $global:__pw_env_previous_keys = @()
+
+    foreach ($cmd in $global:__pw_env_previous_commands) {
+        Remove-Item -Path ("Function:" + $cmd) -ErrorAction SilentlyContinue
+
+        if ($global:__pw_env_saved_functions.ContainsKey($cmd)) {
+            Set-Item -Path ("Function:" + $cmd) -Value ([ScriptBlock]::Create($global:__pw_env_saved_functions[$cmd]))
+            $global:__pw_env_saved_functions.Remove($cmd) | Out-Null
+        }
+    }
+
+    $global:__pw_env_previous_commands = @()
+}
+
+function __pw_env_define_command_wrapper {
+    param([string]$cmd)
+
+    if (Test-Path -Path ("Function:" + $cmd)) {
+        $global:__pw_env_saved_functions[$cmd] = (Get-Item -Path ("Function:" + $cmd)).ScriptBlock.ToString()
+    }
+
+    $wrapper = @"
+param([Parameter(ValueFromRemainingArguments=`$true)][string[]]`$args)
+pw-env exec --dir `$PWD -- $cmd @args
+"@
+
+    Set-Item -Path ("Function:" + $cmd) -Value ([ScriptBlock]::Create($wrapper))
+}
+
+function __pw_env_hook {
+    __pw_env_clear_state
+
+    if (Test-Path -Path ".env") {
+        $hookOutput = pw-env hook $PWD --shell powershell
+        if (-not [string]::IsNullOrWhiteSpace($hookOutput)) {
+            Invoke-Expression $hookOutput
+        }
+    }
+}
+
+function global:prompt {
+    $currentLocation = (Get-Location).Path
+    if ($global:__pw_env_last_location -ne $currentLocation) {
+        __pw_env_hook
+        $global:__pw_env_last_location = $currentLocation
+    }
+
+    if ($global:__pw_env_original_prompt) {
+        & $global:__pw_env_original_prompt
+    } else {
+        "PS $currentLocation> "
+    }
+}
+
+# Run on shell init for the current directory
+__pw_env_hook
+$global:__pw_env_last_location = (Get-Location).Path
+"#
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,7 +331,15 @@ mod tests {
 
     #[test]
     fn test_unsupported_shell() {
-        let hook = generate_hook("powershell");
+        let hook = generate_hook("cmd");
         assert!(hook.contains("Unsupported shell"));
+    }
+
+    #[test]
+    fn test_powershell_hook_contains_prompt() {
+        let hook = generate_hook("powershell");
+        assert!(hook.contains("function global:prompt"));
+        assert!(hook.contains("pw-env hook $PWD --shell powershell"));
+        assert!(hook.contains("__pw_env_define_command_wrapper"));
     }
 }

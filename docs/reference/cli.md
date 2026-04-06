@@ -6,7 +6,7 @@
 
 | Command | Purpose |
 | --- | --- |
-| `init` | Generate shell hook code for `bash`, `zsh`, or `fish` |
+| `init` | Generate shell hook code for `bash`, `zsh`, `fish`, or `powershell` |
 | `exec` | Run a command with resolved secrets only in the child process |
 | `export` | Print shell exports for the current project |
 | `load` | Show a human-readable view of the current resolution state |
@@ -22,7 +22,7 @@
 $ pw-env init <SHELL>
 ```
 
-Generate shell hook code for automatic loading on directory change. Supported shells are `bash`, `zsh`, and `fish`.
+Generate shell hook code for automatic loading on directory change. Supported shells are `bash`, `zsh`, `fish`, and `powershell`.
 
 If the active project config defines `commands`, the generated hook installs transient wrappers for the matching executable names instead of exporting resolved secrets into the parent shell.
 
@@ -42,7 +42,9 @@ Use this directly when you want explicit transient loading, or let the generated
 $ pw-env export [--shell <SHELL>] [DIR]
 ```
 
-Resolve the current `.env` file and print export statements for `bash`, `zsh`, or `fish`. If the directory has no `.env` file, the command prints nothing.
+Resolve the current `.env` file and print export statements for `bash`, `zsh`, `fish`, or `powershell`. If the directory has no `.env` file, the command prints nothing.
+
+`cmd.exe` does not expose robust per-directory or per-command hook points, so automatic shell hooks are not supported there.
 
 This command is still useful for one-off shell exports. Projects that configure `commands` use transient wrappers through the generated hook instead of directory-wide exports.
 

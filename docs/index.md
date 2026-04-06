@@ -20,7 +20,7 @@ features:
   - title: Secrets stay in the backend
     details: Empty values and explicit references are resolved at runtime. pw-env exports resolved keys to stdout instead of writing a generated .env file back to disk.
   - title: Works with the shell you already use
-    details: Use pw-env export for one-off loading, or install a shell hook with pw-env init bash, pw-env init zsh, or pw-env init fish.
+    details: Use pw-env export for one-off loading, or install a shell hook with pw-env init bash, pw-env init zsh, pw-env init fish, or pw-env init powershell.
   - title: Built for mixed env files
     details: Secret-like plaintext values can be migrated into the backend, while safe local values can stay in the file with # no-migrate.
   - title: Trust is explicit

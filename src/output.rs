@@ -31,6 +31,11 @@ pub fn format_exports(vars: &BTreeMap<String, String>, shell: ShellSyntax) -> St
                 let escaped = shell_escape_single_quote(value);
                 output.push_str(&format!("set -gx {key} '{escaped}'\n"));
             }
+            ShellSyntax::PowerShell => {
+                // $env:KEY = 'value' with PowerShell single-quote escaping: ' -> ''
+                let escaped = powershell_escape_single_quote(value);
+                output.push_str(&format!("$env:{key} = '{escaped}'\n"));
+            }
         }
     }
     output
@@ -66,6 +71,12 @@ pub fn format_command_wrappers(commands: &[String], shell: ShellSyntax) -> Strin
                     "__pw_env_define_command_wrapper {command}\n"
                 ));
             }
+            ShellSyntax::PowerShell => {
+                output.push_str(&format!(
+                    "__pw_env_define_command_wrapper '{}'\n",
+                    powershell_escape_single_quote(command)
+                ));
+            }
         }
     }
 
@@ -88,6 +99,13 @@ pub fn format_command_wrappers(commands: &[String], shell: ShellSyntax) -> Strin
                 ));
             }
         }
+        ShellSyntax::PowerShell => {
+            output.push_str("$global:__pw_env_previous_keys = @()\n");
+            output.push_str(&format!(
+                "$global:__pw_env_previous_commands = {}\n",
+                format_powershell_array(&valid_commands)
+            ));
+        }
     }
 
     output
@@ -107,6 +125,7 @@ pub fn format_command_tracking(commands: &[String]) -> String {
 pub enum ShellSyntax {
     Posix, // bash, zsh
     Fish,
+    PowerShell,
 }
 
 /// Escape a value for safe embedding in single quotes.
@@ -114,6 +133,25 @@ pub enum ShellSyntax {
 /// We replace ' with '\'' (end quote, escaped quote, start quote).
 fn shell_escape_single_quote(value: &str) -> String {
     value.replace('\'', "'\\''")
+}
+
+/// Escape a value for safe embedding in PowerShell single quotes.
+/// In PowerShell, single quote escaping is done by doubling it.
+fn powershell_escape_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn format_powershell_array(values: &[String]) -> String {
+    if values.is_empty() {
+        "@()".to_string()
+    } else {
+        let escaped = values
+            .iter()
+            .map(|value| format!("'{}'", powershell_escape_single_quote(value)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("@({escaped})")
+    }
 }
 
 /// Validate that a key is a safe environment variable name.
@@ -184,6 +222,14 @@ mod tests {
     }
 
     #[test]
+    fn test_format_exports_powershell() {
+        let mut vars = BTreeMap::new();
+        vars.insert("DB_PASS".to_string(), "sec'ret".to_string());
+        let output = format_exports(&vars, ShellSyntax::PowerShell);
+        assert!(output.contains("$env:DB_PASS = 'sec''ret'\n"));
+    }
+
+    #[test]
     fn test_obfuscate_value_long() {
         assert_eq!(obfuscate_value("abcdef"), "abc***");
     }
@@ -246,5 +292,14 @@ mod tests {
 
         assert!(output.contains("__pw_env_define_command_wrapper cargo\n"));
         assert!(output.contains("set -g __pw_env_previous_commands cargo\n"));
+    }
+
+    #[test]
+    fn test_format_command_wrappers_powershell() {
+        let output = format_command_wrappers(&["cargo".to_string()], ShellSyntax::PowerShell);
+
+        assert!(output.contains("__pw_env_define_command_wrapper 'cargo'\n"));
+        assert!(output.contains("$global:__pw_env_previous_keys = @()\n"));
+        assert!(output.contains("$global:__pw_env_previous_commands = @('cargo')\n"));
     }
 }

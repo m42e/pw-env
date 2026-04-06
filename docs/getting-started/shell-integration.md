@@ -23,6 +23,10 @@ $ eval "$(pw-env export . --shell zsh)"
 $ pw-env export . --shell fish | source
 ```
 
+```console [powershell]
+$ Invoke-Expression (& pw-env export . --shell powershell)
+```
+
 :::
 
 If the current directory does not contain a `.env` file, `pw-env export` returns nothing.
@@ -45,9 +49,13 @@ $ eval "$(pw-env init zsh)"
 $ pw-env init fish | source
 ```
 
+```console [powershell]
+$ Invoke-Expression (& pw-env init powershell)
+```
+
 :::
 
-Add the same command to `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish` for the shell you use.
+Add the same command to your startup file (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`, or `$PROFILE` in PowerShell).
 
 ## What the generated hook does
 
@@ -77,6 +85,10 @@ Command-scoped mode matches exact command names and shell-style glob patterns ag
 | `bash` | Wraps `cd`, `pushd`, and `popd` |
 | `zsh` | Registers a `chpwd` hook |
 | `fish` | Uses a `PWD` variable event |
+| `powershell` | Wraps `prompt` and reacts to location changes |
+
+PowerShell hook behavior runs on prompt render and detects directory changes by comparing the current location to the previous one.
+`cmd.exe` does not support equivalent automatic hooks for directory changes or command execution, so use `pw-env exec` directly there.
 
 ## Debugging shell behavior
 

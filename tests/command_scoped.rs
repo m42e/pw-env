@@ -35,6 +35,40 @@ fn hook_outputs_exact_command_wrapper_without_path_match() {
 }
 
 #[test]
+fn hook_outputs_powershell_wrappers_and_tracking() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::write(project_dir.join(".env"), "API_KEY=\n").unwrap();
+    write_config(
+        &xdg_config_home,
+        &format!(
+            "[[projects]]\npath = {:?}\ncommands = [\"cargo\", \"npm\"]\n",
+            project_dir.to_string_lossy()
+        ),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("hook")
+        .arg(&project_dir)
+        .arg("--shell")
+        .arg("powershell")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("__pw_env_define_command_wrapper 'cargo'\n"));
+    assert!(stdout.contains("__pw_env_define_command_wrapper 'npm'\n"));
+    assert!(stdout.contains("$global:__pw_env_previous_keys = @()\n"));
+    assert!(stdout.contains("$global:__pw_env_previous_commands = @('cargo', 'npm')\n"));
+}
+
+#[test]
 #[cfg_attr(windows, ignore)]
 fn hook_expands_globbed_command_wrappers_from_path() {
     let workspace = TempDir::new().unwrap();

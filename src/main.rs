@@ -41,7 +41,7 @@ struct Cli {
 enum Commands {
     /// Generate shell hook code for automatic .env loading on cd
     Init {
-        /// Shell to generate hook for: bash, zsh, or fish
+        /// Shell to generate hook for: bash, zsh, fish, or powershell
         shell: String,
     },
     /// Execute a command with resolved environment variables only in the child process
@@ -57,7 +57,7 @@ enum Commands {
     Export {
         /// Directory to look for .env file in (defaults to current directory)
         dir: Option<PathBuf>,
-        /// Shell syntax to use: bash, zsh, or fish
+        /// Shell syntax to use: bash, zsh, fish, or powershell
         #[arg(long, default_value = "bash")]
         shell: String,
     },
@@ -104,7 +104,7 @@ enum Commands {
     Hook {
         /// Directory to inspect for shell integration state (defaults to current directory)
         dir: Option<PathBuf>,
-        /// Shell syntax to use: bash, zsh, or fish
+        /// Shell syntax to use: bash, zsh, fish, or powershell
         #[arg(long, default_value = "bash")]
         shell: String,
     },
@@ -237,6 +237,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             let config = config::Config::load_for_dir(&dir)?;
             let shell_syntax = match shell.as_str() {
                 "fish" => output::ShellSyntax::Fish,
+                "powershell" => output::ShellSyntax::PowerShell,
                 _ => output::ShellSyntax::Posix,
             };
 
@@ -271,6 +272,18 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 output::ShellSyntax::Fish => {
                     println!("set -g __pw_env_previous_keys \"{tracking}\"");
                 }
+                output::ShellSyntax::PowerShell => {
+                    if keys.is_empty() {
+                        println!("$global:__pw_env_previous_keys = @()");
+                    } else {
+                        let quoted = keys
+                            .iter()
+                            .map(|key| format!("'{key}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("$global:__pw_env_previous_keys = @({quoted})");
+                    }
+                }
             }
 
             info!(
@@ -286,6 +299,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             let config = config::Config::load_for_dir(&dir)?;
             let shell_syntax = match shell.as_str() {
                 "fish" => output::ShellSyntax::Fish,
+                "powershell" => output::ShellSyntax::PowerShell,
                 _ => output::ShellSyntax::Posix,
             };
 
@@ -520,6 +534,21 @@ fn build_hook_output(
             output_text.push_str(&format!(
                 "set -g __pw_env_previous_keys \"{tracking}\"\nset -g __pw_env_previous_commands\n"
             ));
+        }
+        output::ShellSyntax::PowerShell => {
+            if keys.is_empty() {
+                output_text.push_str("$global:__pw_env_previous_keys = @()\n");
+            } else {
+                let quoted = keys
+                    .iter()
+                    .map(|key| format!("'{key}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                output_text.push_str(&format!(
+                    "$global:__pw_env_previous_keys = @({quoted})\n"
+                ));
+            }
+            output_text.push_str("$global:__pw_env_previous_commands = @()\n");
         }
     }
 

@@ -206,8 +206,18 @@ pw-env init fish | source
 
 Add that to your fish config.
 
+`PowerShell`:
+
+```powershell
+Invoke-Expression (& pw-env init powershell)
+```
+
+Add that to your PowerShell profile (`$PROFILE`).
+
 The generated hooks unset previously exported variables when you leave a directory and load new ones when entering a directory containing `.env`.
 Warnings from `pw-env export` are written to stderr, so they remain visible when the shell hook auto-loads a directory.
+
+`cmd.exe` does not expose equivalent automatic hook points for per-directory or per-command lifecycle events. Use `pw-env exec` directly when working from cmd.
 
 ## Backend Resolution Model
 
