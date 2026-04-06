@@ -1317,6 +1317,24 @@ mod tests {
     }
 
     #[test]
+    fn pending_migration_entries_with_secret_returns_nonempty() {
+        // A key whose name looks like a secret and a value long enough to appear
+        // non-trivial must appear in the pending entries.
+        // This kills the mutation that replaces the function body with Ok(vec![]).
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(
+            &env_path,
+            "API_SECRET_TOKEN=abcdefghijklmnopqrstuvwxyz012345\n",
+        )
+        .unwrap();
+
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let entries = pending_migration_entries(&env_file).unwrap();
+        assert!(!entries.is_empty(), "expected at least one pending secret entry");
+    }
+
+    #[test]
     fn list_path_executables_with_no_path_returns_empty() {
         let result = list_path_executables(None);
         assert!(result.is_empty());

@@ -2017,4 +2017,94 @@ vault = "Work"
 
         assert!(revoked);
     }
+
+    #[test]
+    fn approval_store_path_returns_some_nonempty_path() {
+        // Must not return None (kills the -> None mutation).
+        let path = Config::approval_store_path();
+        assert!(path.is_some(), "approval store path should be Some on this platform");
+        let p = path.unwrap();
+        assert!(!p.as_os_str().is_empty());
+        assert!(p.to_string_lossy().ends_with("approved-project-configs.json"),
+            "unexpected path: {}", p.display());
+    }
+
+    #[test]
+    fn secret_fetch_approval_store_path_returns_some_nonempty_path() {
+        let path = Config::secret_fetch_approval_store_path();
+        assert!(path.is_some(), "secret fetch approval store path should be Some on this platform");
+        let p = path.unwrap();
+        assert!(!p.as_os_str().is_empty());
+        assert!(p.to_string_lossy().ends_with("approved-secret-fetches.json"),
+            "unexpected path: {}", p.display());
+    }
+
+    #[test]
+    fn project_override_path_returns_some_when_override_file_exists_in_dir() {
+        // Creates a temp dir containing .pw-env.toml (no git root) and verifies
+        // that project_override_path returns Some pointing to that file.
+        let test_dir = unique_test_dir("proj-override-path");
+        fs::create_dir_all(&test_dir).unwrap();
+        let override_file = test_dir.join(".pw-env.toml");
+        fs::write(&override_file, "backend = \"op\"\n").unwrap();
+
+        let result = Config::project_override_path(&test_dir);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_some(), "expected Some path, got None");
+        let path = result.unwrap();
+        assert!(path.to_string_lossy().ends_with(".pw-env.toml"));
+    }
+
+    #[test]
+    fn project_override_path_returns_none_when_no_override_file() {
+        // A dir with no .pw-env.toml and no git root must return None.
+        let test_dir = unique_test_dir("proj-override-none");
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let result = Config::project_override_path(&test_dir);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(result.is_none(), "expected None, got {:?}", result);
+    }
+
+    #[test]
+    fn approved_project_configs_round_trip_via_custom_path() {
+        // Saves an approval, loads it back, and verifies entries() is non-empty.
+        // This kills the ApprovedProjectConfigs::load -> Ok(Default::default()) mutation.
+        let test_dir = unique_test_dir("apc-round-trip");
+        fs::create_dir_all(&test_dir).unwrap();
+        let store_path = test_dir.join("approved-project-configs.json");
+        let project_path = test_dir.join("project");
+        fs::create_dir_all(&project_path).unwrap();
+
+        let mut approvals = ApprovedProjectConfigs::default();
+        approvals.approve(&project_path, "abc123hash".to_string());
+        approvals.save_to_path(&store_path).unwrap();
+
+        let loaded = ApprovedProjectConfigs::load_from_path(&store_path).unwrap();
+        let entries = loaded.entries();
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].hash, "abc123hash");
+    }
+
+    #[test]
+    fn approved_project_configs_revoke_removes_entry() {
+        let test_dir = unique_test_dir("apc-revoke");
+        fs::create_dir_all(&test_dir).unwrap();
+        let project_path = test_dir.join("project");
+        fs::create_dir_all(&project_path).unwrap();
+
+        let mut approvals = ApprovedProjectConfigs::default();
+        approvals.approve(&project_path, "hash1".to_string());
+        assert_eq!(approvals.entries().len(), 1);
+
+        let removed = approvals.revoke(&project_path);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(removed);
+        assert!(approvals.entries().is_empty());
+    }
 }

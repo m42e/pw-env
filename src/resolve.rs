@@ -433,4 +433,24 @@ mod tests {
         // "/" has no file_name, so it falls back to "unknown"
         assert!(line.contains("project=unknown") || line.contains("project="));
     }
+
+    #[test]
+    fn formats_audit_log_ignores_empty_project_string_and_uses_dir_name() {
+        // When project is Some(""), the empty string must be filtered out
+        // and the git root / dir name used instead.
+        // This kills the `delete !` mutation at line 39 (filter keeps empty names without !).
+        let root = unique_subdir("empty-proj");
+        let repo_dir = root.join("my-repo");
+        let dir = repo_dir.join("api");
+        let env_path = dir.join(".env");
+
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+
+        let line = format_credential_fetch_audit(&env_path, &dir, Some(""), "op", "KEY");
+        let _ = fs::remove_dir_all(&root);
+
+        // Empty project string is filtered; should fall back to "my-repo" (git root name).
+        assert!(line.contains("project=my-repo"), "expected project=my-repo in: {line}");
+    }
 }
