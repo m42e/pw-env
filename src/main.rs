@@ -1120,8 +1120,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn is_executable_file_non_executable_regular_file_returns_false() {
-        // A regular file without execute bits must return false.
+        // A regular file without execute bits must return false (Unix only).
         // This kills the & → | and & → ^ mutations in the Unix mode check.
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("plain.txt");
