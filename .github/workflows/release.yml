@@ -184,17 +184,25 @@ jobs:
           path: notarization-${{ matrix.target }}.json
           if-no-files-found: ignore
 
+      - name: Stage release files
+        shell: bash
+        run: |
+          package_dir="dist/${{ matrix.target }}"
+          mkdir -p "$package_dir"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$package_dir/${{ matrix.binary }}"
+          cp LICENSE "$package_dir/LICENSE"
+
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar -czf ../../../pw-env-${RELEASE_TAG}-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+          tar -czf "pw-env-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" -C "dist/${{ matrix.target }}" .
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" -DestinationPath "pw-env-${env:RELEASE_TAG}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "dist/${{ matrix.target }}/*" -DestinationPath "pw-env-${env:RELEASE_TAG}-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -225,6 +233,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Add license asset
+        shell: bash
+        run: |
+          cp LICENSE dist/LICENSE
 
       - name: Install git-cliff
         uses: kenji-miyake/setup-git-cliff@v2

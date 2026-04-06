@@ -179,11 +179,20 @@ jobs:
 
                 case "$archive" in
                   tar.gz)
-                    tar -czf "$asset_path" -C "$package_dir" "$binary"
+                    if [ -f "$package_dir/LICENSE" ]; then
+                      tar -czf "$asset_path" -C "$package_dir" "$binary" LICENSE
+                    else
+                      tar -czf "$asset_path" -C "$package_dir" "$binary"
+                    fi
                     ;;
                   zip)
                     rm -f "$asset_path"
-                    ditto -c -k --keepParent "$binary_path" "$asset_path"
+                    if [ -f "$package_dir/LICENSE" ]; then
+                      cd "$package_dir"
+                      zip -qry "$asset_path" .
+                    else
+                      ditto -c -k --keepParent "$binary_path" "$asset_path"
+                    fi
                     ;;
                 esac
 
