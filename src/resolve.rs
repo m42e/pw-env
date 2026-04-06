@@ -424,17 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn formats_audit_log_uses_unknown_when_dir_has_no_name() {
-        // Using root-level path "/" has no file_name
-        let env_path = std::path::PathBuf::from("/nonexistent/.env");
-        let dir = std::path::PathBuf::from("/");
-
-        let line = format_credential_fetch_audit(&env_path, &dir, None, "op", "KEY");
-        // "/" has no file_name, so it falls back to "unknown"
-        assert!(line.contains("project=unknown") || line.contains("project="));
-    }
-
-    #[test]
     fn formats_audit_log_ignores_empty_project_string_and_uses_dir_name() {
         // When project is Some(""), the empty string must be filtered out
         // and the git root / dir name used instead.
@@ -452,5 +441,240 @@ mod tests {
 
         // Empty project string is filtered; should fall back to "my-repo" (git root name).
         assert!(line.contains("project=my-repo"), "expected project=my-repo in: {line}");
+    }
+
+    /// Verify that `log_credential_fetch_audit` actually emits a tracing event.
+    /// A mutant that replaces the function body with `()` would emit nothing and fail this test.
+    #[test]
+    fn log_credential_fetch_audit_emits_audit_message() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct BufMakeWriter(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufMakeWriter {
+            type Writer = BufWriter;
+            fn make_writer(&'a self) -> BufWriter {
+                BufWriter(self.0.clone())
+            }
+        }
+
+        let root = unique_subdir("audit-emit");
+        let dir = root.join("service");
+        let env_path = dir.join(".env");
+        fs::create_dir_all(&dir).unwrap();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufMakeWriter(buf.clone()))
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_credential_fetch_audit(&env_path, &dir, Some("my-project"), "1Password", "API_KEY");
+        });
+
+        let _ = fs::remove_dir_all(&root);
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("AUDIT credential_fetch"),
+            "expected audit message in tracing output, got: {output:?}"
+        );
+    }
+
+    /// Set up mock CLI binaries and an isolated approval store (via a temporary $HOME),
+    /// then call `f`, returning its result. The `env_path` .env file must already exist.
+    ///
+    /// Used by tests that exercise `resolve_env_file` with resolvable entries so that
+    /// `Config::ensure_secret_fetch_approved` does not block the test.
+    #[cfg(unix)]
+    fn with_approval_and_mock_binaries<T, F>(
+        op_script: Option<&str>,
+        bw_script: Option<&str>,
+        env_path: &std::path::Path,
+        f: F,
+    ) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Redirect HOME so the approval store is written to a temp directory.
+        let home_tmp = tempfile::TempDir::new().expect("should create temp HOME dir");
+        let old_home = std::env::var_os("HOME");
+        // SAFETY: serialised by MOCK_PATH_MUTEX — no concurrent HOME/PATH mutations.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+
+        // Pre-approve project-wide so ensure_secret_fetch_approved passes.
+        crate::config::Config::approve_secret_fetch(
+            env_path,
+            crate::config::SecretFetchApprovalMode::ProjectWide,
+        )
+        .expect("should pre-approve env file in temp HOME");
+
+        // Install mock binaries ahead of the real ones on PATH.
+        let script_dir = tempfile::TempDir::new().expect("should create temp script dir");
+        for (name, script) in [("op", op_script), ("bw", bw_script)] {
+            if let Some(src) = script {
+                let p = script_dir.path().join(name);
+                fs::write(&p, src).expect("should write mock script");
+                let mut perms = fs::metadata(&p).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&p, perms).unwrap();
+            }
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(script_dir.path().to_path_buf())
+                .chain(std::env::split_paths(&old_path)),
+        )
+        .expect("should construct new PATH");
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let result = f();
+
+        unsafe { std::env::set_var("PATH", &old_path) };
+        match old_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        result
+    }
+
+    /// The op:// reference in an entry must be forwarded to the backend's "read" command.
+    /// A mutant that deletes the `EntryKind::OpReference(r)` match arm would make
+    /// `reference` always `None`, causing the backend to fall back to key-based "item get"
+    /// which the mock rejects — leaving API_KEY absent from the resolved map.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_passes_op_reference_to_backend() {
+        let temp = unique_subdir("resolve-op-ref");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=op://My Vault/my-item/field\n").unwrap();
+
+        let op_script =
+            "#!/bin/sh\nif [ \"$1\" = 'read' ]; then echo 'op-ref-secret'; else exit 1; fi\n";
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let resolved = with_approval_and_mock_binaries(Some(op_script), None, &env_path, || {
+            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+        });
+
+        let _ = fs::remove_dir_all(&temp);
+        assert_eq!(
+            resolved.get("API_KEY").map(String::as_str),
+            Some("op-ref-secret"),
+            "op:// reference should be forwarded to 'op read'"
+        );
+    }
+
+    /// The bw:// reference in an entry must be forwarded to the backend's "get item" command.
+    ///
+    /// This test covers two mutations:
+    /// - `delete match arm EntryKind::BwReference(r)` → reference becomes None, the backend
+    ///   falls back to "get password BW_KEY" which the mock rejects → key absent.
+    /// - `delete ! in !bw_entries.is_empty()` → the bw block only runs when bw_entries is
+    ///   empty, so BW_KEY is never resolved → key absent.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_passes_bw_reference_to_backend() {
+        let temp = unique_subdir("resolve-bw-ref");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "BW_KEY=bw://my-item/password\n").unwrap();
+
+        let bw_item_json =
+            r#"{"type":1,"name":"my-item","login":{"password":"bw-ref-secret"}}"#;
+        // Match only the exact item name extracted from the bw:// reference ("my-item").
+        // Without the BwReference arm the backend falls back to "get item BW_KEY" (the env
+        // key name), which does NOT match "my-item", so the mock exits with an error and
+        // the key stays absent from the resolved map.
+        let bw_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = 'get' ] && [ \"$2\" = 'item' ] && [ \"$3\" = 'my-item' ]; then echo '{}'; else exit 1; fi\n",
+            bw_item_json
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let resolved =
+            with_approval_and_mock_binaries(None, Some(&bw_script), &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+            });
+
+        let _ = fs::remove_dir_all(&temp);
+        assert_eq!(
+            resolved.get("BW_KEY").map(String::as_str),
+            Some("bw-ref-secret"),
+            "bw:// reference should be forwarded to 'bw get item'"
+        );
+    }
+
+    /// Empty-value entries must be resolved via the configured non-GPG default backend.
+    ///
+    /// This test covers two mutations:
+    /// - `delete ! in !default_entries.is_empty()` → the default block only runs when the
+    ///   list is empty, so DEFAULT_KEY is never resolved → key absent.
+    /// - `replace == with != in default_backend_name == "gpg"` → the GPG code path is taken
+    ///   even though the backend is "op"; GpgBackend::resolve_all fails (no .env.gpg file)
+    ///   → key absent.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_resolves_default_entries_with_non_gpg_backend() {
+        let temp = unique_subdir("resolve-default");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "DEFAULT_KEY=\n").unwrap();
+
+        // Any op invocation returns "default-op-secret".
+        let op_script = "#!/bin/sh\necho 'default-op-secret'\n";
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(), // default backend = "op"
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let resolved = with_approval_and_mock_binaries(Some(op_script), None, &env_path, || {
+            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+        });
+
+        let _ = fs::remove_dir_all(&temp);
+        assert_eq!(
+            resolved.get("DEFAULT_KEY").map(String::as_str),
+            Some("default-op-secret"),
+            "empty-value entries should be resolved via the configured non-gpg backend"
+        );
     }
 }
