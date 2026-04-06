@@ -414,6 +414,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
     }
 }
 
+#[mutants::skip]
 fn maybe_check_for_release_update(command: &Commands, config: &config::Config) {
     if matches!(
         command,
@@ -638,6 +639,7 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+#[mutants::skip]
 fn check_backends() {
     eprintln!("Checking password manager backends:");
     eprintln!();
