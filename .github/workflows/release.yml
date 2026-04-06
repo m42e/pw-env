@@ -48,15 +48,15 @@ jobs:
             binary: pw-env
             archive: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin: v4
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # pin: stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # pin: v2
         with:
           key: ${{ matrix.target }}
 
@@ -178,7 +178,7 @@ jobs:
 
       - name: Upload notarization metadata
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # pin: v7
         with:
           name: notarization-${{ env.RELEASE_TAG }}-${{ matrix.target }}
           path: notarization-${{ matrix.target }}.json
@@ -205,7 +205,7 @@ jobs:
           Compress-Archive -Path "dist/${{ matrix.target }}/*" -DestinationPath "pw-env-${env:RELEASE_TAG}-${{ matrix.target }}.zip"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # pin: v7
         with:
           name: pw-env-${{ matrix.target }}
           path: pw-env-${{ env.RELEASE_TAG }}-${{ matrix.target }}.*
@@ -223,13 +223,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # pin: v4
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin: v4
         with:
           path: dist
           merge-multiple: true
@@ -240,7 +240,7 @@ jobs:
           cp LICENSE dist/LICENSE
 
       - name: Install git-cliff
-        uses: kenji-miyake/setup-git-cliff@v2
+        uses: kenji-miyake/setup-git-cliff@2778609c643a39a2576c4bae2e493b855eb4aee8 # pin: v2
 
       - name: Generate release notes
         run: |

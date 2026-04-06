@@ -2,6 +2,7 @@
   "name": "pw-env-docs",
   "private": true,
   "scripts": {
+    "actions:update": "node scripts/update-workflow-action-pins.mjs",
     "docs:sync-assets": "node scripts/sync-doc-assets.mjs",
     "docs:sitemap": "node scripts/generate-sitemap.mjs",
     "docs:dev": "npm run docs:sync-assets && vitepress dev docs --host 127.0.0.1 --port 4173",
