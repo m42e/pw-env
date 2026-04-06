@@ -6,7 +6,7 @@ pw-env can check GitHub releases for newer versions and replace the current bina
 
 On interactive commands other than `export` and `update`, pw-env can check GitHub for a newer release. The interval is controlled by the `[updates]` section in the config file.
 
-```toml title="~/.config/pw-manager-env/config.toml"
+```toml title="~/.config/pw-env/config.toml"
 [updates]
 enabled = true
 check_interval_hours = 24

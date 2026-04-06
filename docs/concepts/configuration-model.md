@@ -4,7 +4,7 @@ pw-env layers defaults, project overrides, and optional project-local overrides 
 
 ## Global config path
 
-By default, pw-env reads the global config from `~/.config/pw-manager-env/config.toml`.
+By default, pw-env reads the global config from `~/.config/pw-env/config.toml`.
 
 If `XDG_CONFIG_HOME` is set, pw-env uses that directory instead of `~/.config`.
 

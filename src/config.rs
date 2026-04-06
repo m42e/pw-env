@@ -175,7 +175,7 @@ fn default_log_file() -> Option<String> {
     dirs::state_dir()
         .or_else(|| dirs::data_local_dir())
         .map(|d| {
-            d.join("pw-manager-env")
+            d.join("pw-env")
                 .join("pw-env.log")
                 .to_string_lossy()
                 .into_owned()
@@ -237,13 +237,13 @@ impl Config {
         // Prefer XDG_CONFIG_HOME, then ~/.config (Unix convention for CLI tools)
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
             return PathBuf::from(xdg)
-                .join("pw-manager-env")
+                .join("pw-env")
                 .join("config.toml");
         }
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("~"))
             .join(".config")
-            .join("pw-manager-env")
+            .join("pw-env")
             .join("config.toml")
     }
 
@@ -700,7 +700,7 @@ impl ApprovedProjectConfigs {
 
     fn path() -> Option<PathBuf> {
         dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
-            dir.join("pw-manager-env")
+            dir.join("pw-env")
                 .join("approved-project-configs.json")
         })
     }
@@ -822,7 +822,7 @@ impl ApprovedSecretFetches {
 
     fn path() -> Option<PathBuf> {
         dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
-            dir.join("pw-manager-env")
+            dir.join("pw-env")
                 .join("approved-secret-fetches.json")
         })
     }
@@ -914,7 +914,7 @@ impl ReviewedMigrations {
     fn path() -> Option<PathBuf> {
         dirs::state_dir()
             .or_else(dirs::data_local_dir)
-            .map(|dir| dir.join("pw-manager-env").join("reviewed-migrations.json"))
+            .map(|dir| dir.join("pw-env").join("reviewed-migrations.json"))
     }
 }
 

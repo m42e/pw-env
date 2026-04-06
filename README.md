@@ -130,7 +130,7 @@ For the GPG backend, empty keys are resolved from an encrypted env file such as 
 Generate the template:
 
 ```bash
-pw-env config-template > ~/.config/pw-manager-env/config.toml
+pw-env config-template > ~/.config/pw-env/config.toml
 ```
 
 Minimal example using 1Password:
@@ -231,7 +231,7 @@ Project name detection uses the nearest Git repository root directory name when 
 Default config path:
 
 ```text
-~/.config/pw-manager-env/config.toml
+~/.config/pw-env/config.toml
 ```
 
 Top-level sections:

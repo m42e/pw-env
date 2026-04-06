@@ -407,7 +407,7 @@ impl ArchiveFormat {
 fn state_path() -> Option<PathBuf> {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
-        .map(|dir| dir.join("pw-manager-env").join(RELEASE_CHECK_STATE_FILE))
+        .map(|dir| dir.join("pw-env").join(RELEASE_CHECK_STATE_FILE))
 }
 
 fn now_unix_timestamp() -> u64 {

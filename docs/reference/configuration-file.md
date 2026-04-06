@@ -1,12 +1,12 @@
 # Configuration file
 
-The main config file lives at `~/.config/pw-manager-env/config.toml` unless `XDG_CONFIG_HOME` overrides that location.
+The main config file lives at `~/.config/pw-env/config.toml` unless `XDG_CONFIG_HOME` overrides that location.
 
 ## Default template
 
-```toml title="~/.config/pw-manager-env/config.toml"
+```toml title="~/.config/pw-env/config.toml"
 # pw-env configuration
-# Place this file at ~/.config/pw-manager-env/config.toml
+# Place this file at ~/.config/pw-env/config.toml
 
 [defaults]
 # Default backend: "op" (1Password), "bw" (Bitwarden), or "gpg" (GPG encrypted file)
@@ -37,9 +37,9 @@ file_pattern = ".env.gpg"
 [log]
 # Log level: trace, debug, info, warn, error
 level = "info"
-# Log file path (optional, defaults to ~/.local/state/pw-manager-env/pw-env.log)
+# Log file path (optional, defaults to ~/.local/state/pw-env/pw-env.log)
 # Successful credential fetches are also written here as AUDIT lines without secret values.
-# file = "~/.local/state/pw-manager-env/pw-env.log"
+# file = "~/.local/state/pw-env/pw-env.log"
 
 [updates]
 # Automatically check GitHub releases for a newer pw-env version.

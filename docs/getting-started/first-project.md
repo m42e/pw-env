@@ -26,14 +26,14 @@ Plaintext values are left alone until you migrate them. Add `# no-migrate` when 
 Start from the built-in template:
 
 ```console
-$ pw-env config-template > ~/.config/pw-manager-env/config.toml
+$ pw-env config-template > ~/.config/pw-env/config.toml
 ```
 
 Pick a default backend for empty values.
 
 === "1Password"
 
-    ```toml title="~/.config/pw-manager-env/config.toml"
+    ```toml title="~/.config/pw-env/config.toml"
     [defaults]
     backend = "op"
 
@@ -43,7 +43,7 @@ Pick a default backend for empty values.
 
 === "Bitwarden"
 
-    ```toml title="~/.config/pw-manager-env/config.toml"
+    ```toml title="~/.config/pw-env/config.toml"
     [defaults]
     backend = "bw"
 
@@ -53,7 +53,7 @@ Pick a default backend for empty values.
 
 === "GPG"
 
-    ```toml title="~/.config/pw-manager-env/config.toml"
+    ```toml title="~/.config/pw-env/config.toml"
     [defaults]
     backend = "gpg"
 
