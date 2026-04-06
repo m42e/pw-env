@@ -1,26 +1,46 @@
 # Release Workflow
 
-This repository publishes releases from tags that match `v*` through the GitHub Actions workflow in `.github/workflows/release.yml`.
+This repository uses a PR-driven release workflow.
+
+Release preparation starts with `.github/workflows/prepare-release-pr.yml`, merge-triggered tagging is handled by `.github/workflows/tag-release-pr.yml`, and publishing is handled by `.github/workflows/release.yml` for tags that match `v*`.
 
 ## Release Steps
 
-1. Prepare the release version locally.
+1. Dispatch the release preparation workflow with a semver version without a leading `v`.
 
 ```bash
-./scripts/release.sh 0.1.1
+gh workflow run prepare-release-pr.yml --field version=0.1.1
 ```
 
-2. Review the generated commit and release notes.
+You can also run the same workflow from the GitHub Actions UI.
 
-3. Push `main` and the annotated tag.
+2. Review the generated release PR.
 
-```bash
-git push origin main v0.1.1
-```
+The workflow creates branch `release/v0.1.1`, updates `Cargo.toml`, refreshes `Cargo.lock` when needed, generates `release-notes/v0.1.1.md`, and opens PR `Release v0.1.1` labeled `release`.
 
-4. GitHub Actions builds the release artifacts for Linux, Windows, and macOS.
+3. Merge the release PR into `main` after review and CI pass.
 
-5. The workflow creates the GitHub release and uploads the build artifacts.
+When the merged PR still has the `release` label, `.github/workflows/tag-release-pr.yml` verifies the version, creates annotated tag `v0.1.1`, and dispatches `.github/workflows/release.yml`.
+
+4. Verify the publish workflow.
+
+`.github/workflows/release.yml` builds release artifacts for these targets:
+
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-pc-windows-msvc`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+
+The workflow then generates release notes, creates the GitHub release, and uploads the build artifacts.
+
+5. Confirm the release output.
+
+Verify that the GitHub release title is `v0.1.1`, the crate version in `Cargo.toml` matches `0.1.1`, and the expected artifacts are attached to the release.
+
+## Manual Fallback
+
+The preferred path is the PR-based workflow above. Only use a manual local release flow when you explicitly want to bypass the repository default.
 
 ## macOS Signing and Notarization
 
