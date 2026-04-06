@@ -71,6 +71,39 @@ async function resolveCommitSha(repo, ref, cache) {
   return sha;
 }
 
+async function resolveLatestTrackedRef(repo, currentTrackedRef, cache) {
+  if (cache.has(repo)) {
+    return cache.get(repo);
+  }
+
+  const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "pw-env-workflow-action-updater",
+    },
+  });
+
+  if (response.status === 404) {
+    cache.set(repo, currentTrackedRef);
+    return currentTrackedRef;
+  }
+
+  if (!response.ok) {
+    throw new Error(`GitHub API returned ${response.status} for latest release of ${repo}`);
+  }
+
+  const payload = await response.json();
+  const tagName = payload.tag_name;
+
+  if (typeof tagName !== "string" || tagName.length === 0) {
+    cache.set(repo, currentTrackedRef);
+    return currentTrackedRef;
+  }
+
+  cache.set(repo, tagName);
+  return tagName;
+}
+
 function buildUpdatedLine(prefix, repo, sha, trackedRef) {
   return `${prefix}${repo}@${sha} # pin: ${trackedRef}`;
 }
@@ -126,12 +159,17 @@ if (groups.size === 0) {
 }
 
 const shaCache = new Map();
+const releaseTagCache = new Map();
 
 for (const group of groups.values()) {
-  group.latestSha = await resolveCommitSha(group.repo, group.trackedRef, shaCache);
+  group.latestTrackedRef = await resolveLatestTrackedRef(group.repo, group.trackedRef, releaseTagCache);
+  group.latestSha = await resolveCommitSha(group.repo, group.latestTrackedRef, shaCache);
   group.currentRefs = [...new Set(group.occurrences.map((occurrence) => occurrence.ref))];
   group.needsUpdate = group.occurrences.some(
-    (occurrence) => occurrence.ref !== group.latestSha || !occurrence.hasPinComment,
+    (occurrence) =>
+      occurrence.ref !== group.latestSha ||
+      occurrence.trackedRef !== group.latestTrackedRef ||
+      !occurrence.hasPinComment,
   );
 }
 
@@ -139,13 +177,13 @@ const outdatedGroups = [...groups.values()].filter((group) => group.needsUpdate)
 const upToDateGroups = [...groups.values()].filter((group) => !group.needsUpdate);
 
 for (const group of upToDateGroups) {
-  console.log(`up-to-date  ${group.repo}@${group.trackedRef} -> ${shortenSha(group.latestSha)}`);
+  console.log(`up-to-date  ${group.repo}@${group.latestTrackedRef} -> ${shortenSha(group.latestSha)}`);
 }
 
 for (const group of outdatedGroups) {
   const currentRefs = group.currentRefs.join(", ");
   console.log(
-    `update      ${group.repo}@${group.trackedRef} ${currentRefs} -> ${shortenSha(group.latestSha)} (${group.occurrences.length} use${group.occurrences.length === 1 ? "" : "s"})`,
+    `update      ${group.repo}@${group.trackedRef} ${currentRefs} -> ${group.latestTrackedRef} ${shortenSha(group.latestSha)} (${group.occurrences.length} use${group.occurrences.length === 1 ? "" : "s"})`,
   );
 }
 
@@ -174,7 +212,7 @@ try {
     if (!forceWrite && interactive) {
       if (!applyAll) {
         const answer = (await readline.question(
-          `Update ${group.repo}@${group.trackedRef} to ${group.latestSha}? [Y]es/[n]o/[a]ll/[q]uit `,
+          `Update ${group.repo} from ${group.trackedRef} to ${group.latestTrackedRef} (${group.latestSha})? [Y]es/[n]o/[a]ll/[q]uit `,
         ))
           .trim()
           .toLowerCase();
@@ -204,7 +242,7 @@ try {
         occurrence.prefix,
         occurrence.repo,
         group.latestSha,
-        group.trackedRef,
+        group.latestTrackedRef,
       );
       writeCount += 1;
     }
