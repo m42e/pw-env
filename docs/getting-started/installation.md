@@ -10,12 +10,24 @@ pw-env ships prebuilt binaries for macOS, Linux, and Windows, and it can also be
 $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash
 ```
 
+```powershell [Latest release (PowerShell)]
+PS> & ([scriptblock]::Create((irm https://m42e.github.io/pw-env/install.ps1)))
+```
+
 ```console [Specific version]
 $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --version v0.2.8
 ```
 
+```powershell [Specific version (PowerShell)]
+PS> & ([scriptblock]::Create((irm https://m42e.github.io/pw-env/install.ps1))) -Version v0.2.8
+```
+
 ```console [Custom install directory]
 $ curl -fsSL https://m42e.github.io/pw-env/install.sh | bash -s -- --dir "$HOME/.local/bin"
+```
+
+```powershell [Custom install directory (PowerShell)]
+PS> & ([scriptblock]::Create((irm https://m42e.github.io/pw-env/install.ps1))) -Dir "$HOME/.local/bin"
 ```
 
 :::

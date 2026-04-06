@@ -94,6 +94,10 @@ LOG_LEVEL=debug # no-migrate
 $ curl -fsSL https://m42e.de/pw-env/install.sh | bash
 ```
 
+```powershell [Standalone installer (PowerShell)]
+PS> & ([scriptblock]::Create((irm https://m42e.de/pw-env/install.ps1)))
+```
+
 ```console [Specific release]
 $ curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --version v0.2.8
 ```

@@ -30,10 +30,20 @@ Install the latest matching prebuilt release:
 curl -fsSL https://m42e.de/pw-env/install.sh | bash
 ```
 
+PowerShell users can install with:
+
+```powershell
+& ([scriptblock]::Create((irm https://m42e.de/pw-env/install.ps1)))
+```
+
 Install a specific release version:
 
 ```bash
 curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --version v0.1.0
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://m42e.de/pw-env/install.ps1))) -Version v0.1.0
 ```
 
 Install into a custom directory:
@@ -42,7 +52,11 @@ Install into a custom directory:
 curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --dir "$HOME/.local/bin"
 ```
 
-The installer currently supports these prebuilt targets:
+```powershell
+& ([scriptblock]::Create((irm https://m42e.de/pw-env/install.ps1))) -Dir "$HOME/.local/bin"
+```
+
+The install scripts currently support these prebuilt targets:
 
 - macOS Apple Silicon
 - macOS Intel
