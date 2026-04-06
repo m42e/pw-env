@@ -8,6 +8,33 @@ use tracing::debug;
 
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 
+/// Write a file with owner-only permissions (0o600) on Unix.
+/// The file is created with restricted permissions from the start so that
+/// sensitive state is never briefly world-readable.
+fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct ApprovedProjectConfigEntry {
     pub path: PathBuf,
@@ -594,6 +621,14 @@ impl Config {
 
 impl ProjectDirectoryOverride {
     fn load_if_approved(path: &Path) -> Result<Option<Self>> {
+        if path.is_symlink() {
+            eprintln!(
+                "pw-env: refusing to follow {} symlink at {}. Use a regular file.",
+                PROJECT_OVERRIDE_FILE_NAME,
+                path.display()
+            );
+            return Ok(None);
+        }
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read project override from {}", path.display()))?;
         let local_override: ProjectDirectoryOverride = toml::from_str(&contents)
@@ -682,7 +717,7 @@ impl ApprovedProjectConfigs {
 
         let contents =
             serde_json::to_string_pretty(self).context("Failed to serialize approval store")?;
-        std::fs::write(path, contents)
+        write_private_file(path, &contents)
             .with_context(|| format!("Failed to write approval store to {}", path.display()))
     }
 
@@ -767,7 +802,7 @@ impl ApprovedSecretFetches {
 
         let contents = serde_json::to_string_pretty(self)
             .context("Failed to serialize secret fetch approval store")?;
-        std::fs::write(path, contents).with_context(|| {
+        write_private_file(path, &contents).with_context(|| {
             format!(
                 "Failed to write secret fetch approval store to {}",
                 path.display()
@@ -776,10 +811,26 @@ impl ApprovedSecretFetches {
     }
 
     fn approve_hash(&mut self, project_path: &Path, env_hash: String) {
-        self.approved_env_hashes
+        let hashes = self
+            .approved_env_hashes
             .entry(normalize_path(project_path))
-            .or_default()
-            .insert(env_hash);
+            .or_default();
+        hashes.insert(env_hash);
+        // Limit stored hashes per project to prevent unbounded growth.
+        // Eviction order is lexicographic (BTreeSet), not chronological, but
+        // the important invariant is that the set stays bounded and the
+        // just-inserted hash is retained.
+        const MAX_HASHES_PER_PROJECT: usize = 10;
+        if hashes.len() > MAX_HASHES_PER_PROJECT {
+            let to_remove: Vec<String> = hashes
+                .iter()
+                .take(hashes.len() - MAX_HASHES_PER_PROJECT)
+                .cloned()
+                .collect();
+            for key in to_remove {
+                hashes.remove(&key);
+            }
+        }
     }
 
     fn allow_project_wide(&mut self, project_path: &Path) {
@@ -893,7 +944,7 @@ impl ReviewedMigrations {
 
         let contents = serde_json::to_string_pretty(self)
             .context("Failed to serialize reviewed migration store")?;
-        std::fs::write(path, contents).with_context(|| {
+        write_private_file(path, &contents).with_context(|| {
             format!(
                 "Failed to write reviewed migration store to {}",
                 path.display()
@@ -2447,5 +2498,48 @@ vault = "Work"
             "path should end with reviewed-migrations.json, got: {}",
             p.display()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_files_are_written_with_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test-state.json");
+        write_private_file(&path, "{}").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "state file should be owner-only (0o600)");
+    }
+
+    #[test]
+    fn approval_hashes_are_bounded_per_project() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("secret-fetches.json");
+        let project_path = Path::new("/test/project");
+
+        let mut approvals = ApprovedSecretFetches::default();
+        // Insert more hashes than the limit (10)
+        for i in 0..15 {
+            approvals.approve_hash(project_path, format!("hash_{:02}", i));
+        }
+        approvals.save_to_path(&store_path).unwrap();
+
+        let loaded = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
+        let hashes = loaded.approved_hashes(project_path);
+        assert!(hashes.len() <= 10, "should limit hashes to 10 per project, got {}", hashes.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_override_symlink_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let real_file = temp_dir.path().join("real.toml");
+        fs::write(&real_file, "backend = \"op\"\n").unwrap();
+        let symlink_path = temp_dir.path().join(".pw-env.toml");
+        std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
+
+        let result = ProjectDirectoryOverride::load_if_approved(&symlink_path).unwrap();
+        assert!(result.is_none(), "symlinked .pw-env.toml should be rejected");
     }
 }
