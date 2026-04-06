@@ -11,11 +11,11 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
   head: [
-    ["link", { rel: "icon", type: "image/svg+xml", href: `${base}assets/images/pw-env-mark.svg` }],
+    ["link", { rel: "icon", type: "image/png", href: `${base}assets/images/Logo-pw-env.png` }],
     ["meta", { name: "theme-color", content: "#f4f7fb" }],
   ],
   themeConfig: {
-    logo: "/assets/images/pw-env-mark.svg",
+    logo: "/assets/images/Logo-pw-env@3.png",
     siteTitle: "pw-env",
     nav: [
       { text: "Getting started", link: "/getting-started/installation" },

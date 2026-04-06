@@ -6,7 +6,7 @@ hero:
   text: Keep secrets out of it.
   tagline: pw-env resolves empty env keys from 1Password, Bitwarden, or GPG-backed files, then streams the results straight into your shell.
   image:
-    src: /assets/images/pw-env-mark.svg
+    src: /assets/images/Logo-pw-env.png
     alt: pw-env
   actions:
     - theme: brand
