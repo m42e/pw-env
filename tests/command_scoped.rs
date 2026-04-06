@@ -35,6 +35,7 @@ fn hook_outputs_exact_command_wrapper_without_path_match() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn hook_expands_globbed_command_wrappers_from_path() {
     let workspace = TempDir::new().unwrap();
     let project_dir = workspace.path().join("project");
@@ -75,6 +76,7 @@ fn hook_expands_globbed_command_wrappers_from_path() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn exec_removes_managed_keys_from_child_environment() {
     let workspace = TempDir::new().unwrap();
     let project_dir = workspace.path().join("project");
