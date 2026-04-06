@@ -444,14 +444,27 @@ impl ReleaseCheckState {
 
         let contents = serde_json::to_string_pretty(self)
             .context("failed to serialize release check state")?;
-        std::fs::write(path, &contents)
-            .with_context(|| format!("failed to write release check state to {}", path.display()))?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms).with_context(|| {
-                format!("failed to set permissions on {}", path.display())
+            use std::fs::OpenOptions;
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+            file.write_all(contents.as_bytes())
+                .with_context(|| {
+                    format!("failed to write release check state to {}", path.display())
+                })?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, &contents).with_context(|| {
+                format!("failed to write release check state to {}", path.display())
             })?;
         }
         Ok(())

@@ -8,17 +8,29 @@ use tracing::debug;
 
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 
-/// Write a file and restrict its permissions to owner-only (0o600) on Unix.
-/// This is used for state files that contain approval hashes and project paths.
+/// Write a file with owner-only permissions (0o600) on Unix.
+/// The file is created with restricted permissions from the start so that
+/// sensitive state is never briefly world-readable.
 fn write_private_file(path: &Path, contents: &str) -> Result<()> {
-    std::fs::write(path, contents)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)
-            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
     }
     Ok(())
 }
