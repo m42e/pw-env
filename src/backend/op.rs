@@ -112,11 +112,11 @@ impl OpBackend {
             if let Some(fields) = full_item.get("fields").and_then(|f| f.as_array()) {
                 for field in fields {
                     let label = field.get("label").and_then(|l| l.as_str());
-                    if label == Some("project") || label == Some("Project") {
-                        if field.get("value").and_then(|v| v.as_str()) == Some(project) {
-                            debug!("Matched item '{id}' by project field '{project}'");
-                            return Self::get_item_field(id, "label=password", vault, account);
-                        }
+                    if (label == Some("project") || label == Some("Project"))
+                        && field.get("value").and_then(|v| v.as_str()) == Some(project)
+                    {
+                        debug!("Matched item '{id}' by project field '{project}'");
+                        return Self::get_item_field(id, "label=password", vault, account);
                     }
                 }
             }
@@ -317,7 +317,9 @@ mod tests {
     // ------- Mock-op infrastructure -------
 
     fn with_mock_op<F: FnOnce()>(script: &str, f: F) {
-        let _guard = super::super::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = super::super::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("op");
         std::fs::write(&script_path, script).unwrap();
@@ -330,8 +332,7 @@ mod tests {
         }
         let old_path = std::env::var_os("PATH").unwrap_or_default();
         let new_path = std::env::join_paths(
-            std::iter::once(dir.path().to_path_buf())
-                .chain(std::env::split_paths(&old_path)),
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
         )
         .unwrap();
         // SAFETY: guarded by MOCK_PATH_MUTEX, single-threaded access to PATH
@@ -340,7 +341,10 @@ mod tests {
         unsafe { std::env::set_var("PATH", &old_path) };
     }
 
-    fn make_op_resolve_context<'a>(config: &'a Config, dir: &'a Path) -> super::super::ResolveContext<'a> {
+    fn make_op_resolve_context<'a>(
+        config: &'a Config,
+        dir: &'a Path,
+    ) -> super::super::ResolveContext<'a> {
         super::super::ResolveContext {
             dir,
             config,
@@ -429,7 +433,8 @@ mod tests {
     #[test]
     fn get_item_field_with_vault_arg() {
         with_mock_op("#!/bin/sh\necho 'vault-secret'\n", || {
-            let result = OpBackend::get_item_field("my-item", "label=password", Some("MyVault"), None);
+            let result =
+                OpBackend::get_item_field("my-item", "label=password", Some("MyVault"), None);
             assert_eq!(result.unwrap(), "vault-secret");
         });
     }
@@ -481,8 +486,7 @@ mod tests {
         // First call: op item get MY_KEY --fields ... → "more than 1 item found" (triggers disambiguation)
         // Second call: op item list → single-item list
         // Third call: op item get abc123 --fields ... (by id) → "resolved-value"
-        let script =
-            "#!/bin/sh\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\necho 'more than 1 item found' >&2\nexit 1\nfi\nif [ \"$2\" = \"list\" ]; then\necho '[{\"id\":\"abc123\",\"title\":\"MY_KEY\"}]'\nexit 0\nfi\necho 'resolved-value'\n";
+        let script = "#!/bin/sh\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\necho 'more than 1 item found' >&2\nexit 1\nfi\nif [ \"$2\" = \"list\" ]; then\necho '[{\"id\":\"abc123\",\"title\":\"MY_KEY\"}]'\nexit 0\nfi\necho 'resolved-value'\n";
         with_mock_op(script, || {
             let config = Config {
                 defaults: Defaults {

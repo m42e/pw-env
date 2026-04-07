@@ -1,13 +1,15 @@
 # pw-env
 
-`pw-env` is a Rust CLI that resolves `.env` entries from password managers instead of storing secrets in plaintext. It supports 1Password, Bitwarden, and GPG-encrypted env files, and can either print shell exports for `eval` or install a shell hook that automatically reloads secrets when you change directories.
+`pw-env` is a Rust CLI that resolves `.env` entries from password managers instead of storing secrets in plaintext. It
+supports 1Password, Bitwarden, and GPG-encrypted env files, and can either print shell exports for `eval` or install a
+shell hook that automatically reloads secrets when you change directories.
 
-The tool is designed for local development workflows where projects keep a checked-in or local `.env` shape, but secret values come from a secure backend.
+The tool is designed for local development workflows where projects keep a checked-in or local `.env` shape, but secret
+values come from a secure backend.
 
 ## Documentation
 
 The interactive manual is published with GitHub Pages at [m42e.de/pw-env](https://m42e.de/pw-env/).
-
 
 ## Features
 
@@ -155,7 +157,8 @@ Value handling works like this:
 - `KEY=bw://[folder/]item/field` resolves through Bitwarden
 - `KEY=plaintext` is treated as plaintext and left as-is until migrated
 
-To keep a plaintext entry out of warnings and `pw-env migrate`, mark it with `no-migrate` either on the same line or on the comment line directly above it:
+To keep a plaintext entry out of warnings and `pw-env migrate`, mark it with `no-migrate` either on the same line or on
+the comment line directly above it:
 
 ```dotenv
 LOG_LEVEL=debug # no-migrate
@@ -164,7 +167,8 @@ LOG_LEVEL=debug # no-migrate
 LOCAL_ONLY_TOKEN=dev-token
 ```
 
-Warnings for plaintext secrets use a simple heuristic based on secret-like key names such as `API_KEY` or `PASSWORD`, embedded credentials in URLs, and high-entropy token-like values.
+Warnings for plaintext secrets use a simple heuristic based on secret-like key names such as `API_KEY` or `PASSWORD`,
+embedded credentials in URLs, and high-entropy token-like values.
 
 For the GPG backend, empty keys are resolved from an encrypted env file such as `.env.gpg`.
 
@@ -215,7 +219,9 @@ For one-off use:
 eval "$(pw-env export . --shell bash)"
 ```
 
-The first time a project `.env` would fetch credentials, `pw-env` asks for approval. By default the approval is tied to the current project and `.env` content hash, so changing `.env` requires approval again. In an interactive prompt you can also allow any future `.env` changes for that project explicitly.
+The first time a project `.env` would fetch credentials, `pw-env` asks for approval. By default the approval is tied to
+the current project and `.env` content hash, so changing `.env` requires approval again. In an interactive prompt you
+can also allow any future `.env` changes for that project explicitly.
 
 For `fish`:
 
@@ -257,10 +263,12 @@ Invoke-Expression (& pw-env init powershell)
 
 Add that to your PowerShell profile (`$PROFILE`).
 
-The generated hooks unset previously exported variables when you leave a directory and load new ones when entering a directory containing `.env`.
-Warnings from `pw-env export` are written to stderr, so they remain visible when the shell hook auto-loads a directory.
+The generated hooks unset previously exported variables when you leave a directory and load new ones when entering a
+directory containing `.env`. Warnings from `pw-env export` are written to stderr, so they remain visible when the shell
+hook auto-loads a directory.
 
-`cmd.exe` does not expose equivalent automatic hook points for per-directory or per-command lifecycle events. Use `pw-env exec` directly when working from cmd.
+`cmd.exe` does not expose equivalent automatic hook points for per-directory or per-command lifecycle events. Use
+`pw-env exec` directly when working from cmd.
 
 ## Backend Resolution Model
 
@@ -277,7 +285,8 @@ For 1Password and Bitwarden, empty keys can be resolved in two common ways:
 
 For GPG, empty keys are looked up in the decrypted contents of the configured encrypted env file.
 
-Project name detection uses the nearest Git repository root directory name when disambiguating duplicate entries in 1Password or Bitwarden.
+Project name detection uses the nearest Git repository root directory name when disambiguating duplicate entries in
+1Password or Bitwarden.
 
 ## Configuration
 
@@ -300,7 +309,8 @@ Top-level sections:
 Audit logging for credential fetches:
 
 - Successful secret resolutions are written to the normal pw-env log file as `AUDIT credential_fetch ...` lines
-- Audit entries include the detected project, project root, working folder, `.env` path, backend, and credential key name
+- Audit entries include the detected project, project root, working folder, `.env` path, backend, and credential key
+  name
 - Secret values are never written to the audit log
 
 Automatic release checks:
@@ -327,7 +337,8 @@ Project-local overrides:
 Secret-fetch approvals:
 
 - `pw-env` blocks backend lookups until the current project and `.env` contents are approved
-- Hash-specific approvals are stored per project, so a modified `.env` cannot fetch new credentials without another approval
+- Hash-specific approvals are stored per project, so a modified `.env` cannot fetch new credentials without another
+  approval
 - You can explicitly allow any `.env` changes for a project if you trust the whole project directory
 
 Example with per-project overrides:
@@ -366,7 +377,8 @@ item = "company-api-env"
 vault = "Work"
 ```
 
-The local file is applied as the most specific override for that project directory after you approve its current contents.
+The local file is applied as the most specific override for that project directory after you approve its current
+contents.
 
 ## Command Reference
 
@@ -380,11 +392,14 @@ Main subcommands:
 
 - `pw-env init <bash|zsh|fish>` prints shell hook code
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
-- `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show full values
-- `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from `.env`; entries marked with `no-migrate` are skipped
+- `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show
+  full values
+- `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from
+  `.env`; entries marked with `no-migrate` are skipped
 - `pw-env check` checks available backends and active configuration
 - `pw-env approvals list` lists approved project-local override files and hashes
-- `pw-env approvals approve <path>` stores the current hash for a `.pw-env.toml` file or project directory after validating the file
+- `pw-env approvals approve <path>` stores the current hash for a `.pw-env.toml` file or project directory after
+  validating the file
 - `pw-env approvals show [path]` shows the current and approved hash for a `.pw-env.toml` file or project directory
 - `pw-env approvals revoke <path>` removes a stored approval for a `.pw-env.toml` file or project directory
 - `pw-env approvals list-fetch` lists approved secret-fetch projects and `.env` hashes
@@ -444,7 +459,8 @@ pw-env check
 
 - Resolved values are printed as shell export statements, so use `eval` only in trusted local workflows
 - Export formatting validates environment variable names and single-quote escapes values for shell safety
-- Plaintext values in `.env` are not exported as secrets by the resolver; they are left in place and reported for migration
+- Plaintext values in `.env` are not exported as secrets by the resolver; they are left in place and reported for
+  migration
 - GPG mode stores secrets in an encrypted file on disk rather than fetching them from an external password manager
 
 ## Development
@@ -466,4 +482,5 @@ npm run docs:dev
 
 ## Release
 
-The repository includes a documented multi-stage release process. See `release-workflow.md` for the tagging, publishing, and optional macOS signing setup.
+The repository includes a documented multi-stage release process. See `release-workflow.md` for the tagging, publishing,
+and optional macOS signing setup.

@@ -4,7 +4,8 @@ pw-env does not rewrite plaintext values automatically. Migration is an explicit
 
 ## Keep safe local values out of migration
 
-Mark values that should remain plaintext with `no-migrate` either on the same line or on the comment line directly above the entry.
+Mark values that should remain plaintext with `no-migrate` either on the same line or on the comment line directly above
+the entry.
 
 ```dotenv [.env]
 LOG_LEVEL=debug # no-migrate
@@ -16,7 +17,7 @@ LOCAL_ONLY_TOKEN=dev-token
 ## Run the migration
 
 ```console
-$ pw-env migrate .
+pw-env migrate .
 ```
 
 The migration flow:
@@ -51,8 +52,10 @@ Only values that were stored and verified are cleared. Skipped entries and faile
 
 ## Terminal requirements
 
-`pw-env migrate` requires an interactive terminal. If stdin or stderr is not a terminal, the command exits instead of attempting a partially interactive run.
+`pw-env migrate` requires an interactive terminal. If stdin or stderr is not a terminal, the command exits instead of
+attempting a partially interactive run.
 
 ## After migration
 
-Run `pw-env load .` or your usual `pw-env export` command to confirm that the project now resolves the keys from the backend.
+Run `pw-env load .` or your usual `pw-env export` command to confirm that the project now resolves the keys from the
+backend.

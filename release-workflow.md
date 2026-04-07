@@ -2,9 +2,12 @@
 
 This repository uses a PR-driven release workflow.
 
-Release preparation starts with `.github/workflows/prepare-release-pr.yml`, merge-triggered tagging is handled by `.github/workflows/tag-release-pr.yml`, and publishing is handled by `.github/workflows/release.yml` for tags that match `v*`.
+Release preparation starts with `.github/workflows/prepare-release-pr.yml`, merge-triggered tagging is handled by
+`.github/workflows/tag-release-pr.yml`, and publishing is handled by `.github/workflows/release.yml` for tags that match
+`v*`.
 
-If a release PR is closed without merging, `.github/workflows/tag-release-pr.yml` deletes the corresponding `release/v<version>` branch automatically.
+If a release PR is closed without merging, `.github/workflows/tag-release-pr.yml` deletes the corresponding
+`release/v<version>` branch automatically.
 
 ## Release Steps
 
@@ -18,13 +21,15 @@ You can also run the same workflow from the GitHub Actions UI.
 
 2. Review the generated release PR.
 
-The workflow creates branch `release/v0.1.1`, updates `Cargo.toml`, refreshes `Cargo.lock` when needed, generates `release-notes/v0.1.1.md`, and opens PR `Release v0.1.1` labeled `release`.
+The workflow creates branch `release/v0.1.1`, updates `Cargo.toml`, refreshes `Cargo.lock` when needed, generates
+`release-notes/v0.1.1.md`, and opens PR `Release v0.1.1` labeled `release`.
 
 If you close that PR without merging it, the `release/v0.1.1` branch is removed automatically.
 
 3. Merge the release PR into `main` after review and CI pass.
 
-When the merged PR still has the `release` label, `.github/workflows/tag-release-pr.yml` verifies the version, creates annotated tag `v0.1.1`, and dispatches `.github/workflows/release.yml`.
+When the merged PR still has the `release` label, `.github/workflows/tag-release-pr.yml` verifies the version, creates
+annotated tag `v0.1.1`, and dispatches `.github/workflows/release.yml`.
 
 4. Verify the publish workflow.
 
@@ -40,11 +45,13 @@ The workflow then generates release notes, creates the GitHub release, and uploa
 
 5. Confirm the release output.
 
-Verify that the GitHub release title is `v0.1.1`, the crate version in `Cargo.toml` matches `0.1.1`, and the expected artifacts are attached to the release.
+Verify that the GitHub release title is `v0.1.1`, the crate version in `Cargo.toml` matches `0.1.1`, and the expected
+artifacts are attached to the release.
 
 ## Manual Fallback
 
-The preferred path is the PR-based workflow above. Only use a manual local release flow when you explicitly want to bypass the repository default.
+The preferred path is the PR-based workflow above. Only use a manual local release flow when you explicitly want to
+bypass the repository default.
 
 ## macOS Signing and Notarization
 
@@ -54,10 +61,14 @@ The workflow behaves like this:
 
 - If the signing secrets are missing, macOS artifacts are built and published unsigned.
 - If the signing secrets are present, the `pw-env` binary is signed before packaging.
-- If the notarization secrets are also present, the signed binary is submitted to Apple notarization without waiting for Apple to finish processing.
-- The release is published immediately after submission, and `.github/workflows/finalize-notarization.yml` polls Apple hourly.
-- Pending notarization submissions are stored as GitHub Actions artifacts instead of being embedded in the GitHub release notes.
-- Once Apple accepts the submission, the polling workflow staples the macOS binaries and replaces the existing macOS release assets in place.
+- If the notarization secrets are also present, the signed binary is submitted to Apple notarization without waiting for
+  Apple to finish processing.
+- The release is published immediately after submission, and `.github/workflows/finalize-notarization.yml` polls Apple
+  hourly.
+- Pending notarization submissions are stored as GitHub Actions artifacts instead of being embedded in the GitHub
+  release notes.
+- Once Apple accepts the submission, the polling workflow staples the macOS binaries and replaces the existing macOS
+  release assets in place.
 
 ### Required GitHub Secrets
 
@@ -150,5 +161,6 @@ To write the generated values to a local env file instead of stdout:
 ## Notes
 
 - The release workflow signs the CLI binary itself, not an `.app` bundle.
-- The script does not generate Apple credentials for you; it only packages and uploads values you already obtained from Apple.
+- The script does not generate Apple credentials for you; it only packages and uploads values you already obtained from
+  Apple.
 - Treat the `.p12` export, export password, and app-specific password as sensitive credentials.

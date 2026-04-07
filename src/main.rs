@@ -9,15 +9,15 @@ mod shell;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use glob::Pattern;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::IsTerminal;
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -303,7 +303,8 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 _ => output::ShellSyntax::Posix,
             };
 
-            let hook_output = build_hook_output(&dir, shell_syntax, &config, std::env::var_os("PATH"))?;
+            let hook_output =
+                build_hook_output(&dir, shell_syntax, &config, std::env::var_os("PATH"))?;
             print!("{hook_output}");
 
             Ok(())
@@ -418,7 +419,10 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 fn maybe_check_for_release_update(command: &Commands, config: &config::Config) {
     if matches!(
         command,
-        Commands::Exec { .. } | Commands::Export { .. } | Commands::Hook { .. } | Commands::Update { .. }
+        Commands::Exec { .. }
+            | Commands::Export { .. }
+            | Commands::Hook { .. }
+            | Commands::Update { .. }
     ) {
         return;
     }
@@ -464,9 +468,7 @@ fn emit_plaintext_secret_warning(env_file: &env_file::EnvFile) -> Result<()> {
     Ok(())
 }
 
-fn pending_migration_entries<'a>(
-    env_file: &'a env_file::EnvFile,
-) -> Result<Vec<&'a env_file::EnvEntry>> {
+fn pending_migration_entries(env_file: &env_file::EnvFile) -> Result<Vec<&env_file::EnvEntry>> {
     let reviewed = config::Config::reviewed_migration_entry_fingerprints(&env_file.path)?;
     Ok(env_file.likely_secret_entries_unreviewed(&reviewed))
 }
@@ -510,7 +512,10 @@ fn build_hook_output(
             command_patterns.len(),
             dir.display()
         );
-        return Ok(output::format_command_wrappers(&wrapped_commands, shell_syntax));
+        return Ok(output::format_command_wrappers(
+            &wrapped_commands,
+            shell_syntax,
+        ));
     }
 
     let env_file = env_file::EnvFile::parse(&env_path)?;
@@ -545,9 +550,7 @@ fn build_hook_output(
                     .map(|key| format!("'{key}'"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                output_text.push_str(&format!(
-                    "$global:__pw_env_previous_keys = @({quoted})\n"
-                ));
+                output_text.push_str(&format!("$global:__pw_env_previous_keys = @({quoted})\n"));
             }
             output_text.push_str("$global:__pw_env_previous_commands = @()\n");
         }
@@ -870,7 +873,10 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             if revoked {
                 eprintln!("Revoked secret-fetch approvals for {}", path.display());
             } else {
-                eprintln!("No secret-fetch approval entry found for {}", path.display());
+                eprintln!(
+                    "No secret-fetch approval entry found for {}",
+                    path.display()
+                );
             }
             Ok(())
         }
@@ -1110,7 +1116,9 @@ mod tests {
 
     #[test]
     fn is_executable_file_nonexistent_returns_false() {
-        assert!(!is_executable_file(Path::new("/nonexistent/file/path/12345")));
+        assert!(!is_executable_file(Path::new(
+            "/nonexistent/file/path/12345"
+        )));
     }
 
     #[test]
@@ -1158,7 +1166,10 @@ mod tests {
         let path_var = std::env::join_paths([temp_dir.path()]).unwrap();
         let commands = resolve_wrapped_commands(&["cargo*".to_string()], Some(path_var));
 
-        assert_eq!(commands, vec!["cargo".to_string(), "cargo-clippy".to_string()]);
+        assert_eq!(
+            commands,
+            vec!["cargo".to_string(), "cargo-clippy".to_string()]
+        );
     }
 
     #[test]
@@ -1167,10 +1178,8 @@ mod tests {
         create_executable(temp_dir.path().join("cargo"));
 
         let path_var = std::env::join_paths([temp_dir.path()]).unwrap();
-        let commands = resolve_wrapped_commands(
-            &["cargo".to_string(), "cargo*".to_string()],
-            Some(path_var),
-        );
+        let commands =
+            resolve_wrapped_commands(&["cargo".to_string(), "cargo*".to_string()], Some(path_var));
 
         assert_eq!(commands, vec!["cargo".to_string()]);
     }
@@ -1334,7 +1343,10 @@ mod tests {
 
         let env_file = env_file::EnvFile::parse(&env_path).unwrap();
         let entries = pending_migration_entries(&env_file).unwrap();
-        assert!(!entries.is_empty(), "expected at least one pending secret entry");
+        assert!(
+            !entries.is_empty(),
+            "expected at least one pending secret entry"
+        );
     }
 
     #[test]
@@ -1386,7 +1398,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let env_path = temp_dir.path().join(".env");
         // A key that looks like a secret with a long enough value
-        std::fs::write(&env_path, "API_SECRET_KEY=very_long_plain_text_value_here\n").unwrap();
+        std::fs::write(
+            &env_path,
+            "API_SECRET_KEY=very_long_plain_text_value_here\n",
+        )
+        .unwrap();
 
         let env_file = env_file::EnvFile::parse(&env_path).unwrap();
         // This should emit the warning (to stderr) but return Ok
@@ -1397,7 +1413,9 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn check_backends_reports_not_found_when_backends_missing() {
-        let _guard = crate::backend::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let temp_dir = TempDir::new().unwrap();
         let path_val = std::env::join_paths([temp_dir.path()]).unwrap();
         let old_path = std::env::var_os("PATH").unwrap_or_default();
@@ -1412,7 +1430,10 @@ mod tests {
         let config = config::Config {
             defaults: config::Defaults::default(),
             log: config::LogConfig::default(),
-            updates: config::UpdateConfig { enabled: false, check_interval_hours: 24 },
+            updates: config::UpdateConfig {
+                enabled: false,
+                check_interval_hours: 24,
+            },
             projects: vec![],
         };
         // Should not panic; stderr is not a terminal in tests so it returns early
@@ -1436,7 +1457,9 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn check_config_when_config_file_exists_with_vault_and_folder() {
-        let _guard = crate::backend::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let temp_dir = TempDir::new().unwrap();
         // Create config file at XDG_CONFIG_HOME/pw-env/config.toml
         let config_dir = temp_dir.path().join("pw-env");
@@ -1538,6 +1561,9 @@ mod tests {
         let env_file = env_file::EnvFile::parse(&env_path).unwrap();
         let entries = env_file.entries();
         let result = summarize_entry_keys(&entries);
-        assert!(result.contains("+1 more"), "expected '+1 more' in: {result}");
+        assert!(
+            result.contains("+1 more"),
+            "expected '+1 more' in: {result}"
+        );
     }
 }

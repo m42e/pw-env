@@ -49,7 +49,7 @@ features:
 ## Example
 
 ```console [Load the current directory into bash]
-$ eval "$(pw-env export . --shell bash)"
+eval "$(pw-env export . --shell bash)"
 ```
 
 ```dotenv [.env]
@@ -91,7 +91,7 @@ LOG_LEVEL=debug # no-migrate
 ::: code-group
 
 ```console [Standalone installer]
-$ curl -fsSL https://m42e.de/pw-env/install.sh | bash
+curl -fsSL https://m42e.de/pw-env/install.sh | bash
 ```
 
 ```powershell [Standalone installer (PowerShell)]
@@ -99,12 +99,12 @@ PS> & ([scriptblock]::Create((irm https://m42e.de/pw-env/install.ps1)))
 ```
 
 ```console [Specific release]
-$ curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --version v0.2.8
+curl -fsSL https://m42e.de/pw-env/install.sh | bash -s -- --version v0.2.8
 ```
 
 ```console [Build from source]
-$ cargo build --release
-$ ./target/release/pw-env --help
+cargo build --release
+./target/release/pw-env --help
 ```
 
 :::
@@ -153,4 +153,5 @@ API_KEY=bw://env-secrets/my-service/api_key
 LOG_LEVEL=debug # no-migrate
 ```
 
-Use a global config for defaults, and add .pw-env.toml only when a project needs a local override. The local override is discovered by walking upward from the current directory until the repository root.
+Use a global config for defaults, and add .pw-env.toml only when a project needs a local override. The local override is
+discovered by walking upward from the current directory until the repository root.

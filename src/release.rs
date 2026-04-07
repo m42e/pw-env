@@ -312,20 +312,15 @@ fn extract_binary_from_archive(
                 let entry_path = entry
                     .path()
                     .context("failed to read tar archive entry path")?;
-                if entry_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    == Some(asset.binary_name)
+                if entry_path.file_name().and_then(|name| name.to_str()) == Some(asset.binary_name)
                 {
-                    entry
-                        .unpack(&extracted_binary_path)
-                        .with_context(|| {
-                            format!(
-                                "failed to unpack {} to {}",
-                                asset.binary_name,
-                                extracted_binary_path.display()
-                            )
-                        })?;
+                    entry.unpack(&extracted_binary_path).with_context(|| {
+                        format!(
+                            "failed to unpack {} to {}",
+                            asset.binary_name,
+                            extracted_binary_path.display()
+                        )
+                    })?;
                     return Ok(extracted_binary_path);
                 }
             }
@@ -346,9 +341,8 @@ fn extract_binary_from_archive(
                     let mut output = File::create(&extracted_binary_path).with_context(|| {
                         format!("failed to create {}", extracted_binary_path.display())
                     })?;
-                    io::copy(&mut entry, &mut output).with_context(|| {
-                        format!("failed to unpack {}", asset.binary_name)
-                    })?;
+                    io::copy(&mut entry, &mut output)
+                        .with_context(|| format!("failed to unpack {}", asset.binary_name))?;
                     return Ok(extracted_binary_path);
                 }
             }
@@ -456,10 +450,9 @@ impl ReleaseCheckState {
                 .mode(0o600)
                 .open(path)
                 .with_context(|| format!("failed to create {}", path.display()))?;
-            file.write_all(contents.as_bytes())
-                .with_context(|| {
-                    format!("failed to write release check state to {}", path.display())
-                })?;
+            file.write_all(contents.as_bytes()).with_context(|| {
+                format!("failed to write release check state to {}", path.display())
+            })?;
         }
         #[cfg(not(unix))]
         {
@@ -599,8 +592,7 @@ mod tests {
 
     #[test]
     fn release_download_url_has_expected_format() {
-        let url =
-            release_download_url("v1.2.3", "pw-env-v1.2.3-x86_64-apple-darwin.tar.gz");
+        let url = release_download_url("v1.2.3", "pw-env-v1.2.3-x86_64-apple-darwin.tar.gz");
         assert!(url.contains("github.com"));
         assert!(url.contains("m42e/pw-env"));
         assert!(url.contains("v1.2.3"));
@@ -759,8 +751,12 @@ mod tests {
 
         // Restore the original state
         match original {
-            Some(content) => { let _ = std::fs::write(&state_path, content); }
-            None => { let _ = std::fs::remove_file(&state_path); }
+            Some(content) => {
+                let _ = std::fs::write(&state_path, content);
+            }
+            None => {
+                let _ = std::fs::remove_file(&state_path);
+            }
         }
 
         assert!(result.is_ok());

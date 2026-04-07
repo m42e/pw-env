@@ -250,8 +250,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("current time should be after unix epoch")
             .as_nanos();
-        std::env::temp_dir()
-            .join(format!("pw-env-{name}-{}-{nonce}", std::process::id()))
+        std::env::temp_dir().join(format!("pw-env-{name}-{}-{nonce}", std::process::id()))
     }
 
     #[test]
@@ -387,7 +386,11 @@ mod tests {
         let temp = unique_subdir("resolve-plaintext");
         let env_path = temp.join(".env");
         fs::create_dir_all(&temp).unwrap();
-        fs::write(&env_path, "API_KEY=plain-secret-value\nDB_URL=postgresql://localhost/db\n").unwrap();
+        fs::write(
+            &env_path,
+            "API_KEY=plain-secret-value\nDB_URL=postgresql://localhost/db\n",
+        )
+        .unwrap();
 
         let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
         let config = Config {
@@ -400,7 +403,10 @@ mod tests {
         let result = resolve_env_file(&env_file, &config, &temp);
         let _ = fs::remove_dir_all(&temp);
         let resolved = result.unwrap();
-        assert!(resolved.is_empty(), "expected empty map for all-plaintext file");
+        assert!(
+            resolved.is_empty(),
+            "expected empty map for all-plaintext file"
+        );
     }
 
     #[test]
@@ -440,7 +446,10 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
 
         // Empty project string is filtered; should fall back to "my-repo" (git root name).
-        assert!(line.contains("project=my-repo"), "expected project=my-repo in: {line}");
+        assert!(
+            line.contains("project=my-repo"),
+            "expected project=my-repo in: {line}"
+        );
     }
 
     /// Verify that `log_credential_fetch_audit` actually emits a tracing event.
@@ -607,8 +616,7 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         fs::write(&env_path, "BW_KEY=bw://my-item/password\n").unwrap();
 
-        let bw_item_json =
-            r#"{"type":1,"name":"my-item","login":{"password":"bw-ref-secret"}}"#;
+        let bw_item_json = r#"{"type":1,"name":"my-item","login":{"password":"bw-ref-secret"}}"#;
         // Match only the exact item name extracted from the bw:// reference ("my-item").
         // Without the BwReference arm the backend falls back to "get item BW_KEY" (the env
         // key name), which does NOT match "my-item", so the mock exits with an error and
@@ -626,10 +634,9 @@ mod tests {
             projects: vec![],
         };
 
-        let resolved =
-            with_approval_and_mock_binaries(None, Some(&bw_script), &env_path, || {
-                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
-            });
+        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), &env_path, || {
+            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+        });
 
         let _ = fs::remove_dir_all(&temp);
         assert_eq!(

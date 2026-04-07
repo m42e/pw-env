@@ -44,6 +44,9 @@ jobs:
       - name: Install git-cliff
         uses: kenji-miyake/setup-git-cliff@2778609c643a39a2576c4bae2e493b855eb4aee8 # pin: v2.0.1
 
+      - name: Install rumdl
+        run: python -m pip install --user rumdl
+
       - name: Update version in Cargo.toml
         run: |
           sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
@@ -54,6 +57,9 @@ jobs:
           mkdir -p release-notes
           git-cliff --config .github/cliff.toml --tag "v${{ inputs.version }}" --unreleased --strip header \
             -o "release-notes/v${{ inputs.version }}.md"
+
+      - name: Format release notes with rumdl
+        run: ~/.local/bin/rumdl fmt "release-notes/v${{ inputs.version }}.md"
 
       - name: Upload release notes
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # pin: v7.0.0

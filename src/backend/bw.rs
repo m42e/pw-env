@@ -88,41 +88,39 @@ impl BwBackend {
     /// Get a specific field from a parsed Bitwarden item.
     fn extract_field_from_value(item: &serde_json::Value, field_name: &str) -> Result<String> {
         // Check login fields first
-        if field_name == "password" {
-            if let Some(password) = item
+        if field_name == "password"
+            && let Some(password) = item
                 .get("login")
                 .and_then(|l| l.get("password"))
                 .and_then(|p| p.as_str())
-            {
-                return Ok(password.to_string());
-            }
+        {
+            return Ok(password.to_string());
         }
-        if field_name == "username" {
-            if let Some(username) = item
+        if field_name == "username"
+            && let Some(username) = item
                 .get("login")
                 .and_then(|l| l.get("username"))
                 .and_then(|u| u.as_str())
-            {
-                return Ok(username.to_string());
-            }
+        {
+            return Ok(username.to_string());
         }
 
         // Check custom fields
         if let Some(fields) = item.get("fields").and_then(|f| f.as_array()) {
             for f in fields {
-                if f.get("name").and_then(|n| n.as_str()) == Some(field_name) {
-                    if let Some(val) = f.get("value").and_then(|v| v.as_str()) {
-                        return Ok(val.to_string());
-                    }
+                if f.get("name").and_then(|n| n.as_str()) == Some(field_name)
+                    && let Some(val) = f.get("value").and_then(|v| v.as_str())
+                {
+                    return Ok(val.to_string());
                 }
             }
         }
 
         // Check notes
-        if field_name == "notes" {
-            if let Some(notes) = item.get("notes").and_then(|n| n.as_str()) {
-                return Ok(notes.to_string());
-            }
+        if field_name == "notes"
+            && let Some(notes) = item.get("notes").and_then(|n| n.as_str())
+        {
+            return Ok(notes.to_string());
         }
 
         bail!("Field '{field_name}' not found in Bitwarden item");
@@ -158,11 +156,11 @@ impl BwBackend {
             if let Some(fields) = item.get("fields").and_then(|f| f.as_array()) {
                 for field in fields {
                     let name = field.get("name").and_then(|n| n.as_str());
-                    if name == Some("project") || name == Some("Project") {
-                        if field.get("value").and_then(|v| v.as_str()) == Some(project) {
-                            debug!("Matched Bitwarden item by project field '{project}'");
-                            return Self::extract_field_from_value(item, "password");
-                        }
+                    if (name == Some("project") || name == Some("Project"))
+                        && field.get("value").and_then(|v| v.as_str()) == Some(project)
+                    {
+                        debug!("Matched Bitwarden item by project field '{project}'");
+                        return Self::extract_field_from_value(item, "password");
                     }
                 }
             }
@@ -179,17 +177,17 @@ impl Backend for BwBackend {
         let bw_config = ctx.config.effective_bw(ctx.dir);
 
         // Handle bw:// references
-        if let Some(ref_str) = reference {
-            if ref_str.starts_with("bw://") {
-                if let Some((_folder, item, field)) = Self::parse_bw_reference(ref_str) {
-                    debug!("Resolving Bitwarden reference: {ref_str}");
-                    let item_json = Self::run_bw(&["get", "item", item])?;
-                    return Self::extract_field_from_item(&item_json, field);
-                } else {
-                    bail!(
-                        "Invalid bw:// reference format: {ref_str}. Expected bw://[folder/]item/field"
-                    );
-                }
+        if let Some(ref_str) = reference
+            && ref_str.starts_with("bw://")
+        {
+            if let Some((_folder, item, field)) = Self::parse_bw_reference(ref_str) {
+                debug!("Resolving Bitwarden reference: {ref_str}");
+                let item_json = Self::run_bw(&["get", "item", item])?;
+                return Self::extract_field_from_item(&item_json, field);
+            } else {
+                bail!(
+                    "Invalid bw:// reference format: {ref_str}. Expected bw://[folder/]item/field"
+                );
             }
         }
 
@@ -227,13 +225,12 @@ impl Backend for BwBackend {
                 // First get the folder ID
                 let folders_json = Self::run_bw(&["list", "folders", "--search", folder])?;
                 let folders: serde_json::Value = serde_json::from_str(&folders_json)?;
-                if let Some(folder_arr) = folders.as_array() {
-                    if let Some(first) = folder_arr.first() {
-                        if let Some(id) = first.get("id").and_then(|i| i.as_str()) {
-                            folder_id = id.to_string();
-                            args.extend_from_slice(&["--folderid", &folder_id]);
-                        }
-                    }
+                if let Some(folder_arr) = folders.as_array()
+                    && let Some(first) = folder_arr.first()
+                    && let Some(id) = first.get("id").and_then(|i| i.as_str())
+                {
+                    folder_id = id.to_string();
+                    args.extend_from_slice(&["--folderid", &folder_id]);
                 }
             }
             let item_json = Self::run_bw(&args)?;
@@ -457,10 +454,7 @@ mod tests {
         BwBackend::upsert_custom_field(&mut item, "key", "val", 0);
         let fields = item.get("fields").and_then(|v| v.as_array()).unwrap();
         assert_eq!(fields.len(), 1);
-        assert_eq!(
-            fields[0].get("name").and_then(|v| v.as_str()),
-            Some("key")
-        );
+        assert_eq!(fields[0].get("name").and_then(|v| v.as_str()), Some("key"));
     }
 
     fn test_store_context() -> StoreContext<'static> {
@@ -481,7 +475,9 @@ mod tests {
     // ------- Mock-bw infrastructure -------
 
     fn with_mock_bw<F: FnOnce()>(script: &str, f: F) {
-        let _guard = super::super::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = super::super::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("bw");
         std::fs::write(&script_path, script).unwrap();
@@ -494,8 +490,7 @@ mod tests {
         }
         let old_path = std::env::var_os("PATH").unwrap_or_default();
         let new_path = std::env::join_paths(
-            std::iter::once(dir.path().to_path_buf())
-                .chain(std::env::split_paths(&old_path)),
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
         )
         .unwrap();
         // SAFETY: guarded by MOCK_PATH_MUTEX, single-threaded access to PATH here
@@ -508,7 +503,10 @@ mod tests {
         format!(r#"{{"type":1,"name":"test-item","login":{{"password":"{password}"}}}}"#)
     }
 
-    fn make_resolve_context<'a>(config: &'a Config, dir: &'a Path) -> super::super::ResolveContext<'a> {
+    fn make_resolve_context<'a>(
+        config: &'a Config,
+        dir: &'a Path,
+    ) -> super::super::ResolveContext<'a> {
         super::super::ResolveContext {
             dir,
             config,
@@ -619,7 +617,10 @@ mod tests {
             let result = BwBackend.resolve("KEY", Some("bw://invalid"), &ctx);
             assert!(result.is_err());
             let msg = format!("{}", result.unwrap_err());
-            assert!(msg.contains("Invalid bw:// reference format"), "unexpected: {msg}");
+            assert!(
+                msg.contains("Invalid bw:// reference format"),
+                "unexpected: {msg}"
+            );
         });
     }
 
@@ -671,7 +672,8 @@ mod tests {
     #[test]
     fn backend_resolve_disambiguates_by_project_single_match() {
         // Return "more than one" error for "get password", items list for "list items"
-        let items_json = r#"[{"name":"MY_KEY","id":"abc123","login":{"password":"project-pw"},"fields":[]}]"#;
+        let items_json =
+            r#"[{"name":"MY_KEY","id":"abc123","login":{"password":"project-pw"},"fields":[]}]"#;
         let script = format!(
             "#!/bin/sh\nif [ \"$2\" = \"password\" ]; then\necho 'more than one result was found' >&2\nexit 1\nfi\necho '{}'\n",
             items_json

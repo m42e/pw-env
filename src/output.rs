@@ -62,14 +62,10 @@ pub fn format_command_wrappers(commands: &[String], shell: ShellSyntax) -> Strin
     for command in &valid_commands {
         match shell {
             ShellSyntax::Posix => {
-                output.push_str(&format!(
-                    "__pw_env_define_command_wrapper {command}\n"
-                ));
+                output.push_str(&format!("__pw_env_define_command_wrapper {command}\n"));
             }
             ShellSyntax::Fish => {
-                output.push_str(&format!(
-                    "__pw_env_define_command_wrapper {command}\n"
-                ));
+                output.push_str(&format!("__pw_env_define_command_wrapper {command}\n"));
             }
             ShellSyntax::PowerShell => {
                 output.push_str(&format!(
@@ -174,9 +170,9 @@ pub fn is_safe_command_name(command: &str) -> bool {
         return false;
     }
 
-    command.chars().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')
-    })
+    command
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
 }
 
 #[cfg(test)]

@@ -158,14 +158,12 @@ impl EnvFile {
     ) -> Vec<&'a EnvEntry> {
         self.likely_secret_entries()
             .into_iter()
-            .filter(|entry| {
-                match &entry.kind {
-                    EntryKind::Plaintext(value) => {
-                        let fingerprint = review_fingerprint(&entry.key, value);
-                        !reviewed_fingerprints.contains(&fingerprint)
-                    }
-                    _ => true,
+            .filter(|entry| match &entry.kind {
+                EntryKind::Plaintext(value) => {
+                    let fingerprint = review_fingerprint(&entry.key, value);
+                    !reviewed_fingerprints.contains(&fingerprint)
                 }
+                _ => true,
             })
             .collect()
     }
@@ -685,7 +683,9 @@ mod tests {
     #[test]
     fn comment_has_no_migrate_marker_returns_false_for_regular_comment() {
         assert!(!comment_has_no_migrate_marker("# some comment"));
-        assert!(!comment_has_no_migrate_marker("# description of the variable"));
+        assert!(!comment_has_no_migrate_marker(
+            "# description of the variable"
+        ));
         assert!(!comment_has_no_migrate_marker("# skip"));
     }
 
@@ -693,7 +693,9 @@ mod tests {
     fn comment_has_no_migrate_marker_returns_true_for_marker() {
         assert!(comment_has_no_migrate_marker("# no-migrate"));
         assert!(comment_has_no_migrate_marker("# NO-MIGRATE"));
-        assert!(comment_has_no_migrate_marker("# no-migrate: keep this in .env"));
+        assert!(comment_has_no_migrate_marker(
+            "# no-migrate: keep this in .env"
+        ));
     }
 
     #[test]
@@ -718,17 +720,23 @@ mod tests {
 
     #[test]
     fn contains_embedded_credentials_empty_username_returns_false() {
-        assert!(!contains_embedded_credentials("postgres://:secret@db.example.com/app"));
+        assert!(!contains_embedded_credentials(
+            "postgres://:secret@db.example.com/app"
+        ));
     }
 
     #[test]
     fn contains_embedded_credentials_empty_password_returns_false() {
-        assert!(!contains_embedded_credentials("postgres://user:@db.example.com/app"));
+        assert!(!contains_embedded_credentials(
+            "postgres://user:@db.example.com/app"
+        ));
     }
 
     #[test]
     fn contains_embedded_credentials_both_present_returns_true() {
-        assert!(contains_embedded_credentials("postgres://user:secret@db.example.com/app"));
+        assert!(contains_embedded_credentials(
+            "postgres://user:secret@db.example.com/app"
+        ));
     }
 
     #[test]
@@ -767,7 +775,9 @@ mod tests {
     fn looks_like_high_entropy_secret_medium_entropy_long_is_secret() {
         // 33 chars, 11 unique chars each appearing 3 times → entropy ≈ log2(11) ≈ 3.46.
         // Satisfies the second condition: len≥32 && entropy≥3.4.
-        assert!(looks_like_high_entropy_secret("abcdefghijkabcdefghijkabcdefghijk"));
+        assert!(looks_like_high_entropy_secret(
+            "abcdefghijkabcdefghijkabcdefghijk"
+        ));
     }
 
     fn write_test_env(contents: &str) -> PathBuf {

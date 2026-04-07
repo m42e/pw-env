@@ -199,14 +199,12 @@ fn default_log_level() -> String {
 }
 
 fn default_log_file() -> Option<String> {
-    dirs::state_dir()
-        .or_else(|| dirs::data_local_dir())
-        .map(|d| {
-            d.join("pw-env")
-                .join("pw-env.log")
-                .to_string_lossy()
-                .into_owned()
-        })
+    dirs::state_dir().or_else(dirs::data_local_dir).map(|d| {
+        d.join("pw-env")
+            .join("pw-env.log")
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -267,9 +265,7 @@ impl Config {
     pub fn config_path() -> PathBuf {
         // Prefer XDG_CONFIG_HOME, then ~/.config (Unix convention for CLI tools)
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg)
-                .join("pw-env")
-                .join("config.toml");
+            return PathBuf::from(xdg).join("pw-env").join("config.toml");
         }
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("~"))
@@ -301,20 +297,19 @@ impl Config {
     pub fn load_for_dir(dir: &Path) -> Result<Self> {
         let mut config = Self::load()?;
 
-        if let Some((project_dir, override_path)) = Self::project_override_file(dir) {
-            if let Some(local_override) =
+        if let Some((project_dir, override_path)) = Self::project_override_file(dir)
+            && let Some(local_override) =
                 ProjectDirectoryOverride::load_if_approved(&override_path)?
-            {
-                config.projects.push(ProjectOverride {
-                    path: project_dir.to_string_lossy().into_owned(),
-                    backend: local_override.backend,
-                    op: local_override.op,
-                    bw: local_override.bw,
-                    gpg: local_override.gpg,
-                    item: local_override.item,
-                    commands: local_override.commands,
-                });
-            }
+        {
+            config.projects.push(ProjectOverride {
+                path: project_dir.to_string_lossy().into_owned(),
+                backend: local_override.backend,
+                op: local_override.op,
+                bw: local_override.bw,
+                gpg: local_override.gpg,
+                item: local_override.item,
+                commands: local_override.commands,
+            });
         }
 
         Ok(config)
@@ -469,7 +464,10 @@ impl Config {
             );
         }
 
-        eprintln!("Credential fetch approval required for project {}", project_path.display());
+        eprintln!(
+            "Credential fetch approval required for project {}",
+            project_path.display()
+        );
         eprintln!(".env file: {}", env_path.display());
         if previously_approved_hashes.is_empty() {
             eprintln!(
@@ -574,10 +572,10 @@ impl Config {
 
     /// Resolve effective item name for a given directory.
     pub fn effective_item(&self, dir: &Path) -> Option<&str> {
-        if let Some(proj) = self.project_for(dir) {
-            if let Some(ref item) = proj.item {
-                return Some(item.as_str());
-            }
+        if let Some(proj) = self.project_for(dir)
+            && let Some(ref item) = proj.item
+        {
+            return Some(item.as_str());
         }
         // Check the backend-specific default item
         match self.effective_backend(dir) {
@@ -750,10 +748,9 @@ impl ApprovedProjectConfigs {
         if let Some(p) = TEST_APPROVAL_STORE_PATH.with(|v| v.borrow().clone()) {
             return Some(p);
         }
-        dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
-            dir.join("pw-env")
-                .join("approved-project-configs.json")
-        })
+        dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .map(|dir| dir.join("pw-env").join("approved-project-configs.json"))
     }
 }
 
@@ -892,10 +889,9 @@ impl ApprovedSecretFetches {
         if let Some(p) = TEST_SECRET_FETCH_STORE_PATH.with(|v| v.borrow().clone()) {
             return Some(p);
         }
-        dirs::state_dir().or_else(dirs::data_local_dir).map(|dir| {
-            dir.join("pw-env")
-                .join("approved-secret-fetches.json")
-        })
+        dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .map(|dir| dir.join("pw-env").join("approved-secret-fetches.json"))
     }
 }
 
@@ -994,19 +990,17 @@ impl ReviewedMigrations {
 }
 
 fn expand_path(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
 
 fn normalized_project_path(path: &str) -> PathBuf {
     let expanded = expand_path(path);
-    expanded
-        .canonicalize()
-        .unwrap_or(expanded)
+    expanded.canonicalize().unwrap_or(expanded)
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -1278,9 +1272,11 @@ vault = "Work"
             config.effective_commands(Path::new("/home/user/work/service-a/api")),
             ["cargo".to_string(), "npm".to_string()]
         );
-        assert!(config
-            .effective_commands(Path::new("/home/user/other"))
-            .is_empty());
+        assert!(
+            config
+                .effective_commands(Path::new("/home/user/other"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1330,7 +1326,10 @@ vault = "Work"
         let loaded = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
         assert!(loaded.is_approved(&project_dir, &env_hash));
         assert!(loaded.is_project_wide(&project_dir));
-        assert_eq!(loaded.approved_hashes(&project_dir), BTreeSet::from([env_hash]));
+        assert_eq!(
+            loaded.approved_hashes(&project_dir),
+            BTreeSet::from([env_hash])
+        );
 
         let mut loaded = loaded;
         assert!(loaded.revoke(&project_dir));
@@ -1429,11 +1428,7 @@ vault = "Work"
         let result = normalize_path(&dir);
         assert!(!result.is_empty());
         // The canonical path should match what std::fs::canonicalize returns.
-        let expected = dir
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let expected = dir.canonicalize().unwrap().to_string_lossy().into_owned();
         assert_eq!(result, expected);
     }
 
@@ -1639,7 +1634,10 @@ vault = "Work"
         let path = Config::config_path();
         let s = path.to_string_lossy();
         assert!(s.contains("pw-env"), "path should contain 'pw-env'");
-        assert!(s.ends_with("config.toml"), "path should end with config.toml");
+        assert!(
+            s.ends_with("config.toml"),
+            "path should end with config.toml"
+        );
     }
 
     #[test]
@@ -1914,7 +1912,10 @@ vault = "Work"
 
         let result = resolve_project_override_target(&test_dir);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().file_name().unwrap(), PROJECT_OVERRIDE_FILE_NAME);
+        assert_eq!(
+            result.unwrap().file_name().unwrap(),
+            PROJECT_OVERRIDE_FILE_NAME
+        );
 
         let _ = fs::remove_dir_all(&test_dir);
     }
@@ -1964,7 +1965,10 @@ vault = "Work"
             updates: UpdateConfig::default(),
             projects: vec![],
         };
-        assert_eq!(config.effective_item(std::path::Path::new("/tmp")), Some("my-bw-item"));
+        assert_eq!(
+            config.effective_item(std::path::Path::new("/tmp")),
+            Some("my-bw-item")
+        );
     }
 
     #[test]
@@ -2053,7 +2057,10 @@ vault = "Work"
         assert!(log_file.is_some(), "log file default should be Some");
         let path = log_file.unwrap();
         assert!(!path.is_empty());
-        assert!(path.ends_with("pw-env.log"), "expected log path ending in pw-env.log, got {path}");
+        assert!(
+            path.ends_with("pw-env.log"),
+            "expected log path ending in pw-env.log, got {path}"
+        );
     }
 
     #[test]
@@ -2114,21 +2121,35 @@ vault = "Work"
     fn approval_store_path_returns_some_nonempty_path() {
         // Must not return None (kills the -> None mutation).
         let path = Config::approval_store_path();
-        assert!(path.is_some(), "approval store path should be Some on this platform");
+        assert!(
+            path.is_some(),
+            "approval store path should be Some on this platform"
+        );
         let p = path.unwrap();
         assert!(!p.as_os_str().is_empty());
-        assert!(p.to_string_lossy().ends_with("approved-project-configs.json"),
-            "unexpected path: {}", p.display());
+        assert!(
+            p.to_string_lossy()
+                .ends_with("approved-project-configs.json"),
+            "unexpected path: {}",
+            p.display()
+        );
     }
 
     #[test]
     fn secret_fetch_approval_store_path_returns_some_nonempty_path() {
         let path = Config::secret_fetch_approval_store_path();
-        assert!(path.is_some(), "secret fetch approval store path should be Some on this platform");
+        assert!(
+            path.is_some(),
+            "secret fetch approval store path should be Some on this platform"
+        );
         let p = path.unwrap();
         assert!(!p.as_os_str().is_empty());
-        assert!(p.to_string_lossy().ends_with("approved-secret-fetches.json"),
-            "unexpected path: {}", p.display());
+        assert!(
+            p.to_string_lossy()
+                .ends_with("approved-secret-fetches.json"),
+            "unexpected path: {}",
+            p.display()
+        );
     }
 
     #[test]
@@ -2231,7 +2252,10 @@ vault = "Work"
         let found = configs.iter().any(|e| e.path == canonical);
         let _ = fs::remove_dir_all(&test_dir);
 
-        assert!(found, "approved_project_configs() should contain the newly approved entry");
+        assert!(
+            found,
+            "approved_project_configs() should contain the newly approved entry"
+        );
     }
 
     #[test]
@@ -2265,7 +2289,10 @@ vault = "Work"
             .any(|e| e.project_path == project_dir && !e.project_wide);
         let _ = fs::remove_dir_all(&test_dir);
 
-        assert!(found, "approved_secret_fetches() should contain the newly approved entry");
+        assert!(
+            found,
+            "approved_secret_fetches() should contain the newly approved entry"
+        );
     }
 
     #[test]
@@ -2280,7 +2307,10 @@ vault = "Work"
         let result = Config::revoke_secret_fetch_approval(&env_path).unwrap();
         let _ = fs::remove_dir_all(&test_dir);
 
-        assert!(result, "revoking an approved secret fetch should return true");
+        assert!(
+            result,
+            "revoking an approved secret fetch should return true"
+        );
     }
 
     // ── Tests for ensure_secret_fetch_approved interactive/non-interactive paths ─
@@ -2321,7 +2351,10 @@ vault = "Work"
         let result = Config::ensure_secret_fetch_approved(&env_path);
         let _ = fs::remove_dir_all(&test_dir);
 
-        assert!(result.is_ok(), "answer 'y' should approve and return Ok(())");
+        assert!(
+            result.is_ok(),
+            "answer 'y' should approve and return Ok(())"
+        );
     }
 
     #[test]
@@ -2337,7 +2370,10 @@ vault = "Work"
         let result = Config::ensure_secret_fetch_approved(&env_path);
         let _ = fs::remove_dir_all(&test_dir);
 
-        assert!(result.is_ok(), "answer 'a' should approve project-wide and return Ok(())");
+        assert!(
+            result.is_ok(),
+            "answer 'a' should approve project-wide and return Ok(())"
+        );
     }
 
     // ── Tests for project_override_file ancestor traversal (L582, L586) ────────
@@ -2350,12 +2386,19 @@ vault = "Work"
 
         fs::create_dir_all(repo_dir.join(".git")).unwrap();
         fs::create_dir_all(&subdir).unwrap();
-        fs::write(repo_dir.join(PROJECT_OVERRIDE_FILE_NAME), "backend = \"op\"\n").unwrap();
+        fs::write(
+            repo_dir.join(PROJECT_OVERRIDE_FILE_NAME),
+            "backend = \"op\"\n",
+        )
+        .unwrap();
 
         let result = Config::project_override_path(&subdir);
         let _ = fs::remove_dir_all(&test_dir);
 
-        assert!(result.is_some(), "should find override in ancestor git root");
+        assert!(
+            result.is_some(),
+            "should find override in ancestor git root"
+        );
         assert!(result.unwrap().ends_with(PROJECT_OVERRIDE_FILE_NAME));
     }
 
@@ -2374,7 +2417,10 @@ vault = "Work"
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result.is_ok());
-        assert!(result.unwrap().is_some(), "pre-approved file should load as Some");
+        assert!(
+            result.unwrap().is_some(),
+            "pre-approved file should load as Some"
+        );
     }
 
     #[test]
@@ -2390,7 +2436,10 @@ vault = "Work"
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none(), "unapproved file in non-terminal should return None");
+        assert!(
+            result.unwrap().is_none(),
+            "unapproved file in non-terminal should return None"
+        );
     }
 
     #[test]
@@ -2429,7 +2478,10 @@ vault = "Work"
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result.is_ok());
-        assert!(result.unwrap().is_some(), "answer 'y' should approve and return Some");
+        assert!(
+            result.unwrap().is_some(),
+            "answer 'y' should approve and return Some"
+        );
     }
 
     #[test]
@@ -2446,7 +2498,10 @@ vault = "Work"
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result.is_ok());
-        assert!(result.unwrap().is_some(), "answer 'yes' should approve and return Some");
+        assert!(
+            result.unwrap().is_some(),
+            "answer 'yes' should approve and return Some"
+        );
     }
 
     // ── Tests for ReviewedMigrations round-trip through Config (L483, L490, L499, L845, L872) ─
@@ -2527,7 +2582,11 @@ vault = "Work"
 
         let loaded = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
         let hashes = loaded.approved_hashes(project_path);
-        assert!(hashes.len() <= 10, "should limit hashes to 10 per project, got {}", hashes.len());
+        assert!(
+            hashes.len() <= 10,
+            "should limit hashes to 10 per project, got {}",
+            hashes.len()
+        );
     }
 
     #[cfg(unix)]
@@ -2540,6 +2599,9 @@ vault = "Work"
         std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
 
         let result = ProjectDirectoryOverride::load_if_approved(&symlink_path).unwrap();
-        assert!(result.is_none(), "symlinked .pw-env.toml should be rejected");
+        assert!(
+            result.is_none(),
+            "symlinked .pw-env.toml should be rejected"
+        );
     }
 }

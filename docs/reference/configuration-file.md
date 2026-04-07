@@ -87,7 +87,8 @@ check_interval_hours = 24
 
 ## Project-local override file
 
-For a repository-specific override, create `.pw-env.toml` in the project root or a parent directory inside the repository.
+For a repository-specific override, create `.pw-env.toml` in the project root or a parent directory inside the
+repository.
 
 ```toml [.pw-env.toml]
 backend = "op"
@@ -98,7 +99,8 @@ commands = ["cargo", "npm"]
 vault = "Work"
 ```
 
-`.pw-env.toml` uses the same backend-specific keys as the global config, but it does not use `[[projects]]` because the file itself already scopes the override to the current project.
+`.pw-env.toml` uses the same backend-specific keys as the global config, but it does not use `[[projects]]` because the
+file itself already scopes the override to the current project.
 
 pw-env loads the local override only after the current file contents are approved.
 
@@ -114,6 +116,10 @@ item = "api-server-env"
 commands = ["cargo", "npm", "terraform"]
 ```
 
-When `commands` is set, the generated shell hook stops exporting resolved secrets into the parent shell for that project. Instead it installs wrappers for the listed command names, and those wrappers run the command through `pw-env exec`.
+When `commands` is set, the generated shell hook stops exporting resolved secrets into the parent shell for that
+project. Instead it installs wrappers for the listed command names, and those wrappers run the command through
+`pw-env exec`.
 
-`commands` accepts exact command names and shell-style glob patterns that are matched against executable names on `PATH`. Values must still resolve to safe shell command tokens such as `cargo`, `npm`, `docker-compose`, or patterns such as `cargo*`.
+`commands` accepts exact command names and shell-style glob patterns that are matched against executable names on
+`PATH`. Values must still resolve to safe shell command tokens such as `cargo`, `npm`, `docker-compose`, or patterns
+such as `cargo*`.

@@ -2,6 +2,7 @@
 description: "Use when creating commits, suggesting commit messages, preparing pull requests, or describing git history. Enforces Conventional Commits 1.0.0 commit summaries."
 name: "Conventional Commits"
 ---
+
 # Conventional Commits
 
 - When creating a commit or suggesting a commit message, use the Conventional Commits 1.0.0 summary format: `<type>[optional scope]: <description>`.

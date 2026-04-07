@@ -52,15 +52,15 @@ impl GpgBackend {
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
-                if let Some(metadata) = line.strip_prefix("# pw-env: ") {
-                    if let Some((name, value)) = metadata.split_once('=') {
-                        match name.trim() {
-                            PROJECT_FIELD_NAME => pending_project = Some(value.trim().to_string()),
-                            MIGRATED_FROM_FIELD_NAME => {
-                                pending_migrated_from = Some(value.trim().to_string())
-                            }
-                            _ => {}
+                if let Some(metadata) = line.strip_prefix("# pw-env: ")
+                    && let Some((name, value)) = metadata.split_once('=')
+                {
+                    match name.trim() {
+                        PROJECT_FIELD_NAME => pending_project = Some(value.trim().to_string()),
+                        MIGRATED_FROM_FIELD_NAME => {
+                            pending_migrated_from = Some(value.trim().to_string())
                         }
+                        _ => {}
                     }
                 }
                 continue;
@@ -106,14 +106,14 @@ impl GpgBackend {
         // If canonicalize fails (file doesn't exist yet), fall through to the
         // component-based check.
         if let Ok(canonical) = joined.canonicalize() {
-            if let Ok(canonical_dir) = ctx_dir.canonicalize() {
-                if !canonical.starts_with(&canonical_dir) {
-                    tracing::warn!(
-                        "GPG file_pattern '{}' escapes the project directory; falling back to default",
-                        gpg_config.file_pattern
-                    );
-                    return ctx_dir.join(".env.gpg");
-                }
+            if let Ok(canonical_dir) = ctx_dir.canonicalize()
+                && !canonical.starts_with(&canonical_dir)
+            {
+                tracing::warn!(
+                    "GPG file_pattern '{}' escapes the project directory; falling back to default",
+                    gpg_config.file_pattern
+                );
+                return ctx_dir.join(".env.gpg");
             }
         } else {
             // File doesn't exist yet — check for path traversal components
@@ -417,7 +417,10 @@ PLAIN=value
 
     // ------- Error-path tests (no mock needed) -------
 
-    fn make_gpg_resolve_context<'a>(config: &'a Config, dir: &'a std::path::Path) -> super::super::ResolveContext<'a> {
+    fn make_gpg_resolve_context<'a>(
+        config: &'a Config,
+        dir: &'a std::path::Path,
+    ) -> super::super::ResolveContext<'a> {
         super::super::ResolveContext {
             dir,
             config,
@@ -474,7 +477,9 @@ PLAIN=value
     // ------- Mock-gpg infrastructure -------
 
     fn with_mock_gpg<F: FnOnce()>(decrypt_output: &str, f: F) {
-        let _guard = super::super::MOCK_PATH_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = super::super::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("gpg");
         // Script echoes the preset decrypt output when --decrypt is given; exits 0 for anything else
@@ -492,8 +497,7 @@ PLAIN=value
         }
         let old_path = std::env::var_os("PATH").unwrap_or_default();
         let new_path = std::env::join_paths(
-            std::iter::once(dir.path().to_path_buf())
-                .chain(std::env::split_paths(&old_path)),
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
         )
         .unwrap();
         // SAFETY: guarded by MOCK_PATH_MUTEX, single-threaded access to PATH
@@ -519,7 +523,10 @@ PLAIN=value
             };
             let ctx = make_gpg_resolve_context(&config, temp_dir.path());
             let result = GpgBackend::resolve_all(&ctx).unwrap();
-            assert_eq!(result.get("SECRET_KEY").map(|s| s.as_str()), Some("top_secret"));
+            assert_eq!(
+                result.get("SECRET_KEY").map(|s| s.as_str()),
+                Some("top_secret")
+            );
             assert_eq!(result.get("DB_HOST").map(|s| s.as_str()), Some("localhost"));
         });
     }
