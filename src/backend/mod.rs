@@ -24,7 +24,7 @@ pub struct ResolveContext<'a> {
     pub config: &'a Config,
     /// Auto-detected or configured project name (for disambiguating multiple matches).
     pub project: Option<String>,
-    /// Canonical git root path for repository-aware disambiguation.
+    /// Selected git remote URL for repository-aware disambiguation.
     pub repository: Option<String>,
 }
 

@@ -1449,7 +1449,7 @@ mod tests {
             dir: Path::new("/tmp/example/service"),
             config,
             project: Some("example".to_string()),
-            repository: Some("/tmp/example".to_string()),
+            repository: Some("git@github.com:example/example.git".to_string()),
         }
     }
 
@@ -1516,7 +1516,7 @@ mod tests {
             dir,
             config,
             project: Some("test-project".to_string()),
-            repository: Some("/tmp/test-repo".to_string()),
+            repository: Some("git@github.com:example/test-repo.git".to_string()),
         }
     }
 
@@ -1565,7 +1565,7 @@ mod tests {
             "name": "my-item",
             "folderId": "folder-other",
             "login": { "password": "repo-pw" },
-            "fields": [{"name":"repository","value":"/tmp/test-repo","type":0}]
+            "fields": [{"name":"repository","value":"git@github.com:example/test-repo.git","type":0}]
         });
         let items_json = serde_json::json!([
             selected_item,
@@ -1589,7 +1589,7 @@ mod tests {
             "id": "item-1",
             "name": "my-item",
             "login": { "password": "repo-pw" },
-            "fields": [{"name":"repository","value":"/tmp/test-repo","type":0}]
+            "fields": [{"name":"repository","value":"git@github.com:example/test-repo.git","type":0}]
         })
         .to_string();
         let script = format!(
@@ -1675,7 +1675,7 @@ mod tests {
                 "name": "API_KEY",
                 "folderId": "folder-other",
                 "login": { "password": "repo-pw" },
-                "fields": [{"name":"repository","value":"/tmp/test-repo","type":0}]
+                "fields": [{"name":"repository","value":"git@github.com:example/test-repo.git","type":0}]
             },
             {
                 "name": "API_KEY",
@@ -1918,14 +1918,14 @@ mod tests {
     #[test]
     fn disambiguate_items_narrows_by_repository_before_folder() {
         let items_json = r#"[
-            {"name":"DB_PASS","folderId":"folder-other","login":{"password":"repo-pw"},"fields":[{"name":"repository","value":"/tmp/test-repo","type":0}]},
+            {"name":"DB_PASS","folderId":"folder-other","login":{"password":"repo-pw"},"fields":[{"name":"repository","value":"git@github.com:example/test-repo.git","type":0}]},
             {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"folder-pw"},"fields":[]}
         ]"#;
         let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
         with_mock_bw(&script, || {
             let result = BwBackend::disambiguate_items(
                 "DB_PASS",
-                Some("/tmp/test-repo"),
+                Some("git@github.com:example/test-repo.git"),
                 Some("folder-abc"),
                 None,
             );
@@ -2143,7 +2143,8 @@ mod tests {
         }));
         assert!(fields.iter().any(|field| {
             field.get("name").and_then(|value| value.as_str()) == Some("repository")
-                && field.get("value").and_then(|value| value.as_str()) == Some("/tmp/example")
+                && field.get("value").and_then(|value| value.as_str())
+                    == Some("git@github.com:example/example.git")
         }));
     }
 

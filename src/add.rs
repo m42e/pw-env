@@ -23,7 +23,7 @@ pub fn add_entry(
     let backend_name = config.effective_backend(dir);
     let backend = backend::create_backend(backend_name)?;
     let project = resolve::detect_project_name(dir);
-    let repository = resolve::find_git_root(dir).map(|path| path.display().to_string());
+    let repository = resolve::detect_repository_remote(dir);
     let store_ctx = StoreContext {
         dir,
         config,

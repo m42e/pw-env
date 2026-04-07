@@ -375,14 +375,17 @@ mod tests {
             dir: Path::new("/tmp/example/service"),
             config: &config,
             project: Some("example".to_string()),
-            repository: Some("/tmp/example".to_string()),
+            repository: Some("git@github.com:example/example.git".to_string()),
         };
 
         let assignments = OpBackend::migration_field_assignments(&ctx);
 
         assert!(assignments.contains(&"migrated_from[text]=/tmp/example/service".to_string()));
         assert!(assignments.contains(&"project[text]=example".to_string()));
-        assert!(assignments.contains(&"repository[text]=/tmp/example".to_string()));
+        assert!(
+            assignments
+                .contains(&"repository[text]=git@github.com:example/example.git".to_string())
+        );
     }
 
     // ------- Mock-op infrastructure -------
@@ -420,7 +423,7 @@ mod tests {
             dir,
             config,
             project: Some("test-project".to_string()),
-            repository: Some("/tmp/test-repo".to_string()),
+            repository: Some("git@github.com:example/test-repo.git".to_string()),
         }
     }
 
@@ -580,7 +583,7 @@ mod tests {
 
     #[test]
     fn backend_resolve_with_vault_disambiguates_by_repository_before_project() {
-        let script = "#!/bin/sh\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\necho 'more than 1 item found' >&2\nexit 1\nfi\nif [ \"$2\" = \"list\" ]; then\necho '[{\"id\":\"repo-item\",\"title\":\"MY_KEY\"},{\"id\":\"project-item\",\"title\":\"MY_KEY\"}]'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"repo-item\" ] && [ \"$4\" = \"--format=json\" ]; then\necho '{\"id\":\"repo-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"/tmp/test-repo\"},{\"label\":\"project\",\"value\":\"other-project\"}]}'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"project-item\" ] && [ \"$4\" = \"--format=json\" ]; then\necho '{\"id\":\"project-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"/tmp/other-repo\"},{\"label\":\"project\",\"value\":\"test-project\"}]}'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"repo-item\" ]; then\necho 'repo-wins'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"project-item\" ]; then\necho 'project-would-win'\nexit 0\nfi\necho 'unexpected command' >&2\nexit 1\n";
+        let script = "#!/bin/sh\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\necho 'more than 1 item found' >&2\nexit 1\nfi\nif [ \"$2\" = \"list\" ]; then\necho '[{\"id\":\"repo-item\",\"title\":\"MY_KEY\"},{\"id\":\"project-item\",\"title\":\"MY_KEY\"}]'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"repo-item\" ] && [ \"$4\" = \"--format=json\" ]; then\necho '{\"id\":\"repo-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"git@github.com:example/test-repo.git\"},{\"label\":\"project\",\"value\":\"other-project\"}]}'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"project-item\" ] && [ \"$4\" = \"--format=json\" ]; then\necho '{\"id\":\"project-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"git@github.com:example/other-repo.git\"},{\"label\":\"project\",\"value\":\"test-project\"}]}'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"repo-item\" ]; then\necho 'repo-wins'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"project-item\" ]; then\necho 'project-would-win'\nexit 0\nfi\necho 'unexpected command' >&2\nexit 1\n";
 
         with_mock_op(script, || {
             let config = Config {

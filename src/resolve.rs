@@ -23,6 +23,140 @@ pub(crate) fn find_git_root(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+fn find_git_dir(dir: &Path) -> Option<PathBuf> {
+    let git_marker = find_git_root(dir)?.join(".git");
+
+    if git_marker.is_dir() {
+        return Some(git_marker);
+    }
+
+    let gitdir_contents = std::fs::read_to_string(&git_marker).ok()?;
+    let gitdir = gitdir_contents.strip_prefix("gitdir:")?.trim();
+    let gitdir_path = Path::new(gitdir);
+
+    Some(if gitdir_path.is_absolute() {
+        gitdir_path.to_path_buf()
+    } else {
+        git_marker.parent()?.join(gitdir_path)
+    })
+}
+
+fn current_git_branch(git_dir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let reference = head.strip_prefix("ref:")?.trim();
+    reference.strip_prefix("refs/heads/").map(ToOwned::to_owned)
+}
+
+fn parse_git_config(contents: &str) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut remotes = BTreeMap::new();
+    let mut branch_remotes = BTreeMap::new();
+    let mut current_remote: Option<String> = None;
+    let mut current_branch: Option<String> = None;
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            current_remote = None;
+            current_branch = None;
+
+            let section = &line[1..line.len() - 1];
+            if let Some(name) = section
+                .strip_prefix("remote \"")
+                .and_then(|value| value.strip_suffix('"'))
+            {
+                current_remote = Some(name.to_string());
+            } else if let Some(name) = section
+                .strip_prefix("branch \"")
+                .and_then(|value| value.strip_suffix('"'))
+            {
+                current_branch = Some(name.to_string());
+            }
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+
+        let key = key.trim();
+        let value = value.trim();
+        if key == "url"
+            && let Some(remote) = current_remote.as_ref()
+        {
+            remotes.entry(remote.clone()).or_insert(value.to_string());
+        } else if key == "remote"
+            && let Some(branch) = current_branch.as_ref()
+        {
+            branch_remotes.insert(branch.clone(), value.to_string());
+        }
+    }
+
+    (remotes, branch_remotes)
+}
+
+fn select_git_remote_name(
+    remotes: &BTreeMap<String, String>,
+    configured_remote: Option<&str>,
+) -> Option<String> {
+    match remotes.len() {
+        0 => None,
+        1 => remotes.keys().next().cloned(),
+        _ if remotes.contains_key("origin") => Some("origin".to_string()),
+        _ => configured_remote
+            .filter(|remote| remotes.contains_key(*remote))
+            .map(ToOwned::to_owned),
+    }
+}
+
+fn normalize_git_remote_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("file://")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.starts_with('~')
+    {
+        return None;
+    }
+
+    let windows_drive = trimmed.len() >= 3
+        && trimmed.as_bytes()[1] == b':'
+        && trimmed.as_bytes()[2] == b'/'
+        && trimmed.as_bytes()[0].is_ascii_alphabetic();
+    if windows_drive {
+        return None;
+    }
+
+    if trimmed.contains("://") || trimmed.starts_with("git@") {
+        return Some(trimmed.to_string());
+    }
+
+    let (host, _path) = trimmed.split_once(':')?;
+    if host.contains('/') || host.is_empty() {
+        return None;
+    }
+
+    Some(trimmed.to_string())
+}
+
+pub(crate) fn detect_repository_remote(dir: &Path) -> Option<String> {
+    let git_dir = find_git_dir(dir)?;
+    let config_contents = std::fs::read_to_string(git_dir.join("config")).ok()?;
+    let (remotes, branch_remotes) = parse_git_config(&config_contents);
+    let current_branch = current_git_branch(&git_dir);
+    let configured_remote = current_branch
+        .as_deref()
+        .and_then(|branch| branch_remotes.get(branch))
+        .map(String::as_str);
+    let selected_remote = select_git_remote_name(&remotes, configured_remote)?;
+    normalize_git_remote_url(remotes.get(&selected_remote)?.as_str())
+}
+
 /// Detect the project name from the git root folder name, falling back to `dir`'s name.
 pub fn detect_project_name(dir: &Path) -> Option<String> {
     find_git_root(dir)
@@ -92,7 +226,7 @@ pub fn resolve_env_file(
     Config::ensure_secret_fetch_approved(&env_file.path)?;
 
     let project = detect_project_name(dir);
-    let repository = find_git_root(dir).map(|path| path.display().to_string());
+    let repository = detect_repository_remote(dir);
     debug!("Detected project name: {:?}", project);
 
     let default_backend_name = config.effective_backend(dir);
@@ -406,6 +540,75 @@ mod tests {
         let name = detect_project_name(&subdir);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(name.as_deref(), Some("my-repo"));
+    }
+
+    #[test]
+    fn detect_repository_remote_prefers_origin_when_multiple_remotes_exist() {
+        let root = unique_subdir("remote-origin");
+        let repo_dir = root.join("repo");
+        let subdir = repo_dir.join("service");
+        let git_dir = repo_dir.join(".git");
+
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"backup\"]\n\turl = git@github.com:example/backup.git\n[remote \"origin\"]\n\turl = git@github.com:example/origin.git\n[branch \"main\"]\n\tremote = backup\n",
+        )
+        .unwrap();
+
+        let remote = detect_repository_remote(&subdir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(remote.as_deref(), Some("git@github.com:example/origin.git"));
+    }
+
+    #[test]
+    fn detect_repository_remote_uses_branch_remote_when_multiple_without_origin() {
+        let root = unique_subdir("remote-branch");
+        let repo_dir = root.join("repo");
+        let subdir = repo_dir.join("service");
+        let git_dir = repo_dir.join(".git");
+
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"upstream\"]\n\turl = https://github.com/example/upstream.git\n[remote \"mirror\"]\n\turl = https://github.com/example/mirror.git\n[branch \"main\"]\n\tremote = upstream\n",
+        )
+        .unwrap();
+
+        let remote = detect_repository_remote(&subdir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(
+            remote.as_deref(),
+            Some("https://github.com/example/upstream.git")
+        );
+    }
+
+    #[test]
+    fn detect_repository_remote_returns_none_for_local_path_remote() {
+        let root = unique_subdir("remote-local");
+        let repo_dir = root.join("repo");
+        let subdir = repo_dir.join("service");
+        let git_dir = repo_dir.join(".git");
+
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"]\n\turl = ../local/repo.git\n[branch \"main\"]\n\tremote = origin\n",
+        )
+        .unwrap();
+
+        let remote = detect_repository_remote(&subdir);
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(remote.is_none());
     }
 
     #[test]
