@@ -231,6 +231,7 @@ impl EnvEntry {
 
 fn parse_entry_line(line: &str) -> Option<(String, String, Option<String>)> {
     let trimmed = line.trim();
+    let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
     let (key, raw_value) = trimmed.split_once('=')?;
     let key = key.trim();
     if key.is_empty() {
@@ -825,5 +826,26 @@ mod tests {
     fn strip_quotes_handles_multibyte_utf8() {
         assert_eq!(strip_quotes("\"héllo\""), "héllo");
         assert_eq!(strip_quotes("'日本語'"), "日本語");
+    }
+
+    #[test]
+    fn test_parse_entry_line_strips_export_prefix() {
+        let (key, value, _) =
+            parse_entry_line("export API_KEY=secret-value").expect("entry should parse");
+        assert_eq!(key, "API_KEY");
+        assert_eq!(value, "secret-value");
+    }
+
+    #[test]
+    fn test_export_prefix_in_full_parse() {
+        let path = write_test_env("export DB_HOST=localhost\nexport DB_PASS=op://vault/item/pass\n");
+        let env_file = EnvFile::parse(&path).expect("parse should succeed");
+        std::fs::remove_file(&path).expect("temp file should be removable");
+
+        let entries = env_file.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key, "DB_HOST");
+        assert_eq!(entries[1].key, "DB_PASS");
+        assert!(matches!(entries[1].kind, EntryKind::OpReference(_)));
     }
 }
