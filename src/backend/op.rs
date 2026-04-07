@@ -212,6 +212,7 @@ impl Backend for OpBackend {
         }
 
         // Create a new item with the key as the item name
+        debug!("Creating new 1Password item for key '{key}'");
         let vault_args: Vec<String> = op_config
             .vault
             .as_ref()

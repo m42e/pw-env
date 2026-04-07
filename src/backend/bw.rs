@@ -262,6 +262,7 @@ impl Backend for BwBackend {
                 }
                 let encoded = serde_json::to_string(&item)?;
                 // bw edit item expects base64-encoded JSON on stdin, but we use a simpler approach
+                debug!("Running: bw edit item {item_name}");
                 let mut cmd = Command::new("bw");
                 cmd.args(["edit", "item", item_name]);
                 cmd.stdin(std::process::Stdio::piped());
@@ -297,6 +298,7 @@ impl Backend for BwBackend {
         let encoded = serde_json::to_string(&item_template)?;
         let encoded_b64 = base64_encode(encoded.as_bytes());
 
+        debug!("Running: bw create item");
         let mut cmd = Command::new("bw");
         cmd.args(["create", "item"]);
         cmd.stdin(std::process::Stdio::piped());

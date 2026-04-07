@@ -201,6 +201,7 @@ impl GpgBackend {
 
 impl Backend for GpgBackend {
     fn resolve(&self, key: &str, _reference: Option<&str>, ctx: &ResolveContext) -> Result<String> {
+        debug!("Resolving key '{key}' from GPG file");
         let all = Self::load_all(ctx)?;
         all.get(key)
             .cloned()
@@ -215,6 +216,7 @@ impl Backend for GpgBackend {
             .ok_or_else(|| anyhow::anyhow!("GPG recipient must be configured to store secrets"))?;
 
         let path = Self::gpg_file_path(ctx.dir, ctx.config);
+        debug!("Storing key '{key}' to GPG file '{}'", path.display());
 
         // Load existing content (or start empty)
         let resolve_ctx = ResolveContext {
@@ -244,6 +246,7 @@ impl Backend for GpgBackend {
     }
 
     fn has(&self, key: &str, ctx: &ResolveContext) -> Result<bool> {
+        debug!("Checking if key '{key}' exists in GPG file");
         let all = Self::load_all(ctx)?;
         Ok(all.contains_key(key))
     }
