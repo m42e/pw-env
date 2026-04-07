@@ -394,6 +394,8 @@ Main subcommands:
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
 - `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show
   full values
+- `pw-env add [--dir <dir>] <KEY> [VALUE]` stores a secret in the configured backend and ensures `.env` contains
+  `KEY=` for runtime resolution; omit `VALUE` to prompt or read it from stdin
 - `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from
   `.env`; entries marked with `no-migrate` are skipped
 - `pw-env check` checks available backends and active configuration
@@ -439,6 +441,14 @@ After migration, the file becomes:
 ```dotenv
 DATABASE_PASSWORD=
 API_KEY=
+```
+
+For a new secret that is not in `.env` yet, you can create both the backend value and the empty `.env` placeholder in
+one step:
+
+```bash
+pw-env add API_KEY
+printf '%s' "$DATABASE_URL" | pw-env add DATABASE_URL
 ```
 
 ## Backend Prerequisites

@@ -1,3 +1,4 @@
+mod add;
 mod backend;
 mod config;
 mod env_file;
@@ -69,6 +70,16 @@ enum Commands {
         /// Show full resolved values instead of masked previews
         #[arg(long)]
         reveal: bool,
+    },
+    /// Store a secret in the configured backend and add an empty .env entry for it
+    Add {
+        /// Directory containing or receiving the .env file (defaults to current directory)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Environment variable key to add
+        key: String,
+        /// Secret value to store. If omitted, pw-env prompts or reads from stdin.
+        value: Option<String>,
     },
     /// Migrate plaintext secrets from .env into the password manager
     Migrate {
@@ -394,6 +405,12 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             );
 
             Ok(())
+        }
+
+        Commands::Add { dir, key, value } => {
+            let dir = resolve_dir(dir)?;
+            let config = config::Config::load_for_dir(&dir)?;
+            add::add_entry(&dir, &config, &key, value)
         }
 
         Commands::Migrate { dir } => {

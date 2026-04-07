@@ -10,6 +10,7 @@
 | `exec` | Run a command with resolved secrets only in the child process |
 | `export` | Print shell exports for the current project |
 | `load` | Show a human-readable view of the current resolution state |
+| `add` | Store a secret in the effective backend and ensure `.env` contains `KEY=` |
 | `migrate` | Move plaintext values into the configured backend |
 | `check` | Verify backend binaries and config discovery |
 | `approvals` | Manage local override and secret-fetch approvals |
@@ -64,6 +65,21 @@ pw-env load [--reveal] [DIR]
 Print a human-readable summary of how each `.env` entry was classified, then print masked export output that shows only
 a short prefix of each resolved value. Pass `--reveal` when you intentionally need the full resolved content. Use this
 when you need to debug what pw-env would do without wiring it into a shell.
+
+## `add`
+
+```console
+pw-env add [--dir <DIR>] <KEY> [VALUE]
+```
+
+Store a secret in the effective backend for the selected directory, then ensure the local `.env` contains an empty
+entry for that key so future resolution can load it through the default backend.
+
+Pass `VALUE` directly when that is acceptable for your shell history and process list. If you omit it, `pw-env` reads
+the value from an interactive hidden prompt or from stdin when piped.
+
+If the key already exists in `.env` with a plaintext value or an explicit backend reference, the command stops instead
+of silently rewriting that line.
 
 ## `migrate`
 

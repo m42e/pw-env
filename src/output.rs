@@ -152,7 +152,7 @@ fn format_powershell_array(values: &[String]) -> String {
 
 /// Validate that a key is a safe environment variable name.
 /// Must match [A-Za-z_][A-Za-z0-9_]* to prevent shell injection.
-fn is_valid_env_key(key: &str) -> bool {
+pub(crate) fn is_valid_env_key(key: &str) -> bool {
     if key.is_empty() {
         return false;
     }
