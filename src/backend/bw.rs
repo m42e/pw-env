@@ -7,7 +7,10 @@ use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, trace, warn};
 
-use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
+use super::{
+    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, REPOSITORY_FIELD_NAME, ResolveContext,
+    StoreContext,
+};
 
 /// Cached BW_SESSION key. `None` means not yet determined.
 static SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -285,6 +288,13 @@ impl BwBackend {
             fields.push(serde_json::json!({
                 "name": PROJECT_FIELD_NAME,
                 "value": project,
+                "type": 0
+            }));
+        }
+        if let Some(repository) = ctx.repository.as_deref() {
+            fields.push(serde_json::json!({
+                "name": REPOSITORY_FIELD_NAME,
+                "value": repository,
                 "type": 0
             }));
         }
@@ -717,14 +727,31 @@ impl BwBackend {
         bail!("Field '{field_name}' not found in Bitwarden item");
     }
 
+    fn item_matches_custom_field(
+        item: &serde_json::Value,
+        field_name: &str,
+        expected: &str,
+    ) -> bool {
+        item.get("fields")
+            .and_then(|fields| fields.as_array())
+            .is_some_and(|fields| {
+                fields.iter().any(|field| {
+                    let name = field.get("name").and_then(|value| value.as_str());
+                    name.is_some_and(|name| name.eq_ignore_ascii_case(field_name))
+                        && field.get("value").and_then(|value| value.as_str()) == Some(expected)
+                })
+            })
+    }
+
     /// Resolve a key when multiple items share the same name, by narrowing
-    /// candidates first by folder, then by the "project" custom field.
+    /// candidates first by repository, then folder, then the "project" custom field.
     ///
     /// If more than one candidate remains after all filters, a warning is
     /// printed and an empty string is returned so the caller can proceed
     /// without blocking the entire env resolution.
     fn disambiguate_items(
         key: &str,
+        repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
@@ -732,7 +759,7 @@ impl BwBackend {
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
 
-        Self::disambiguate_items_from_list(key, &items, folder_id, project)
+        Self::disambiguate_items_from_list(key, &items, repository, folder_id, project)
     }
 
     fn resolve_reference_folder_id(
@@ -749,6 +776,7 @@ impl BwBackend {
     fn select_item_from_list<'a>(
         key: &str,
         items: &'a [serde_json::Value],
+        repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<Option<&'a serde_json::Value>> {
@@ -783,6 +811,28 @@ impl BwBackend {
             return Ok(Some(matching[0]));
         }
 
+        // Multiple matches — try narrowing by repository
+        if let Some(repository) = repository {
+            info!(
+                "Found {} items named '{key}', narrowing by repository '{repository}'",
+                matching.len()
+            );
+            let repository_filtered: Vec<&serde_json::Value> = matching
+                .iter()
+                .filter(|item| {
+                    Self::item_matches_custom_field(item, REPOSITORY_FIELD_NAME, repository)
+                })
+                .copied()
+                .collect();
+            if !repository_filtered.is_empty() {
+                matching = repository_filtered;
+            }
+            if matching.len() == 1 {
+                debug!("Disambiguated Bitwarden item by repository field '{repository}'");
+                return Ok(Some(matching[0]));
+            }
+        }
+
         // Multiple matches — try narrowing by folder
         if let Some(fid) = folder_id {
             info!(
@@ -811,17 +861,7 @@ impl BwBackend {
             );
             let project_filtered: Vec<&serde_json::Value> = matching
                 .iter()
-                .filter(|item| {
-                    item.get("fields")
-                        .and_then(|f| f.as_array())
-                        .is_some_and(|fields| {
-                            fields.iter().any(|field| {
-                                let name = field.get("name").and_then(|n| n.as_str());
-                                (name == Some("project") || name == Some("Project"))
-                                    && field.get("value").and_then(|v| v.as_str()) == Some(proj)
-                            })
-                        })
-                })
+                .filter(|item| Self::item_matches_custom_field(item, PROJECT_FIELD_NAME, proj))
                 .copied()
                 .collect();
             if !project_filtered.is_empty() {
@@ -838,7 +878,7 @@ impl BwBackend {
         );
         eprintln!(
             "pw-env: multiple Bitwarden items found for '{key}'. \
-             Configure defaults.bw.folder or add a 'project' field to disambiguate."
+             Add a 'repository' or 'project' field, or configure defaults.bw.folder to disambiguate."
         );
         Ok(None)
     }
@@ -846,6 +886,7 @@ impl BwBackend {
     fn resolve_reference_field(
         item_name: &str,
         field_name: &str,
+        repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
@@ -853,7 +894,9 @@ impl BwBackend {
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
 
-        let Some(item) = Self::select_item_from_list(item_name, &items, folder_id, project)? else {
+        let Some(item) =
+            Self::select_item_from_list(item_name, &items, repository, folder_id, project)?
+        else {
             return Ok(String::new());
         };
 
@@ -870,10 +913,12 @@ impl BwBackend {
     fn disambiguate_items_from_list(
         key: &str,
         items: &[serde_json::Value],
+        repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
-        let Some(item) = Self::select_item_from_list(key, items, folder_id, project)? else {
+        let Some(item) = Self::select_item_from_list(key, items, repository, folder_id, project)?
+        else {
             return Ok(String::new());
         };
 
@@ -885,8 +930,8 @@ impl BwBackend {
     /// - **Item mode** (when `effective_item()` returns `Some`): a single `bw get item`
     ///   call fetches the configured item, then all requested keys are extracted as
     ///   custom fields from the cached JSON.
-    /// - **Item-per-key mode**: a single `bw list items` call (optionally filtered by
-    ///   `--folderid`) fetches all items, then each key is disambiguated in-process.
+    /// - **Item-per-key mode**: a single `bw list items` call fetches all items, then
+    ///   each key is disambiguated in-process using repository, folder, and project metadata.
     /// - **bw:// references**: grouped by item name so each unique item is fetched once.
     ///
     /// Returns a map of key → resolved value. Keys that fail to resolve are omitted
@@ -965,6 +1010,7 @@ impl BwBackend {
                             Ok(folder_id) => Self::resolve_reference_field(
                                 item_name,
                                 field_name,
+                                ctx.repository.as_deref(),
                                 folder_id.as_deref(),
                                 ctx.project.as_deref(),
                             ),
@@ -1041,16 +1087,7 @@ impl BwBackend {
                     .flatten()
                     .flatten();
 
-                // Build list args: optionally filter by folder
-                let mut list_args: Vec<&str> = vec!["list", "items"];
-                let folder_id_str;
-                if let Some(ref fid) = folder_id {
-                    folder_id_str = fid.clone();
-                    list_args.push("--folderid");
-                    list_args.push(&folder_id_str);
-                }
-
-                match Self::run_bw(&list_args) {
+                match Self::run_bw(&["list", "items"]) {
                     Ok(items_json) => {
                         let all_items: Vec<serde_json::Value> =
                             serde_json::from_str(&items_json).unwrap_or_default();
@@ -1060,6 +1097,7 @@ impl BwBackend {
                                 Self::disambiguate_items_from_list(
                                     key,
                                     &all_items,
+                                    ctx.repository.as_deref(),
                                     folder_id.as_deref(),
                                     ctx.project.as_deref(),
                                 ),
@@ -1098,6 +1136,7 @@ impl BwBackend {
                 return Self::resolve_reference_field(
                     item,
                     field,
+                    ctx.repository.as_deref(),
                     folder_id.as_deref(),
                     ctx.project.as_deref(),
                 );
@@ -1125,7 +1164,12 @@ impl BwBackend {
                 .map(Self::resolve_folder_id)
                 .transpose()?
                 .flatten();
-            Self::disambiguate_items(key, folder_id.as_deref(), ctx.project.as_deref())
+            Self::disambiguate_items(
+                key,
+                ctx.repository.as_deref(),
+                folder_id.as_deref(),
+                ctx.project.as_deref(),
+            )
         }
     }
 }
@@ -1401,6 +1445,7 @@ mod tests {
             dir: Path::new("/tmp/example/service"),
             config,
             project: Some("example".to_string()),
+            repository: Some("/tmp/example".to_string()),
         }
     }
 
@@ -1467,6 +1512,7 @@ mod tests {
             dir,
             config,
             project: Some("test-project".to_string()),
+            repository: Some("/tmp/test-repo".to_string()),
         }
     }
 
@@ -1509,13 +1555,13 @@ mod tests {
     }
 
     #[test]
-    fn backend_resolve_with_bw_reference_disambiguates_by_folder_then_project() {
+    fn backend_resolve_with_bw_reference_disambiguates_by_repository_before_folder_and_project() {
         let selected_item = serde_json::json!({
             "id": "item-1",
             "name": "my-item",
-            "folderId": "folder-abc",
-            "login": { "password": "proj-pw" },
-            "fields": [{"name":"project","value":"test-project","type":0}]
+            "folderId": "folder-other",
+            "login": { "password": "repo-pw" },
+            "fields": [{"name":"repository","value":"/tmp/test-repo","type":0}]
         });
         let items_json = serde_json::json!([
             selected_item,
@@ -1523,8 +1569,8 @@ mod tests {
                 "id": "item-2",
                 "name": "my-item",
                 "folderId": "folder-abc",
-                "login": { "password": "other-pw" },
-                "fields": [{"name":"project","value":"other-project","type":0}]
+                "login": { "password": "folder-project-pw" },
+                "fields": [{"name":"project","value":"test-project","type":0}]
             },
             {
                 "id": "item-3",
@@ -1538,8 +1584,8 @@ mod tests {
         let selected_item_json = serde_json::json!({
             "id": "item-1",
             "name": "my-item",
-            "login": { "password": "proj-pw" },
-            "fields": [{"name":"project","value":"test-project","type":0}]
+            "login": { "password": "repo-pw" },
+            "fields": [{"name":"repository","value":"/tmp/test-repo","type":0}]
         })
         .to_string();
         let script = format!(
@@ -1563,7 +1609,7 @@ mod tests {
             let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
             let backend = BwBackend;
             let result = backend.resolve("API_KEY", Some("bw://my-item/password"), &ctx);
-            assert_eq!(result.unwrap(), "proj-pw");
+            assert_eq!(result.unwrap(), "repo-pw");
         });
     }
 
@@ -1615,6 +1661,47 @@ mod tests {
             let results =
                 BwBackend::resolve_batch(&[("API_KEY", Some("bw://my-item/password"))], &ctx);
             assert_eq!(results.get("API_KEY").unwrap().as_ref().unwrap(), "proj-pw");
+        });
+    }
+
+    #[test]
+    fn resolve_batch_key_lookup_disambiguates_by_repository_before_folder_and_project() {
+        let items_json = serde_json::json!([
+            {
+                "name": "API_KEY",
+                "folderId": "folder-other",
+                "login": { "password": "repo-pw" },
+                "fields": [{"name":"repository","value":"/tmp/test-repo","type":0}]
+            },
+            {
+                "name": "API_KEY",
+                "folderId": "folder-abc",
+                "login": { "password": "folder-project-pw" },
+                "fields": [{"name":"project","value":"test-project","type":0}]
+            }
+        ])
+        .to_string();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
+            items_json
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    bw: BwConfig {
+                        folder: Some("Secrets".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let results = BwBackend::resolve_batch(&[("API_KEY", None)], &ctx);
+            assert_eq!(results.get("API_KEY").unwrap().as_ref().unwrap(), "repo-pw");
         });
     }
 
@@ -1819,8 +1906,26 @@ mod tests {
         ]"#;
         let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
         with_mock_bw(&script, || {
-            let result = BwBackend::disambiguate_items("DB_PASS", Some("folder-abc"), None);
+            let result = BwBackend::disambiguate_items("DB_PASS", None, Some("folder-abc"), None);
             assert_eq!(result.unwrap(), "folder-pw");
+        });
+    }
+
+    #[test]
+    fn disambiguate_items_narrows_by_repository_before_folder() {
+        let items_json = r#"[
+            {"name":"DB_PASS","folderId":"folder-other","login":{"password":"repo-pw"},"fields":[{"name":"repository","value":"/tmp/test-repo","type":0}]},
+            {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"folder-pw"},"fields":[]}
+        ]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
+        with_mock_bw(&script, || {
+            let result = BwBackend::disambiguate_items(
+                "DB_PASS",
+                Some("/tmp/test-repo"),
+                Some("folder-abc"),
+                None,
+            );
+            assert_eq!(result.unwrap(), "repo-pw");
         });
     }
 
@@ -1835,7 +1940,7 @@ mod tests {
         let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
         with_mock_bw(&script, || {
             let result =
-                BwBackend::disambiguate_items("DB_PASS", Some("folder-abc"), Some("myapp"));
+                BwBackend::disambiguate_items("DB_PASS", None, Some("folder-abc"), Some("myapp"));
             assert_eq!(result.unwrap(), "proj-pw");
         });
     }
@@ -1850,7 +1955,7 @@ mod tests {
         let script = format!("#!/bin/sh\necho '{}'\n", items_json.replace('\n', ""));
         with_mock_bw(&script, || {
             let result =
-                BwBackend::disambiguate_items("DB_PASS", Some("folder-abc"), Some("myapp"));
+                BwBackend::disambiguate_items("DB_PASS", None, Some("folder-abc"), Some("myapp"));
             assert_eq!(result.unwrap(), "", "should return empty when ambiguous");
         });
     }
@@ -2012,6 +2117,7 @@ mod tests {
                 dir: Path::new("/tmp"),
                 config: &config,
                 project: None,
+                repository: None,
             };
             let result = BwBackend.store("NEW_KEY", "new-value", &ctx);
             assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -2030,6 +2136,10 @@ mod tests {
         assert!(fields.iter().any(|field| {
             field.get("name").and_then(|value| value.as_str()) == Some("project")
                 && field.get("value").and_then(|value| value.as_str()) == Some("example")
+        }));
+        assert!(fields.iter().any(|field| {
+            field.get("name").and_then(|value| value.as_str()) == Some("repository")
+                && field.get("value").and_then(|value| value.as_str()) == Some("/tmp/example")
         }));
     }
 
@@ -2084,6 +2194,7 @@ mod tests {
                 dir: Path::new("/tmp"),
                 config: &config,
                 project: None,
+                repository: None,
             };
             let result = BwBackend.store("MY_KEY", "my-value", &ctx);
             assert!(result.is_ok(), "expected Ok, got: {:?}", result);

@@ -9,6 +9,7 @@ use crate::config::Config;
 
 pub const PROJECT_FIELD_NAME: &str = "project";
 pub const MIGRATED_FROM_FIELD_NAME: &str = "migrated_from";
+pub const REPOSITORY_FIELD_NAME: &str = "repository";
 
 /// Single shared mutex for all mock PATH manipulations in tests.
 /// All backend mock helpers (bw, gpg, op) must hold this lock while modifying PATH
@@ -23,6 +24,8 @@ pub struct ResolveContext<'a> {
     pub config: &'a Config,
     /// Auto-detected or configured project name (for disambiguating multiple matches).
     pub project: Option<String>,
+    /// Canonical git root path for repository-aware disambiguation.
+    pub repository: Option<String>,
 }
 
 /// Context passed to backend operations for storing secrets.
@@ -30,6 +33,7 @@ pub struct StoreContext<'a> {
     pub dir: &'a Path,
     pub config: &'a Config,
     pub project: Option<String>,
+    pub repository: Option<String>,
 }
 
 impl StoreContext<'_> {
@@ -112,6 +116,7 @@ mod tests {
             dir: std::path::Path::new("/some/project/dir"),
             config: &config,
             project: None,
+            repository: None,
         };
         assert_eq!(ctx.migrated_from(), "/some/project/dir");
     }

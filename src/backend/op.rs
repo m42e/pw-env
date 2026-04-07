@@ -2,7 +2,10 @@ use anyhow::{Context, Result, bail};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext, StoreContext};
+use super::{
+    Backend, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, REPOSITORY_FIELD_NAME, ResolveContext,
+    StoreContext,
+};
 
 pub struct OpBackend;
 
@@ -18,6 +21,12 @@ impl OpBackend {
         )];
         if let Some(project) = ctx.project.as_deref() {
             assignments.push(Self::text_field_assignment(PROJECT_FIELD_NAME, project));
+        }
+        if let Some(repository) = ctx.repository.as_deref() {
+            assignments.push(Self::text_field_assignment(
+                REPOSITORY_FIELD_NAME,
+                repository,
+            ));
         }
         assignments
     }
@@ -58,11 +67,24 @@ impl OpBackend {
         Self::run_op(&args, account)
     }
 
+    fn item_matches_text_field(item: &serde_json::Value, field_name: &str, expected: &str) -> bool {
+        item.get("fields")
+            .and_then(|fields| fields.as_array())
+            .is_some_and(|fields| {
+                fields.iter().any(|field| {
+                    let label = field.get("label").and_then(|value| value.as_str());
+                    label.is_some_and(|label| label.eq_ignore_ascii_case(field_name))
+                        && field.get("value").and_then(|value| value.as_str()) == Some(expected)
+                })
+            })
+    }
+
     /// Resolve a key when multiple items share the same name, by checking
-    /// the "project" custom field on each candidate item.
-    fn resolve_by_project(
+    /// metadata custom fields in repository-first order.
+    fn resolve_by_metadata(
         key: &str,
-        project: &str,
+        repository: Option<&str>,
+        project: Option<&str>,
         vault: Option<&str>,
         account: Option<&str>,
     ) -> Result<String> {
@@ -95,12 +117,8 @@ impl OpBackend {
             return Self::get_item_field(id, "label=password", vault, account);
         }
 
-        // Multiple matches — check each item's "project" field
-        info!(
-            "Found {} items named '{key}', disambiguating by project '{project}'",
-            matching.len()
-        );
-        for item_summary in &matching {
+        let mut candidates: Vec<(String, serde_json::Value)> = Vec::with_capacity(matching.len());
+        for item_summary in matching {
             let id = item_summary
                 .get("id")
                 .and_then(|i| i.as_str())
@@ -108,22 +126,59 @@ impl OpBackend {
             let full_json = Self::run_op(&["item", "get", id, "--format=json"], account)?;
             let full_item: serde_json::Value =
                 serde_json::from_str(&full_json).context("Failed to parse op item get JSON")?;
+            candidates.push((id.to_string(), full_item));
+        }
 
-            if let Some(fields) = full_item.get("fields").and_then(|f| f.as_array()) {
-                for field in fields {
-                    let label = field.get("label").and_then(|l| l.as_str());
-                    if (label == Some("project") || label == Some("Project"))
-                        && field.get("value").and_then(|v| v.as_str()) == Some(project)
-                    {
-                        debug!("Matched item '{id}' by project field '{project}'");
-                        return Self::get_item_field(id, "label=password", vault, account);
-                    }
-                }
+        if let Some(repository) = repository {
+            info!(
+                "Found {} items named '{key}', disambiguating by repository '{repository}'",
+                candidates.len()
+            );
+            let repository_filtered: Vec<(String, serde_json::Value)> = candidates
+                .iter()
+                .filter(|(_, item)| {
+                    Self::item_matches_text_field(item, REPOSITORY_FIELD_NAME, repository)
+                })
+                .cloned()
+                .collect();
+            if !repository_filtered.is_empty() {
+                candidates = repository_filtered;
+            }
+            if candidates.len() == 1 {
+                debug!(
+                    "Matched item '{}' by repository field '{repository}'",
+                    candidates[0].0
+                );
+                return Self::get_item_field(&candidates[0].0, "label=password", vault, account);
+            }
+        }
+
+        if let Some(project) = project {
+            info!(
+                "Found {} items named '{key}', disambiguating by project '{project}'",
+                candidates.len()
+            );
+            let project_filtered: Vec<(String, serde_json::Value)> = candidates
+                .iter()
+                .filter(|(_, item)| {
+                    Self::item_matches_text_field(item, PROJECT_FIELD_NAME, project)
+                })
+                .cloned()
+                .collect();
+            if !project_filtered.is_empty() {
+                candidates = project_filtered;
+            }
+            if candidates.len() == 1 {
+                debug!(
+                    "Matched item '{}' by project field '{project}'",
+                    candidates[0].0
+                );
+                return Self::get_item_field(&candidates[0].0, "label=password", vault, account);
             }
         }
 
         bail!(
-            "Multiple 1Password items found for '{key}' but none have a 'project' field matching '{project}'"
+            "Multiple 1Password items found for '{key}' but repository/project metadata did not disambiguate them"
         );
     }
 }
@@ -158,11 +213,17 @@ impl Backend for OpBackend {
             match result {
                 Ok(value) => Ok(value),
                 Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
-                    if let Some(ref project) = ctx.project {
+                    if ctx.repository.is_some() || ctx.project.is_some() {
                         debug!(
-                            "Multiple items match '{key}', disambiguating by project '{project}'"
+                            "Multiple items match '{key}', disambiguating by repository/project metadata"
                         );
-                        Self::resolve_by_project(key, project, Some(vault), account)
+                        Self::resolve_by_metadata(
+                            key,
+                            ctx.repository.as_deref(),
+                            ctx.project.as_deref(),
+                            Some(vault),
+                            account,
+                        )
                     } else {
                         Err(e)
                     }
@@ -175,11 +236,17 @@ impl Backend for OpBackend {
             match result {
                 Ok(value) => Ok(value),
                 Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
-                    if let Some(ref project) = ctx.project {
+                    if ctx.repository.is_some() || ctx.project.is_some() {
                         debug!(
-                            "Multiple items match '{key}', disambiguating by project '{project}'"
+                            "Multiple items match '{key}', disambiguating by repository/project metadata"
                         );
-                        Self::resolve_by_project(key, project, None, account)
+                        Self::resolve_by_metadata(
+                            key,
+                            ctx.repository.as_deref(),
+                            ctx.project.as_deref(),
+                            None,
+                            account,
+                        )
                     } else {
                         Err(e)
                     }
@@ -270,6 +337,7 @@ mod tests {
             dir: Path::new("/work/project"),
             config: &config,
             project: Some("my-project".to_string()),
+            repository: None,
         };
         let assignments = OpBackend::migration_field_assignments(&ctx);
         assert!(assignments.contains(&"migrated_from[text]=/work/project".to_string()));
@@ -288,6 +356,7 @@ mod tests {
             dir: Path::new("/work/project"),
             config: &config,
             project: None,
+            repository: None,
         };
         let assignments = OpBackend::migration_field_assignments(&ctx);
         assert!(assignments.contains(&"migrated_from[text]=/work/project".to_string()));
@@ -306,12 +375,14 @@ mod tests {
             dir: Path::new("/tmp/example/service"),
             config: &config,
             project: Some("example".to_string()),
+            repository: Some("/tmp/example".to_string()),
         };
 
         let assignments = OpBackend::migration_field_assignments(&ctx);
 
         assert!(assignments.contains(&"migrated_from[text]=/tmp/example/service".to_string()));
         assert!(assignments.contains(&"project[text]=example".to_string()));
+        assert!(assignments.contains(&"repository[text]=/tmp/example".to_string()));
     }
 
     // ------- Mock-op infrastructure -------
@@ -349,6 +420,7 @@ mod tests {
             dir,
             config,
             project: Some("test-project".to_string()),
+            repository: Some("/tmp/test-repo".to_string()),
         }
     }
 
@@ -507,6 +579,29 @@ mod tests {
     }
 
     #[test]
+    fn backend_resolve_with_vault_disambiguates_by_repository_before_project() {
+        let script = "#!/bin/sh\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"MY_KEY\" ]; then\necho 'more than 1 item found' >&2\nexit 1\nfi\nif [ \"$2\" = \"list\" ]; then\necho '[{\"id\":\"repo-item\",\"title\":\"MY_KEY\"},{\"id\":\"project-item\",\"title\":\"MY_KEY\"}]'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"repo-item\" ] && [ \"$4\" = \"--format=json\" ]; then\necho '{\"id\":\"repo-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"/tmp/test-repo\"},{\"label\":\"project\",\"value\":\"other-project\"}]}'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"project-item\" ] && [ \"$4\" = \"--format=json\" ]; then\necho '{\"id\":\"project-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"/tmp/other-repo\"},{\"label\":\"project\",\"value\":\"test-project\"}]}'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"repo-item\" ]; then\necho 'repo-wins'\nexit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$3\" = \"project-item\" ]; then\necho 'project-would-win'\nexit 0\nfi\necho 'unexpected command' >&2\nexit 1\n";
+
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault: Some("MyVault".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+            assert_eq!(result.unwrap(), "repo-wins");
+        });
+    }
+
+    #[test]
     fn backend_resolve_no_item_no_vault() {
         with_mock_op("#!/bin/sh\necho 'no-vault-value'\n", || {
             let config = Config {
@@ -540,6 +635,7 @@ mod tests {
                 dir: Path::new("/tmp"),
                 config: &config,
                 project: None,
+                repository: None,
             };
             let result = OpBackend.store("MY_KEY", "my-value", &ctx);
             assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -568,6 +664,7 @@ mod tests {
                 dir: Path::new("/tmp"),
                 config: &config,
                 project: None,
+                repository: None,
             };
 
             let result = OpBackend.store("MY_KEY", "my-value", &ctx);
@@ -588,6 +685,7 @@ mod tests {
                 dir: Path::new("/tmp"),
                 config: &config,
                 project: None,
+                repository: None,
             };
             let result = OpBackend.store("NEW_KEY", "new-value", &ctx);
             assert!(result.is_ok(), "expected Ok, got: {:?}", result);

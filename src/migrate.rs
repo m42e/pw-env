@@ -80,15 +80,18 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
 
     let backend = backend::create_backend(backend_name)?;
     let project = resolve::detect_project_name(dir);
+    let repository = resolve::find_git_root(dir).map(|path| path.display().to_string());
     let store_ctx = StoreContext {
         dir,
         config,
         project: project.clone(),
+        repository: repository.clone(),
     };
     let resolve_ctx = ResolveContext {
         dir,
         config,
         project,
+        repository,
     };
     let mut migrated_keys: Vec<&str> = Vec::new();
 

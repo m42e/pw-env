@@ -11,7 +11,7 @@ use crate::env_file::{EntryKind, EnvEntry, EnvFile};
 use crate::progress::ActivitySpinner;
 
 /// Walk up from `dir` to find a `.git` directory, returning the containing folder.
-fn find_git_root(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn find_git_root(dir: &Path) -> Option<PathBuf> {
     let mut current = dir.to_path_buf();
     loop {
         if current.join(".git").exists() {
@@ -92,6 +92,7 @@ pub fn resolve_env_file(
     Config::ensure_secret_fetch_approved(&env_file.path)?;
 
     let project = detect_project_name(dir);
+    let repository = find_git_root(dir).map(|path| path.display().to_string());
     debug!("Detected project name: {:?}", project);
 
     let default_backend_name = config.effective_backend(dir);
@@ -122,6 +123,7 @@ pub fn resolve_env_file(
             dir,
             config,
             project: project.clone(),
+            repository: repository.clone(),
         };
         for entry in &op_entries {
             let reference = match &entry.kind {
@@ -154,6 +156,7 @@ pub fn resolve_env_file(
             dir,
             config,
             project: project.clone(),
+            repository: repository.clone(),
         };
 
         // Collect all (key, reference) pairs for the batch call
@@ -225,6 +228,7 @@ pub fn resolve_env_file(
                 dir,
                 config,
                 project: project.clone(),
+                repository: repository.clone(),
             };
             match crate::backend::gpg::GpgBackend::resolve_all(&ctx) {
                 Ok(all_values) => {
@@ -254,6 +258,7 @@ pub fn resolve_env_file(
                 dir,
                 config,
                 project: project.clone(),
+                repository: repository.clone(),
             };
             let bitwarden_default_started_at = (backend.name() == "Bitwarden").then(Instant::now);
             for entry in &default_entries {

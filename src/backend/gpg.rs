@@ -221,6 +221,7 @@ impl Backend for GpgBackend {
             dir: ctx.dir,
             config: ctx.config,
             project: None,
+            repository: None,
         };
         let mut existing = if path.exists() {
             Self::load_all_stored_secrets(&resolve_ctx).unwrap_or_default()
@@ -425,6 +426,7 @@ PLAIN=value
             dir,
             config,
             project: None,
+            repository: None,
         }
     }
 
@@ -631,6 +633,7 @@ PLAIN=value
             dir: temp_dir.path(),
             config: &config,
             project: None,
+            repository: None,
         };
         let result = GpgBackend.store("MY_KEY", "my-value", &ctx);
         assert!(result.is_err());
@@ -657,6 +660,7 @@ PLAIN=value
                 dir: temp_dir.path(),
                 config: &config,
                 project: None,
+                repository: None,
             };
             // No .env.gpg file exists yet — store should create it via mock gpg encrypt
             let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
@@ -687,6 +691,7 @@ PLAIN=value
                 dir: temp_dir.path(),
                 config: &config,
                 project: Some("my-project".to_string()),
+                repository: None,
             };
             // File exists → load_all_stored_secrets is called (decrypt), then encrypt
             let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
