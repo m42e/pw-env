@@ -1,0 +1,38 @@
+name: Mutation Testing
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # every Monday at 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: Mutation Testing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # pin: v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # pin: v2.9.1
+
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation tests
+        run: cargo mutants
+
+      - name: Upload mutants results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-results
+          path: mutants.out/
