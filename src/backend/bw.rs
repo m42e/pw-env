@@ -11,6 +11,7 @@ use super::{
     Backend, CREATED_WITH_FIELD_NAME, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME,
     REPOSITORY_FIELD_NAME, ResolveContext, StoreContext,
 };
+use crate::progress::suspend_progress_output;
 
 /// Cached BW_SESSION key. `None` means not yet determined.
 static SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -490,10 +491,13 @@ impl BwBackend {
     /// child process never writes interactive escape codes.
     fn prompt_unlock() -> Result<String> {
         info!("Bitwarden vault is locked, prompting for unlock");
-        let password = dialoguer::Password::new()
-            .with_prompt("Bitwarden master password")
-            .interact()
-            .context("Failed to read master password")?;
+        let password = {
+            let _progress_suspension = suspend_progress_output();
+            dialoguer::Password::new()
+                .with_prompt("Bitwarden master password")
+                .interact()
+                .context("Failed to read master password")?
+        };
 
         debug!("Running: bw unlock --raw --passwordenv ...");
         let mut cmd = Command::new("bw");
@@ -901,6 +905,21 @@ impl BwBackend {
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
+        let Some(item) =
+            Self::resolve_reference_item(item_name, repository, folder_id, project)?
+        else {
+            return Ok(String::new());
+        };
+
+        Self::extract_field_from_value(&item, field_name)
+    }
+
+    fn resolve_reference_item(
+        item_name: &str,
+        repository: Option<&str>,
+        folder_id: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Option<serde_json::Value>> {
         let search_json = Self::run_bw(&["list", "items", "--search", item_name])?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
@@ -908,7 +927,7 @@ impl BwBackend {
         let Some(item) =
             Self::select_item_from_list(item_name, &items, repository, folder_id, project)?
         else {
-            return Ok(String::new());
+            return Ok(None);
         };
 
         let item_identifier = item
@@ -916,7 +935,9 @@ impl BwBackend {
             .and_then(|id| id.as_str())
             .unwrap_or(item_name);
         let item_json = Self::run_bw(&["get", "item", item_identifier])?;
-        Self::extract_field_from_item(&item_json, field_name)
+        let item: serde_json::Value =
+            serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
+        Ok(Some(item))
     }
 
     /// Core disambiguation logic that works on a pre-fetched list of items.
@@ -1007,6 +1028,11 @@ impl BwBackend {
 
         // --- Handle bw:// references: group by item name, one fetch per unique item ---
         if !ref_entries.is_empty() {
+            let mut reference_item_cache: HashMap<
+                (Option<String>, String),
+                std::result::Result<Option<serde_json::Value>, String>,
+            > = HashMap::new();
+
             for (env_key, ref_str) in &ref_entries {
                 if let Some((reference_folder, item_name, field_name)) =
                     Self::parse_bw_reference(ref_str)
@@ -1018,13 +1044,29 @@ impl BwBackend {
                     results.insert(
                         env_key.to_string(),
                         match folder_id {
-                            Ok(folder_id) => Self::resolve_reference_field(
-                                item_name,
-                                field_name,
-                                ctx.repository.as_deref(),
-                                folder_id.as_deref(),
-                                ctx.project.as_deref(),
-                            ),
+                            Ok(folder_id) => {
+                                let cache_key = (folder_id.clone(), item_name.to_string());
+                                let folder_id_for_lookup = folder_id.clone();
+                                let cached_item = reference_item_cache
+                                    .entry(cache_key)
+                                    .or_insert_with(|| {
+                                        Self::resolve_reference_item(
+                                            item_name,
+                                            ctx.repository.as_deref(),
+                                            folder_id_for_lookup.as_deref(),
+                                            ctx.project.as_deref(),
+                                        )
+                                        .map_err(|error| error.to_string())
+                                    });
+
+                                match cached_item.as_ref() {
+                                    Ok(Some(item)) => {
+                                        Self::extract_field_from_value(item, field_name)
+                                    }
+                                    Ok(None) => Ok(String::new()),
+                                    Err(error) => Err(anyhow::anyhow!(error.clone())),
+                                }
+                            }
                             Err(error) => Err(error),
                         },
                     );
@@ -1672,6 +1714,85 @@ mod tests {
             let results =
                 BwBackend::resolve_batch(&[("API_KEY", Some("bw://my-item/password"))], &ctx);
             assert_eq!(results.get("API_KEY").unwrap().as_ref().unwrap(), "proj-pw");
+        });
+    }
+
+    #[test]
+    fn resolve_batch_reference_reuses_selected_item_for_multiple_fields() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let items_json = serde_json::json!([
+            {
+                "id": "item-1",
+                "name": "my-item",
+                "folderId": "folder-abc",
+                "fields": []
+            }
+        ])
+        .to_string();
+        let item_json = serde_json::json!({
+            "id": "item-1",
+            "name": "my-item",
+            "login": {
+                "username": "service-user",
+                "password": "service-pass"
+            },
+            "fields": []
+        })
+        .to_string();
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"sync\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ] && [ \"$3\" = \"--search\" ] && [ \"$4\" = \"my-item\" ]; then\n  echo '{}'\n  exit 0\nfi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item-1\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
+            call_log.display(),
+            items_json,
+            item_json
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    bw: BwConfig {
+                        folder: Some("Secrets".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let results = BwBackend::resolve_batch(
+                &[
+                    ("BW_USERNAME", Some("bw://my-item/username")),
+                    ("BW_PASSWORD", Some("bw://my-item/password")),
+                ],
+                &ctx,
+            );
+
+            assert_eq!(
+                results.get("BW_USERNAME").unwrap().as_ref().unwrap(),
+                "service-user"
+            );
+            assert_eq!(
+                results.get("BW_PASSWORD").unwrap().as_ref().unwrap(),
+                "service-pass"
+            );
+
+            let log = std::fs::read_to_string(&call_log).unwrap();
+            assert_eq!(
+                log.lines()
+                    .filter(|line| *line == "list items --search my-item")
+                    .count(),
+                1,
+                "expected one list-items search for repeated bw:// item references"
+            );
+            assert_eq!(
+                log.lines()
+                    .filter(|line| *line == "get item item-1")
+                    .count(),
+                1,
+                "expected one get-item fetch for repeated bw:// item references"
+            );
         });
     }
 

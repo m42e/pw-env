@@ -283,7 +283,12 @@ pub fn resolve_env_file(
         }
     }
 
-    // Resolve bw:// references using batch path
+    let use_bitwarden_batch_for_defaults = default_backend_name == "bw";
+    if use_bitwarden_batch_for_defaults {
+        bw_entries.extend(default_entries.iter().copied());
+    }
+
+    // Resolve all Bitwarden-backed entries through the batch path.
     if !bw_entries.is_empty() {
         let bw_started_at = Instant::now();
         let ctx = ResolveContext {
@@ -299,6 +304,7 @@ pub fn resolve_env_file(
             .map(|entry| {
                 let reference = match &entry.kind {
                     EntryKind::BwReference(r) => Some(r.as_str()),
+                    EntryKind::Empty => None,
                     _ => None,
                 };
                 (entry.key.as_str(), reference)
@@ -355,7 +361,7 @@ pub fn resolve_env_file(
     }
 
     // Resolve empty entries via the default backend
-    if !default_entries.is_empty() {
+    if !default_entries.is_empty() && !use_bitwarden_batch_for_defaults {
         // For GPG backend, resolve all at once since it decrypts the whole file
         if default_backend_name == "gpg" {
             let ctx = ResolveContext {
@@ -956,6 +962,60 @@ mod tests {
             resolved.get("DEFAULT_KEY").map(String::as_str),
             Some("default-op-secret"),
             "empty-value entries should be resolved via the configured non-gpg backend"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_batches_default_bitwarden_entries() {
+        let temp = unique_subdir("resolve-default-bw-batch");
+        let env_path = temp.join(".env");
+        let call_log = temp.join("bw-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=\nDB_PASS=\n").unwrap();
+
+        let items_json = r#"[{"name":"API_KEY","folderId":"folder-abc","login":{"password":"api-secret"},"fields":[]},{"name":"DB_PASS","folderId":"folder-abc","login":{"password":"db-secret"},"fields":[]}]"#;
+        let bw_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'status' ]; then\n  echo '{{\"status\":\"unlocked\"}}'\nelif [ \"$1\" = 'sync' ]; then\n  exit 0\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'folders' ] && [ \"$4\" = 'Secrets' ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] && [ $# -eq 2 ]; then\n  echo '{}'\nelse\n  exit 1\nfi\n",
+            call_log.display(),
+            items_json
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                backend: "bw".to_string(),
+                bw: crate::config::BwConfig {
+                    folder: Some("Secrets".to_string()),
+                    ..crate::config::BwConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let resolved = with_approval_and_mock_binaries(None, Some(&bw_script), &env_path, || {
+            resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+        });
+
+        let log = fs::read_to_string(&call_log).unwrap();
+
+        let _ = fs::remove_dir_all(&temp);
+        assert_eq!(resolved.get("API_KEY").map(String::as_str), Some("api-secret"));
+        assert_eq!(resolved.get("DB_PASS").map(String::as_str), Some("db-secret"));
+        assert_eq!(
+            log.lines().filter(|line| *line == "list items").count(),
+            1,
+            "expected a single full item list fetch for default Bitwarden entries"
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("list items --search"))
+                .count(),
+            0,
+            "default Bitwarden entries should not fall back to per-key search lookups"
         );
     }
 }
