@@ -48,18 +48,43 @@ impl EnvFile {
     /// Rejects symlinks to prevent symlink-based attacks where an attacker
     /// replaces .env with a symlink to a controlled or sensitive file.
     pub fn find(dir: &Path) -> Option<PathBuf> {
-        let env_path = dir.join(".env");
-        if env_path.exists() {
-            if env_path.is_symlink() {
-                eprintln!(
-                    "pw-env: refusing to follow .env symlink at {}. Use a regular file.",
-                    env_path.display()
-                );
+        Self::find_with_parents(dir, false)
+    }
+
+    /// Find the active .env file for the given directory.
+    ///
+    /// When `search_parents` is enabled, pw-env walks upward until it finds
+    /// the first `.env` file or reaches the enclosing git workspace root. If
+    /// nested git markers are present, such as submodules, the search continues
+    /// until the highest ancestor git root.
+    pub fn find_with_parents(dir: &Path, search_parents: bool) -> Option<PathBuf> {
+        let stop_dir = if search_parents {
+            topmost_git_root(dir)
+        } else {
+            Some(dir.to_path_buf())
+        };
+        let mut current = dir.to_path_buf();
+
+        loop {
+            let env_path = current.join(".env");
+            if env_path.exists() {
+                if env_path.is_symlink() {
+                    eprintln!(
+                        "pw-env: refusing to follow .env symlink at {}. Use a regular file.",
+                        env_path.display()
+                    );
+                    return None;
+                }
+                return Some(env_path);
+            }
+
+            if stop_dir.as_ref().is_some_and(|stop| stop == &current) {
                 return None;
             }
-            Some(env_path)
-        } else {
-            None
+
+            if !current.pop() {
+                return None;
+            }
         }
     }
 
@@ -210,6 +235,21 @@ impl EnvFile {
             .with_context(|| format!("Failed to rewrite .env file: {}", self.path.display()))?;
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())
+    }
+}
+
+fn topmost_git_root(dir: &Path) -> Option<PathBuf> {
+    let mut current = dir.to_path_buf();
+    let mut topmost = None;
+
+    loop {
+        if current.join(".git").exists() {
+            topmost = Some(current.clone());
+        }
+
+        if !current.pop() {
+            return topmost;
+        }
     }
 }
 
@@ -807,6 +847,57 @@ mod tests {
             EnvFile::find(temp_dir.path()).is_none(),
             "find() should reject a .env symlink"
         );
+    }
+
+    #[test]
+    fn find_with_parents_returns_ancestor_env_before_git_root() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        let nested_dir = repo_dir.join("services/api");
+
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(repo_dir.join(".env"), "API_KEY=\n").unwrap();
+
+        let found = EnvFile::find_with_parents(&nested_dir, true);
+        assert_eq!(found, Some(repo_dir.join(".env")));
+    }
+
+    #[test]
+    fn find_with_parents_stops_at_git_root_without_env() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        let nested_dir = repo_dir.join("services/api");
+
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(temp_dir.path().join(".env"), "OUTSIDE_REPO=\n").unwrap();
+
+        let found = EnvFile::find_with_parents(&nested_dir, true);
+        assert!(
+            found.is_none(),
+            "search should stop at the git workspace root"
+        );
+    }
+
+    #[test]
+    fn find_with_parents_does_not_stop_at_submodule_root() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        let submodule_dir = repo_dir.join("submodule");
+        let nested_dir = submodule_dir.join("src");
+
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(
+            submodule_dir.join(".git"),
+            "gitdir: ../.git/modules/submodule\n",
+        )
+        .unwrap();
+        std::fs::write(repo_dir.join(".env"), "ROOT_SECRET=\n").unwrap();
+
+        let found = EnvFile::find_with_parents(&nested_dir, true);
+        assert_eq!(found, Some(repo_dir.join(".env")));
     }
 
     #[cfg(unix)]

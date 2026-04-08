@@ -13,7 +13,7 @@ use crate::resolve;
 /// Run the migration process: detect plaintext secrets in .env, offer to store them
 /// in the configured password backend, then rewrite .env to clear them.
 pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
-    let env_path = EnvFile::find(dir)
+    let env_path = EnvFile::find_with_parents(dir, config.effective_search_parent_env(dir))
         .ok_or_else(|| anyhow::anyhow!("No .env file found in {}", dir.display()))?;
     let env_file = EnvFile::parse(&env_path)?;
     let plaintext_entries = env_file.plaintext_entries();

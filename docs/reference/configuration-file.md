@@ -11,6 +11,8 @@ The main config file lives at `~/.config/pw-env/config.toml` unless `XDG_CONFIG_
 [defaults]
 # Default backend: "op" (1Password), "bw" (Bitwarden), or "gpg" (GPG encrypted file)
 backend = "op"
+# Search parent directories for .env until the git workspace root
+# search_parent_env = true
 
 [defaults.op]
 # Default 1Password vault to search in
@@ -72,13 +74,13 @@ check_interval_hours = 24
 
 | Section | Keys | Notes |
 | --- | --- | --- |
-| `[defaults]` | `backend` | Selects the default backend for empty `.env` values |
+| `[defaults]` | `backend`, `search_parent_env` | Selects the default backend for empty `.env` values and controls parent `.env` discovery |
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings |
 | `[defaults.bw]` | `folder`, `organization`, `item` | Default Bitwarden lookup settings |
 | `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
-| `[[projects]]` | `path`, `backend`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
+| `[[projects]]` | `path`, `backend`, `search_parent_env`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
 | `[projects.op]`, `[projects.bw]`, `[projects.gpg]` | backend-specific keys | Extra settings for the most recent `[[projects]]` block |
 
 ## Valid backend values
@@ -92,6 +94,7 @@ repository.
 
 ```toml [.pw-env.toml]
 backend = "op"
+search_parent_env = true
 item = "api-server-env"
 commands = ["cargo", "npm"]
 
@@ -103,6 +106,10 @@ vault = "Work"
 file itself already scopes the override to the current project.
 
 pw-env loads the local override only after the current file contents are approved.
+
+When `search_parent_env` is `true`, pw-env walks upward from the working directory until it finds the first `.env`
+file or reaches the enclosing git workspace root. Nested git markers such as submodules do not stop the walk early;
+pw-env stops at the highest ancestor git root.
 
 ## Command-scoped shell integration
 

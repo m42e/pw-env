@@ -58,4 +58,7 @@ That keeps the override boundary inside the current project.
 
 `[updates]` controls whether automatic GitHub release checks are enabled and how often they may run.
 
+`search_parent_env` controls whether `.env` discovery walks upward from the working directory until the first `.env`
+file or the enclosing git workspace root.
+
 For the exact TOML shape, see [Configuration file](../reference/configuration-file.md).

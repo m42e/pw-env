@@ -210,6 +210,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
 
         Commands::Exec { dir, command } => {
             let dir = resolve_dir(dir)?;
+            let config = config::Config::load_for_dir(&dir)?;
             let mut command_iter = command.into_iter();
             let program = command_iter
                 .next()
@@ -219,8 +220,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             let mut child = ProcessCommand::new(&program);
             child.args(&args);
 
-            if let Some(env_path) = env_file::EnvFile::find(&dir) {
-                let config = config::Config::load_for_dir(&dir)?;
+            if let Some(env_path) = find_env_path(&dir, &config) {
                 let env_file = env_file::EnvFile::parse(&env_path)?;
                 emit_plaintext_secret_warning(&env_file)?;
 
@@ -267,7 +267,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 _ => output::ShellSyntax::Posix,
             };
 
-            let env_path = match env_file::EnvFile::find(&dir) {
+            let env_path = match find_env_path(&dir, &config) {
                 Some(p) => p,
                 None => {
                     debug!("No .env file in {}", dir.display());
@@ -294,9 +294,17 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             match shell_syntax {
                 output::ShellSyntax::Posix => {
                     println!("__pw_env_previous_keys=\"{tracking}\"");
+                    println!(
+                        "{}",
+                        format_active_dir_tracking(env_owner_dir(&env_path), shell_syntax)
+                    );
                 }
                 output::ShellSyntax::Fish => {
                     println!("set -g __pw_env_previous_keys \"{tracking}\"");
+                    println!(
+                        "{}",
+                        format_active_dir_tracking(env_owner_dir(&env_path), shell_syntax)
+                    );
                 }
                 output::ShellSyntax::PowerShell => {
                     if keys.is_empty() {
@@ -309,6 +317,10 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                             .join(", ");
                         println!("$global:__pw_env_previous_keys = @({quoted})");
                     }
+                    println!(
+                        "{}",
+                        format_active_dir_tracking(env_owner_dir(&env_path), shell_syntax)
+                    );
                 }
             }
 
@@ -339,7 +351,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
         Commands::Load { dir, reveal } => {
             let dir = resolve_dir(dir)?;
             let config = config::Config::load_for_dir(&dir)?;
-            let env_path = env_file::EnvFile::find(&dir)
+            let env_path = find_env_path(&dir, &config)
                 .ok_or_else(|| anyhow::anyhow!("No .env file found in {}", dir.display()))?;
             let env_file = env_file::EnvFile::parse(&env_path)?;
 
@@ -534,13 +546,14 @@ fn build_hook_output(
     config: &config::Config,
     path_var: Option<std::ffi::OsString>,
 ) -> Result<String> {
-    let env_path = match env_file::EnvFile::find(dir) {
+    let env_path = match find_env_path(dir, config) {
         Some(path) => path,
         None => {
             debug!("No .env file in {}", dir.display());
             return Ok(String::new());
         }
     };
+    let active_dir = env_owner_dir(&env_path);
 
     let command_patterns = config.effective_commands(dir);
     if !command_patterns.is_empty() {
@@ -551,10 +564,10 @@ fn build_hook_output(
             command_patterns.len(),
             dir.display()
         );
-        return Ok(output::format_command_wrappers(
-            &wrapped_commands,
-            shell_syntax,
-        ));
+        let mut output_text = output::format_command_wrappers(&wrapped_commands, shell_syntax);
+        output_text.push_str(&format_active_dir_tracking(active_dir, shell_syntax));
+        output_text.push('\n');
+        return Ok(output_text);
     }
 
     let env_file = env_file::EnvFile::parse(&env_path)?;
@@ -595,7 +608,41 @@ fn build_hook_output(
         }
     }
 
+    output_text.push_str(&format_active_dir_tracking(active_dir, shell_syntax));
+    output_text.push('\n');
+
     Ok(output_text)
+}
+
+fn find_env_path(dir: &Path, config: &config::Config) -> Option<PathBuf> {
+    if config.effective_search_parent_env(dir) {
+        env_file::EnvFile::find_with_parents(dir, true)
+    } else {
+        env_file::EnvFile::find(dir)
+    }
+}
+
+fn env_owner_dir(env_path: &Path) -> &Path {
+    env_path.parent().unwrap_or(env_path)
+}
+
+fn format_active_dir_tracking(active_dir: &Path, shell_syntax: output::ShellSyntax) -> String {
+    let active_dir = active_dir.to_string_lossy();
+
+    match shell_syntax {
+        output::ShellSyntax::Posix => {
+            let escaped = active_dir.replace('\'', "'\\''");
+            format!("__pw_env_active_dir='{escaped}'")
+        }
+        output::ShellSyntax::Fish => {
+            let escaped = active_dir.replace('\'', "'\\''");
+            format!("set -g __pw_env_active_dir '{escaped}'")
+        }
+        output::ShellSyntax::PowerShell => {
+            let escaped = active_dir.replace('\'', "''");
+            format!("$global:__pw_env_active_dir = '{escaped}'")
+        }
+    }
 }
 
 fn resolve_wrapped_commands(
@@ -966,6 +1013,8 @@ fn config_template() -> String {
 [defaults]
 # Default backend: "op" (1Password), "bw" (Bitwarden), or "gpg" (GPG encrypted file)
 backend = "op"
+# Search parent directories for .env until the git workspace root (default: true)
+# search_parent_env = true
 
 [defaults.op]
 # Default 1Password vault to search in
@@ -1010,6 +1059,7 @@ check_interval_hours = 24
 # [[projects]]
 # path = "/home/user/work/api-server"
 # backend = "op"
+# search_parent_env = true
 # item = "api-server-env"
 # commands = ["cargo", "npm"]
 #
@@ -1661,6 +1711,7 @@ mod tests {
                 path: project_path,
                 commands: vec!["cat".to_string()],
                 backend: None,
+                search_parent_env: None,
                 op: None,
                 bw: None,
                 gpg: None,

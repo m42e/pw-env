@@ -48,7 +48,7 @@ pw-env export [--shell <SHELL>] [DIR]
 ```
 
 Resolve the current `.env` file and print export statements for `bash`, `zsh`, `fish`, or `powershell`. If the directory
-has no `.env` file, the command prints nothing.
+and its parents up to the git workspace root have no `.env` file, the command prints nothing.
 
 `cmd.exe` does not expose robust per-directory or per-command hook points, so automatic shell hooks are not supported
 there.
@@ -72,8 +72,9 @@ when you need to debug what pw-env would do without wiring it into a shell.
 pw-env add [--dir <DIR>] [--backend <BACKEND>] <KEY> [VALUE]
 ```
 
-Store a secret in the effective backend for the selected directory, then ensure the local `.env` contains an empty
-entry for that key so future resolution can load it through the default backend.
+Store a secret in the effective backend for the selected directory, then ensure the active `.env` file contains an empty
+entry for that key so future resolution can load it through the default backend. With parent search enabled, pw-env
+updates the first `.env` it discovers while walking upward.
 
 Pass `--backend op`, `--backend bw`, or `--backend gpg` to store the secret in a specific backend for this command
 without changing the configured default backend for later resolution.

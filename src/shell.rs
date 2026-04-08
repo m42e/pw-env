@@ -76,23 +76,15 @@ __pw_env_define_command_wrapper() {
 __pw_env_hook() {
     local current_dir="$PWD"
 
-    if [ -f ".env" ]; then
-        if [ "$__pw_env_active_dir" = "$current_dir" ]; then
-            return
-        fi
-
-        __pw_env_clear_state
-
-        local _pw_env_output
-        _pw_env_output="$(pw-env hook "$current_dir" --shell bash)"
-        if [ -n "$_pw_env_output" ]; then
-            eval "$_pw_env_output"
-            __pw_env_active_dir="$current_dir"
-        fi
+    if __pw_env_is_within_active_dir "$current_dir" && [ ! -f ".env" ]; then
         return
     fi
 
-    if __pw_env_is_within_active_dir "$current_dir"; then
+    local _pw_env_output
+    _pw_env_output="$(pw-env hook "$current_dir" --shell bash)"
+    if [ -n "$_pw_env_output" ]; then
+        __pw_env_clear_state
+        eval "$_pw_env_output"
         return
     fi
 
@@ -182,23 +174,15 @@ __pw_env_define_command_wrapper() {
 __pw_env_hook() {
     local current_dir="$PWD"
 
-    if [[ -f ".env" ]]; then
-        if [[ "$__pw_env_active_dir" = "$current_dir" ]]; then
-            return
-        fi
-
-        __pw_env_clear_state
-
-        local _pw_env_output
-        _pw_env_output="$(pw-env hook "$current_dir" --shell zsh)"
-        if [[ -n "$_pw_env_output" ]]; then
-            eval "$_pw_env_output"
-            __pw_env_active_dir="$current_dir"
-        fi
+    if __pw_env_is_within_active_dir "$current_dir" && [[ ! -f ".env" ]]; then
         return
     fi
 
-    if __pw_env_is_within_active_dir "$current_dir"; then
+    local _pw_env_output
+    _pw_env_output="$(pw-env hook "$current_dir" --shell zsh)"
+    if [[ -n "$_pw_env_output" ]]; then
+        __pw_env_clear_state
+        eval "$_pw_env_output"
         return
     fi
 
@@ -279,22 +263,14 @@ end
 function __pw_env_hook --on-variable PWD
     set -l current_dir $PWD
 
-    if test -f ".env"
-        if test "$__pw_env_active_dir" = "$current_dir"
-            return
-        end
-
-        __pw_env_clear_state
-
-        set -l _pw_env_output (pw-env hook $current_dir --shell fish)
-        if test -n "$_pw_env_output"
-            eval $_pw_env_output
-            set -g __pw_env_active_dir $current_dir
-        end
+    if __pw_env_is_within_active_dir $current_dir; and not test -f ".env"
         return
     end
 
-    if __pw_env_is_within_active_dir $current_dir
+    set -l _pw_env_output (pw-env hook $current_dir --shell fish)
+    if test -n "$_pw_env_output"
+        __pw_env_clear_state
+        eval $_pw_env_output
         return
     end
 
@@ -377,22 +353,14 @@ pw-env exec --dir `$PWD -- $cmd @args
 function __pw_env_hook {
     $currentLocation = (Get-Location).Path
 
-    if (Test-Path -Path ".env") {
-        if ($global:__pw_env_active_dir -eq $currentLocation) {
-            return
-        }
-
-        __pw_env_clear_state
-
-        $hookOutput = pw-env hook $currentLocation --shell powershell
-        if (-not [string]::IsNullOrWhiteSpace($hookOutput)) {
-            Invoke-Expression $hookOutput
-            $global:__pw_env_active_dir = $currentLocation
-        }
+    if ((__pw_env_is_within_active_dir $currentLocation) -and -not (Test-Path -Path ".env")) {
         return
     }
 
-    if (__pw_env_is_within_active_dir $currentLocation) {
+    $hookOutput = pw-env hook $currentLocation --shell powershell
+    if (-not [string]::IsNullOrWhiteSpace($hookOutput)) {
+        __pw_env_clear_state
+        Invoke-Expression $hookOutput
         return
     }
 
@@ -449,10 +417,14 @@ mod tests {
         let bash_hook = generate_hook("bash");
         let zsh_hook = generate_hook("zsh");
 
-        assert!(bash_hook.contains("if __pw_env_is_within_active_dir \"$current_dir\"; then"));
-        assert!(zsh_hook.contains("if __pw_env_is_within_active_dir \"$current_dir\"; then"));
-        assert!(bash_hook.contains("__pw_env_active_dir=\"$current_dir\""));
-        assert!(zsh_hook.contains("__pw_env_active_dir=\"$current_dir\""));
+        assert!(bash_hook.contains(
+            "if __pw_env_is_within_active_dir \"$current_dir\" && [ ! -f \".env\" ]; then"
+        ));
+        assert!(zsh_hook.contains(
+            "if __pw_env_is_within_active_dir \"$current_dir\" && [[ ! -f \".env\" ]]; then"
+        ));
+        assert!(bash_hook.contains("eval \"$_pw_env_output\""));
+        assert!(zsh_hook.contains("eval \"$_pw_env_output\""));
     }
 
     #[test]
@@ -462,7 +434,7 @@ mod tests {
         assert!(hook.contains("pw-env hook"));
         assert!(hook.contains("pw-env exec"));
         assert!(hook.contains("__pw_env_is_within_active_dir"));
-        assert!(hook.contains("set -g __pw_env_active_dir $current_dir"));
+        assert!(hook.contains("eval $_pw_env_output"));
     }
 
     #[test]

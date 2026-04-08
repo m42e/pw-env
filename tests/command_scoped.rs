@@ -610,6 +610,79 @@ fn export_uses_powershell_shell_syntax() {
     );
 }
 
+#[test]
+fn hook_finds_parent_env_by_default() {
+    let workspace = TempDir::new().unwrap();
+    let repo_dir = workspace.path().join("repo");
+    let nested_dir = repo_dir.join("services/api");
+    let xdg_config_home = workspace.path().join("xdg");
+
+    std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+    std::fs::create_dir_all(&nested_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::write(repo_dir.join(".env"), "API_KEY=\n").unwrap();
+    write_config(
+        &xdg_config_home,
+        &format!(
+            "[[projects]]\npath = {:?}\ncommands = [\"cargo\"]\n",
+            repo_dir.to_string_lossy()
+        ),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("hook")
+        .arg(&nested_dir)
+        .arg("--shell")
+        .arg("bash")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let canonical_repo_dir = repo_dir.canonicalize().unwrap();
+    assert!(stdout.contains("__pw_env_define_command_wrapper cargo\n"));
+    assert!(stdout.contains(&format!(
+        "__pw_env_active_dir='{}'",
+        canonical_repo_dir.display()
+    )));
+}
+
+#[test]
+fn hook_respects_search_parent_env_false() {
+    let workspace = TempDir::new().unwrap();
+    let repo_dir = workspace.path().join("repo");
+    let nested_dir = repo_dir.join("services/api");
+    let xdg_config_home = workspace.path().join("xdg");
+
+    std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+    std::fs::create_dir_all(&nested_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::write(repo_dir.join(".env"), "API_KEY=\n").unwrap();
+    write_config(
+        &xdg_config_home,
+        &format!(
+            "[defaults]\nsearch_parent_env = false\n\n[[projects]]\npath = {:?}\ncommands = [\"cargo\"]\n",
+            repo_dir.to_string_lossy()
+        ),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("hook")
+        .arg(&nested_dir)
+        .arg("--shell")
+        .arg("bash")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "expected no hook output when parent search is disabled"
+    );
+}
+
 // ── Load: entry classification (kills lines 338, 341, 324) ──
 
 #[test]

@@ -102,7 +102,7 @@ pub struct SecretFetchApprovalStatus {
     pub project_wide: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
@@ -143,6 +143,8 @@ fn default_update_check_interval_hours() -> u64 {
 pub struct Defaults {
     #[serde(default = "default_backend")]
     pub backend: String,
+    #[serde(default = "default_search_parent_env")]
+    pub search_parent_env: bool,
     #[serde(default)]
     pub op: OpConfig,
     #[serde(default)]
@@ -155,6 +157,7 @@ impl Default for Defaults {
     fn default() -> Self {
         Self {
             backend: default_backend(),
+            search_parent_env: default_search_parent_env(),
             op: OpConfig::default(),
             bw: BwConfig::default(),
             gpg: GpgConfig::default(),
@@ -164,6 +167,10 @@ impl Default for Defaults {
 
 fn default_backend() -> String {
     "op".to_string()
+}
+
+fn default_search_parent_env() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -263,6 +270,8 @@ pub struct ProjectOverride {
     #[serde(default)]
     pub backend: Option<String>,
     #[serde(default)]
+    pub search_parent_env: Option<bool>,
+    #[serde(default)]
     pub op: Option<OpConfig>,
     #[serde(default)]
     pub bw: Option<BwConfig>,
@@ -279,6 +288,8 @@ pub struct ProjectOverride {
 struct ProjectDirectoryOverride {
     #[serde(default)]
     pub backend: Option<String>,
+    #[serde(default)]
+    pub search_parent_env: Option<bool>,
     #[serde(default)]
     pub op: Option<OpConfig>,
     #[serde(default)]
@@ -346,6 +357,7 @@ impl Config {
             config.projects.push(ProjectOverride {
                 path: project_dir.to_string_lossy().into_owned(),
                 backend: local_override.backend,
+                search_parent_env: local_override.search_parent_env,
                 op: local_override.op,
                 bw: local_override.bw,
                 gpg: local_override.gpg,
@@ -637,6 +649,12 @@ impl Config {
         self.project_for(dir)
             .map(|project| project.commands.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn effective_search_parent_env(&self, dir: &Path) -> bool {
+        self.project_for(dir)
+            .and_then(|project| project.search_parent_env)
+            .unwrap_or(self.defaults.search_parent_env)
     }
 
     fn project_index_for(&self, dir: &Path) -> Option<usize> {
@@ -1140,7 +1158,9 @@ thread_local! {
 
 fn resolve_secret_fetch_target(path: &Path) -> Result<(PathBuf, PathBuf)> {
     let env_path = if path.is_dir() {
-        path.join(".env")
+        let config = Config::load_for_dir(path)?;
+        crate::env_file::EnvFile::find_with_parents(path, config.effective_search_parent_env(path))
+            .ok_or_else(|| anyhow::anyhow!(".env file not found: {}", path.display()))?
     } else {
         path.to_path_buf()
     };
@@ -2097,6 +2117,7 @@ vault = "Work"
                 path: canonical_path.to_string_lossy().into_owned(),
                 commands: vec!["echo".to_string(), "cat".to_string()],
                 backend: None,
+                search_parent_env: None,
                 op: None,
                 bw: None,
                 gpg: None,

@@ -30,7 +30,8 @@ Invoke-Expression (& pw-env export . --shell powershell)
 
 :::
 
-If the current directory does not contain a `.env` file, `pw-env export` returns nothing.
+If the current directory and its parents up to the git workspace root do not contain a `.env` file, `pw-env export`
+returns nothing.
 
 ## Automatic loading on directory change
 
@@ -62,7 +63,7 @@ PowerShell).
 ## What the generated hook does
 
 1. Tracks which directory last loaded pw-env shell state.
-2. Keeps that state active while you move through nested subdirectories under the same directory.
+2. Keeps that state active while you move through nested subdirectories under the same owning `.env` directory.
 3. Replaces the state when you enter another directory that has its own `.env` file.
 4. Clears the state when you leave the owning directory tree entirely.
 

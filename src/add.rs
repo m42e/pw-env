@@ -19,7 +19,7 @@ pub fn add_entry(
 ) -> Result<()> {
     validate_key(key)?;
 
-    let env_update = plan_env_entry_update(dir, key)?;
+    let env_update = plan_env_entry_update(dir, config, key)?;
     let value = read_secret_value(key, provided_value)?;
     let effective_config = config.with_backend_override_for_dir(dir, backend_override);
     let backend_name = effective_config.effective_backend(dir);
@@ -116,8 +116,10 @@ fn trim_single_trailing_newline(mut value: String) -> String {
     value
 }
 
-fn plan_env_entry_update(dir: &Path, key: &str) -> Result<EnvEntryUpdate> {
-    let env_path = dir.join(".env");
+fn plan_env_entry_update(dir: &Path, config: &Config, key: &str) -> Result<EnvEntryUpdate> {
+    let env_path =
+        env_file::EnvFile::find_with_parents(dir, config.effective_search_parent_env(dir))
+            .unwrap_or_else(|| dir.join(".env"));
     if !env_path.exists() {
         return Ok(EnvEntryUpdate::Create(env_path));
     }
@@ -219,7 +221,7 @@ mod tests {
     #[test]
     fn plan_env_entry_update_creates_new_env_when_missing() {
         let temp_dir = TempDir::new().unwrap();
-        let result = plan_env_entry_update(temp_dir.path(), "API_KEY").unwrap();
+        let result = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
         assert_eq!(result, EnvEntryUpdate::Create(temp_dir.path().join(".env")));
     }
 
@@ -229,7 +231,7 @@ mod tests {
         let env_path = temp_dir.path().join(".env");
         std::fs::write(&env_path, "API_KEY=\n").unwrap();
 
-        let result = plan_env_entry_update(temp_dir.path(), "API_KEY").unwrap();
+        let result = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
         assert_eq!(result, EnvEntryUpdate::AlreadyManaged(env_path));
     }
 
@@ -238,7 +240,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::write(temp_dir.path().join(".env"), "API_KEY=plaintext\n").unwrap();
 
-        let result = plan_env_entry_update(temp_dir.path(), "API_KEY");
+        let result = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("plaintext value"));
     }
