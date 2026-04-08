@@ -349,6 +349,13 @@ body {
   transition: border-color 140ms ease, background 140ms ease;
 }
 
+.md-typeset a.manual-card,
+.md-typeset a.manual-card:is(:hover, :focus, :focus-visible),
+.md-typeset a.manual-card :is(strong, span),
+.md-typeset a.manual-card:is(:hover, :focus, :focus-visible) :is(strong, span) {
+  text-decoration: none !important;
+}
+
 .manual-card strong {
   font-size: 1rem;
 }
