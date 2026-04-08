@@ -88,6 +88,9 @@ enum Commands {
     Migrate {
         /// Directory containing the .env file (defaults to current directory)
         dir: Option<PathBuf>,
+        /// Backend to use for this migration: op, bw, or gpg
+        #[arg(long, value_parser = ["op", "bw", "gpg"])]
+        backend: Option<String>,
     },
     /// Check availability of password manager backends
     Check,
@@ -433,10 +436,10 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             add::add_entry(&dir, &config, &key, value, backend.as_deref())
         }
 
-        Commands::Migrate { dir } => {
+        Commands::Migrate { dir, backend } => {
             let dir = resolve_dir(dir)?;
             let config = config::Config::load_for_dir(&dir)?;
-            migrate::migrate(&dir, &config)
+            migrate::migrate(&dir, &config, backend.as_deref())
         }
 
         Commands::Check => {

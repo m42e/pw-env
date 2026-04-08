@@ -258,6 +258,20 @@ fn init_outputs_fish_hook() {
 }
 
 #[test]
+fn migrate_help_lists_backend_override() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("migrate")
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--backend <BACKEND>"));
+    assert!(stdout.contains("Backend to use for this migration: op, bw, or gpg"));
+}
+
+#[test]
 fn config_template_prints_defaults() {
     let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
         .arg("config-template")

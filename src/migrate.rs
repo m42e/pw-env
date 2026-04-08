@@ -12,8 +12,9 @@ use crate::resolve;
 
 /// Run the migration process: detect plaintext secrets in .env, offer to store them
 /// in the configured password backend, then rewrite .env to clear them.
-pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
-    let env_path = EnvFile::find_with_parents(dir, config.effective_search_parent_env(dir))
+pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> Result<()> {
+    let effective_config = config_for_migration(config, dir, backend_override);
+    let env_path = EnvFile::find_with_parents(dir, effective_config.effective_search_parent_env(dir))
         .ok_or_else(|| anyhow::anyhow!("No .env file found in {}", dir.display()))?;
     let env_file = EnvFile::parse(&env_path)?;
     let plaintext_entries = env_file.plaintext_entries();
@@ -51,7 +52,7 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     }
     eprintln!();
 
-    let backend_name = config.effective_backend(dir);
+    let backend_name = effective_config.effective_backend(dir);
     eprintln!("These will be stored in the '{}' backend.", backend_name);
 
     if !is_interactive() {
@@ -83,13 +84,13 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     let repository = resolve::detect_repository_remote(dir);
     let store_ctx = StoreContext {
         dir,
-        config,
+        config: &effective_config,
         project: project.clone(),
         repository: repository.clone(),
     };
     let resolve_ctx = ResolveContext {
         dir,
-        config,
+        config: &effective_config,
         project,
         repository,
     };
@@ -149,6 +150,10 @@ pub fn migrate(dir: &Path, config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn config_for_migration(config: &Config, dir: &Path, backend_override: Option<&str>) -> Config {
+    config.with_backend_override_for_dir(dir, backend_override)
 }
 
 fn is_interactive() -> bool {
@@ -217,7 +222,9 @@ fn prompt_for_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProjectOverride;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     #[test]
@@ -282,7 +289,7 @@ mod tests {
             updates: crate::config::UpdateConfig::default(),
             projects: vec![],
         };
-        let result = migrate(temp_dir.path(), &config);
+        let result = migrate(temp_dir.path(), &config, None);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("No .env file found"));
@@ -300,7 +307,7 @@ mod tests {
             updates: crate::config::UpdateConfig::default(),
             projects: vec![],
         };
-        let result = migrate(temp_dir.path(), &config);
+        let result = migrate(temp_dir.path(), &config, None);
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
     }
 
@@ -321,13 +328,52 @@ mod tests {
             projects: vec![],
         };
         // In test env, stdin is not a terminal, so this should bail
-        let result = migrate(temp_dir.path(), &config);
+        let result = migrate(temp_dir.path(), &config, None);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(
             msg.contains("interactive terminal"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn config_for_migration_overrides_default_backend() {
+        let dir = Path::new("/home/user/project");
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults {
+                backend: "op".to_string(),
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let effective_config = config_for_migration(&config, dir, Some("gpg"));
+
+        assert_eq!(effective_config.effective_backend(dir), "gpg");
+        assert_eq!(config.effective_backend(dir), "op");
+    }
+
+    #[test]
+    fn config_for_migration_overrides_project_backend() {
+        let dir = Path::new("/home/user/project");
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: dir.to_string_lossy().to_string(),
+                backend: Some("bw".to_string()),
+                ..ProjectOverride::default()
+            }],
+        };
+
+        let effective_config = config_for_migration(&config, dir, Some("gpg"));
+
+        assert_eq!(effective_config.effective_backend(dir), "gpg");
+        assert_eq!(config.effective_backend(dir), "bw");
     }
 
     #[test]

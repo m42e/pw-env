@@ -16,7 +16,7 @@ The interactive manual is published with GitHub Pages at [m42e.de/pw-env](https:
 - Resolves empty `.env` entries from a default backend by key name
 - Supports explicit `op://...` and `bw://...` references per variable
 - Supports GPG-backed secret files such as `.env.gpg`
-- Generates shell hooks for `bash`, `zsh`, and `fish`
+- Generates shell hooks for `bash`, `zsh`, `fish`, and `powershell`
 - Warns when likely plaintext secrets are still present in `.env`
 - Migrates plaintext values out of `.env` into the configured backend
 - Supports per-project backend overrides via config
@@ -397,8 +397,9 @@ Main subcommands:
 - `pw-env add [--dir <dir>] [--backend <op|bw|gpg>] <KEY> [VALUE]` stores a secret in the configured backend, or a
   backend chosen for that invocation, and ensures `.env` contains
   `KEY=` for runtime resolution; omit `VALUE` to prompt or read it from stdin
-- `pw-env migrate [dir]` interactively stores plaintext `.env` values in the configured backend and clears them from
-  `.env`; entries marked with `no-migrate` are skipped
+- `pw-env migrate [--backend <op|bw|gpg>] [dir]` interactively stores plaintext `.env` values in the effective
+  backend, or a backend chosen for that invocation, and clears them from `.env`; entries marked with `no-migrate` are
+  skipped
 - `pw-env check` checks available backends and active configuration
 - `pw-env approvals list` lists approved project-local override files and hashes
 - `pw-env approvals approve <path>` stores the current hash for a `.pw-env.toml` file or project directory after
@@ -426,6 +427,8 @@ Run:
 ```bash
 pw-env migrate
 ```
+
+Add `--backend op`, `--backend bw`, or `--backend gpg` to route a migration through a different backend for that run.
 
 The tool will:
 

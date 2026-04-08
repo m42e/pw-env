@@ -20,12 +20,14 @@ LOCAL_ONLY_TOKEN=dev-token
 pw-env migrate .
 ```
 
+To migrate into a different backend just for this run, pass `--backend op`, `--backend bw`, or `--backend gpg`.
+
 The migration flow:
 
 1. Parses the `.env` file and finds plaintext values.
 2. Highlights entries that look like secrets.
 3. Opens an interactive multi-select prompt.
-4. Stores the selected values in the effective backend.
+4. Stores the selected values in the effective backend, or the backend chosen by flag.
 5. Verifies each stored value before clearing it from `.env`.
 
 Entries that look like secrets are selected by default in the prompt.

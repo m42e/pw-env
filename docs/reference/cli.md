@@ -11,7 +11,7 @@
 | `export` | Print shell exports for the current project |
 | `load` | Show a human-readable view of the current resolution state |
 | `add` | Store a secret in the effective backend, or a backend chosen by flag, and ensure `.env` contains `KEY=` |
-| `migrate` | Move plaintext values into the configured backend |
+| `migrate` | Move plaintext values into the effective backend, or a backend chosen by flag |
 | `check` | Verify backend binaries and config discovery |
 | `approvals` | Manage local override and secret-fetch approvals |
 | `update` | Replace the current binary with a GitHub release build |
@@ -88,11 +88,11 @@ of silently rewriting that line.
 ## `migrate`
 
 ```console
-pw-env migrate [DIR]
+pw-env migrate [--backend <op|bw|gpg>] [DIR]
 ```
 
-Scan plaintext values, open an interactive selection prompt, store the chosen entries in the effective backend, and
-clear only the entries that were stored and verified.
+Scan plaintext values, open an interactive selection prompt, store the chosen entries in the effective backend or a
+backend chosen for that invocation, and clear only the entries that were stored and verified.
 
 ## `check`
 
