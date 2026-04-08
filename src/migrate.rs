@@ -14,8 +14,9 @@ use crate::resolve;
 /// in the configured password backend, then rewrite .env to clear them.
 pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> Result<()> {
     let effective_config = config_for_migration(config, dir, backend_override);
-    let env_path = EnvFile::find_with_parents(dir, effective_config.effective_search_parent_env(dir))
-        .ok_or_else(|| anyhow::anyhow!("No .env file found in {}", dir.display()))?;
+    let env_path =
+        EnvFile::find_with_parents(dir, effective_config.effective_search_parent_env(dir))
+            .ok_or_else(|| anyhow::anyhow!("No .env file found in {}", dir.display()))?;
     let env_file = EnvFile::parse(&env_path)?;
     let plaintext_entries = env_file.plaintext_entries();
 
