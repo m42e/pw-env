@@ -1020,8 +1020,8 @@ fn handle_cache(command: CacheCommands) -> Result<()> {
                 }
             }
 
-            if let Some(msg) = keyring_clear_status_message(&secret_cache_result) {
-                eprintln!("{msg}");
+            if keyring_clear_status_message(&secret_cache_result).is_some() {
+                eprintln!("Resolved-secret keyring cache clear completed with warnings; rerun with secure diagnostics if needed.");
             }
 
             Ok(())
