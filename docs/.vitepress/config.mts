@@ -1,6 +1,7 @@
 import { defineConfig } from "vitepress";
 
 const base = (globalThis as { process?: { env?: { SITE_BASE?: string } } }).process?.env?.SITE_BASE ?? "/";
+const withBase = (path: string) => `${base}${path}`.replace(/\/+/g, "/");
 
 export default defineConfig({
   title: "pw-env",
@@ -54,6 +55,13 @@ export default defineConfig({
           { text: "Configuration file", link: "/reference/configuration-file" },
         ],
       },
+      {
+        text: "Legal",
+        items: [
+          { text: "Impressum", link: "/legal/impressum" },
+          { text: "Datenschutz", link: "/legal/datenschutz" },
+        ],
+      },
     ],
     search: {
       provider: "local",
@@ -66,7 +74,7 @@ export default defineConfig({
       text: "Edit this page on GitHub",
     },
     footer: {
-      message: "pw-env documentation",
+      message: `pw-env documentation · <a href="${withBase("legal/impressum")}">Impressum</a> · <a href="${withBase("legal/datenschutz")}">Datenschutz</a>`,
       copyright: "MIT",
     },
     outline: {
