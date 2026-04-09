@@ -1020,34 +1020,40 @@ fn handle_cache(command: CacheCommands) -> Result<()> {
                 }
             }
 
-            if secret_cache_result.keyring_unavailable {
-                eprintln!(
-                    "Resolved-secret cache index was cleared, but the OS keyring was unavailable so cached keyring entries could not be removed"
-                );
-            } else if secret_cache_result.keyring_delete_failures > 0 {
-                eprintln!(
-                    "Failed to remove {} resolved-secret cache keyring entr{}",
-                    secret_cache_result.keyring_delete_failures,
-                    if secret_cache_result.keyring_delete_failures == 1 {
-                        "y"
-                    } else {
-                        "ies"
-                    }
-                );
-            } else if secret_cache_result.deleted_credentials > 0 {
-                eprintln!(
-                    "Removed {} resolved-secret cache keyring entr{}",
-                    secret_cache_result.deleted_credentials,
-                    if secret_cache_result.deleted_credentials == 1 {
-                        "y"
-                    } else {
-                        "ies"
-                    }
-                );
+            if let Some(msg) = keyring_clear_status_message(&secret_cache_result) {
+                eprintln!("{msg}");
             }
 
             Ok(())
         }
+    }
+}
+
+fn keyring_clear_status_message(result: &cache::ClearSecretCacheResult) -> Option<String> {
+    if result.keyring_unavailable {
+        Some("Resolved-secret cache index was cleared, but the OS keyring was unavailable so cached keyring entries could not be removed".to_string())
+    } else if result.keyring_delete_failures > 0 {
+        Some(format!(
+            "Failed to remove {} resolved-secret cache keyring entr{}",
+            result.keyring_delete_failures,
+            if result.keyring_delete_failures == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ))
+    } else if result.deleted_credentials > 0 {
+        Some(format!(
+            "Removed {} resolved-secret cache keyring entr{}",
+            result.deleted_credentials,
+            if result.deleted_credentials == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ))
+    } else {
+        None
     }
 }
 
@@ -1823,5 +1829,102 @@ mod tests {
             result.contains("+1 more"),
             "expected '+1 more' in: {result}"
         );
+    }
+
+    #[test]
+    fn keyring_clear_status_message_is_none_when_nothing_happened() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: false,
+            deleted_credentials: 0,
+            keyring_delete_failures: 0,
+            keyring_unavailable: false,
+        };
+        assert_eq!(keyring_clear_status_message(&result), None);
+    }
+
+    #[test]
+    fn keyring_clear_status_message_reports_keyring_unavailable() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: true,
+            deleted_credentials: 0,
+            keyring_delete_failures: 1,
+            keyring_unavailable: true,
+        };
+        let msg = keyring_clear_status_message(&result).unwrap();
+        assert!(
+            msg.contains("OS keyring was unavailable"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn keyring_clear_status_message_reports_single_delete_failure() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: false,
+            deleted_credentials: 0,
+            keyring_delete_failures: 1,
+            keyring_unavailable: false,
+        };
+        let msg = keyring_clear_status_message(&result).unwrap();
+        assert!(
+            msg.contains("Failed to remove 1") && msg.ends_with("entry"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn keyring_clear_status_message_reports_multiple_delete_failures() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: false,
+            deleted_credentials: 0,
+            keyring_delete_failures: 3,
+            keyring_unavailable: false,
+        };
+        let msg = keyring_clear_status_message(&result).unwrap();
+        assert!(
+            msg.contains("Failed to remove 3") && msg.ends_with("entries"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn keyring_clear_status_message_reports_single_deleted_credential() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: true,
+            deleted_credentials: 1,
+            keyring_delete_failures: 0,
+            keyring_unavailable: false,
+        };
+        let msg = keyring_clear_status_message(&result).unwrap();
+        assert!(
+            msg.contains("Removed 1") && msg.ends_with("entry"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn keyring_clear_status_message_reports_multiple_deleted_credentials() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: true,
+            deleted_credentials: 2,
+            keyring_delete_failures: 0,
+            keyring_unavailable: false,
+        };
+        let msg = keyring_clear_status_message(&result).unwrap();
+        assert!(
+            msg.contains("Removed 2") && msg.ends_with("entries"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn keyring_clear_status_message_zero_deleted_credentials_returns_none() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: true,
+            deleted_credentials: 0,
+            keyring_delete_failures: 0,
+            keyring_unavailable: false,
+        };
+        assert_eq!(keyring_clear_status_message(&result), None);
     }
 }
