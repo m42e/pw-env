@@ -52,6 +52,9 @@ enum Commands {
         /// Directory to look for .env file in (defaults to current directory)
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Print a warning to stderr for each .env entry that could not be resolved
+        #[arg(long)]
+        warn_missing: bool,
         /// Command to execute with transient environment variables
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -63,6 +66,9 @@ enum Commands {
         /// Shell syntax to use: bash, zsh, fish, or powershell
         #[arg(long, default_value = "bash")]
         shell: String,
+        /// Print a warning to stderr for each .env entry that could not be resolved
+        #[arg(long)]
+        warn_missing: bool,
     },
     /// Load and display resolved environment variables (human-readable)
     Load {
@@ -212,7 +218,11 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             Ok(())
         }
 
-        Commands::Exec { dir, command } => {
+        Commands::Exec {
+            dir,
+            command,
+            warn_missing,
+        } => {
             let dir = resolve_dir(dir)?;
             let config = config::Config::load_for_dir(&dir)?;
             let mut command_iter = command.into_iter();
@@ -234,6 +244,10 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                     .map(|entry| entry.key.clone())
                     .collect::<Vec<_>>();
                 let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
+
+                if warn_missing {
+                    emit_missing_entries_warning(&managed_keys, &resolved);
+                }
 
                 for key in &managed_keys {
                     child.env_remove(key);
@@ -262,7 +276,11 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             }
         }
 
-        Commands::Export { dir, shell } => {
+        Commands::Export {
+            dir,
+            shell,
+            warn_missing,
+        } => {
             let dir = resolve_dir(dir)?;
             let config = config::Config::load_for_dir(&dir)?;
             let shell_syntax = match shell.as_str() {
@@ -282,7 +300,16 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             let env_file = env_file::EnvFile::parse(&env_path)?;
             emit_plaintext_secret_warning(&env_file)?;
 
+            let resolvable_keys: Vec<String> = env_file
+                .resolvable_entries()
+                .into_iter()
+                .map(|e| e.key.clone())
+                .collect();
             let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
+
+            if warn_missing {
+                emit_missing_entries_warning(&resolvable_keys, &resolved);
+            }
 
             if resolved.is_empty() {
                 debug!("No variables resolved");
@@ -391,11 +418,16 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             eprintln!();
 
             // Resolve
+            let resolvable_keys: Vec<String> = env_file
+                .resolvable_entries()
+                .into_iter()
+                .map(|e| e.key.clone())
+                .collect();
             let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
             eprintln!(
                 "Resolved {}/{} entries:",
                 resolved.len(),
-                env_file.resolvable_entries().len()
+                resolvable_keys.len()
             );
             for (key, value) in &resolved {
                 let display_value = if reveal {
@@ -404,6 +436,19 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                     output::obfuscate_value(value)
                 };
                 eprintln!("  {} = {}", key, display_value);
+            }
+
+            let missing: Vec<&str> = resolvable_keys
+                .iter()
+                .filter(|key| !resolved.contains_key(*key))
+                .map(String::as_str)
+                .collect();
+            if !missing.is_empty() {
+                eprintln!();
+                eprintln!(
+                    "Warning: could not resolve the following entries: {}",
+                    missing.join(", ")
+                );
             }
 
             let display_values = resolved
@@ -508,6 +553,23 @@ fn summarize_entry_keys(entries: &[&env_file::EnvEntry]) -> String {
         format!("{} (+{} more)", visible, keys.len() - MAX_VISIBLE_KEYS)
     } else {
         visible
+    }
+}
+
+fn emit_missing_entries_warning(
+    resolvable_keys: &[String],
+    resolved: &std::collections::BTreeMap<String, String>,
+) {
+    let missing: Vec<&str> = resolvable_keys
+        .iter()
+        .filter(|key| !resolved.contains_key(*key))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "pw-env: warning: could not resolve the following entries: {}",
+            missing.join(", ")
+        );
     }
 }
 
@@ -1021,7 +1083,9 @@ fn handle_cache(command: CacheCommands) -> Result<()> {
             }
 
             if keyring_clear_status_message(&secret_cache_result).is_some() {
-                eprintln!("Resolved-secret keyring cache clear completed with warnings; rerun with secure diagnostics if needed.");
+                eprintln!(
+                    "Resolved-secret keyring cache clear completed with warnings; rerun with secure diagnostics if needed."
+                );
             }
 
             Ok(())
