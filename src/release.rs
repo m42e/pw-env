@@ -502,7 +502,7 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -1000,6 +1000,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            let mut request_buf = [0_u8; 1024];
+            let mut request = Vec::new();
+            loop {
+                let bytes_read = stream.read(&mut request_buf).unwrap();
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&request_buf[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
             let response = concat!(
                 "HTTP/1.1 200 OK\r\n",
                 "Content-Length: 11\r\n",
