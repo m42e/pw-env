@@ -537,7 +537,9 @@ pub fn resolve_env_file(
     if source_all {
         for entry in env_file.entries() {
             if let EntryKind::Plaintext(value) = &entry.kind {
-                resolved.entry(entry.key.clone()).or_insert_with(|| value.clone());
+                resolved
+                    .entry(entry.key.clone())
+                    .or_insert_with(|| value.clone());
             }
         }
     }
@@ -803,11 +805,7 @@ mod tests {
         let temp = unique_subdir("resolve-source-all-plaintext");
         let env_path = temp.join(".env");
         fs::create_dir_all(&temp).unwrap();
-        fs::write(
-            &env_path,
-            "LOG_LEVEL=debug\nAPP_ENV=production\n",
-        )
-        .unwrap();
+        fs::write(&env_path, "LOG_LEVEL=debug\nAPP_ENV=production\n").unwrap();
 
         let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
         let config = Config {

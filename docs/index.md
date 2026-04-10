@@ -22,7 +22,7 @@ features:
   - title: Works with the shell you already use
     details: Use pw-env export for one-off loading, or install a shell hook with pw-env init bash, pw-env init zsh, pw-env init fish, or pw-env init powershell.
   - title: Built for mixed env files
-    details: Secret-like plaintext values can be migrated into the backend, while safe local values can stay in the file with # no-migrate.
+    details: Secret-like plaintext values can be migrated into the backend, while safe local values can stay in the file with # pw-env:ignore.
   - title: Trust is explicit
     details: Project-local overrides in .pw-env.toml and credential fetching from .env are approved separately and re-checked when the file contents change.
 ---
@@ -55,13 +55,13 @@ eval "$(pw-env export . --shell bash)"
 ```dotenv [.env]
 DATABASE_URL=
 API_KEY=op://Development/my-app/api_key
-LOG_LEVEL=debug # no-migrate
+LOG_LEVEL=debug # pw-env:ignore
 ```
 
 ```bash [Environment]
 DATABASE_URL=sqlite:///example.db
 API_KEY=XdASdf923.....
-LOG_LEVEL=debug # no-migrate
+LOG_LEVEL=debug # pw-env:ignore
 ```
 
 </div>
@@ -150,7 +150,7 @@ my-service/
 ```dotenv [.env]
 DATABASE_URL=
 API_KEY=bw://env-secrets/my-service/api_key
-LOG_LEVEL=debug # no-migrate
+LOG_LEVEL=debug # pw-env:ignore
 ```
 
 Use a global config for defaults, and add .pw-env.toml only when a project needs a local override. The local override is

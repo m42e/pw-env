@@ -707,11 +707,11 @@ fn load_shows_no_migrate_label_for_annotated_entries() {
 
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
-    // Entry annotated with no-migrate should show the "no-migrate" label even
+    // Entry annotated with pw-env:ignore should show the marker label even
     // though the key name looks like a secret.
     std::fs::write(
         project_dir.join(".env"),
-        "# no-migrate\nSECRET_KEY=supersecretvalue\n",
+        "# pw-env:ignore\nSECRET_KEY=supersecretvalue\n",
     )
     .unwrap();
 
@@ -726,12 +726,12 @@ fn load_shows_no_migrate_label_for_annotated_entries() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("(plaintext value, no-migrate)"),
-        "expected no-migrate label, got: {stderr}"
+        stderr.contains("(plaintext value, pw-env:ignore)"),
+        "expected pw-env:ignore label, got: {stderr}"
     );
     assert!(
         !stderr.contains("PLAINTEXT SECRET"),
-        "expected no PLAINTEXT SECRET for no-migrate entry, got: {stderr}"
+        "expected no PLAINTEXT SECRET for pw-env:ignore entry, got: {stderr}"
     );
 }
 

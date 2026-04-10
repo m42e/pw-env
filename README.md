@@ -157,13 +157,13 @@ Value handling works like this:
 - `KEY=bw://[folder/]item/field` resolves through Bitwarden
 - `KEY=plaintext` is treated as plaintext and left as-is until migrated
 
-To keep a plaintext entry out of warnings and `pw-env migrate`, mark it with `no-migrate` either on the same line or on
-the comment line directly above it:
+To keep a plaintext entry out of warnings and `pw-env migrate`, mark it with `pw-env:ignore` either on the same line or
+on the comment line directly above it:
 
 ```dotenv
-LOG_LEVEL=debug # no-migrate
+LOG_LEVEL=debug # pw-env:ignore
 
-# no-migrate
+# pw-env:ignore
 LOCAL_ONLY_TOKEN=dev-token
 ```
 
@@ -398,7 +398,7 @@ Main subcommands:
   backend chosen for that invocation, and ensures `.env` contains
   `KEY=` for runtime resolution; omit `VALUE` to prompt or read it from stdin
 - `pw-env migrate [--backend <op|bw|gpg>] [dir]` interactively stores plaintext `.env` values in the effective
-  backend, or a backend chosen for that invocation, and clears them from `.env`; entries marked with `no-migrate` are
+  backend, or a backend chosen for that invocation, and clears them from `.env`; entries marked with `pw-env:ignore` are
   skipped
 - `pw-env check` checks available backends and active configuration
 - `pw-env approvals list` lists approved project-local override files and hashes
@@ -433,7 +433,7 @@ Add `--backend op`, `--backend bw`, or `--backend gpg` to route a migration thro
 The tool will:
 
 - detect plaintext entries
-- ignore entries marked with `# no-migrate` or a preceding `# no-migrate` comment
+- ignore entries marked with `# pw-env:ignore` or a preceding `# pw-env:ignore` comment
 - open a TUI multi-select with likely secrets preselected so you can choose exactly which entries to store
 - store `project` metadata using the Git root folder name and `migrated_from` metadata with the source directory path
 - verify the value was stored successfully

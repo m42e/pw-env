@@ -303,7 +303,16 @@ fn split_value_and_comment(value: &str) -> (String, Option<String>) {
 }
 
 fn comment_has_no_migrate_marker(comment: &str) -> bool {
-    comment.to_ascii_lowercase().contains("no-migrate")
+    let normalized = comment.trim().trim_start_matches('#').trim();
+    let Some((prefix, suffix)) = normalized.split_once(':') else {
+        return false;
+    };
+
+    if suffix.contains(':') {
+        return false;
+    }
+
+    prefix.trim().eq_ignore_ascii_case("pw-env") && suffix.trim().eq_ignore_ascii_case("ignore")
 }
 
 fn format_entry_line(key: &str, raw_value: &str, trailing_comment: Option<&str>) -> String {
@@ -635,25 +644,27 @@ mod tests {
     #[test]
     fn test_parse_entry_line_splits_inline_comment() {
         let (key, value, trailing_comment) =
-            parse_entry_line("API_KEY=secret-value # no-migrate").expect("entry should parse");
+            parse_entry_line("API_KEY=secret-value # pw-env:ignore").expect("entry should parse");
 
         assert_eq!(key, "API_KEY");
         assert_eq!(value, "secret-value");
-        assert_eq!(trailing_comment.as_deref(), Some("# no-migrate"));
+        assert_eq!(trailing_comment.as_deref(), Some("# pw-env:ignore"));
     }
 
     #[test]
     fn test_parse_entry_line_keeps_hash_inside_quotes() {
         let (_, value, trailing_comment) =
-            parse_entry_line("API_KEY=\"secret#value\" # no-migrate").expect("entry should parse");
+            parse_entry_line("API_KEY=\"secret#value\" # pw-env:ignore")
+                .expect("entry should parse");
 
         assert_eq!(value, "\"secret#value\"");
-        assert_eq!(trailing_comment.as_deref(), Some("# no-migrate"));
+        assert_eq!(trailing_comment.as_deref(), Some("# pw-env:ignore"));
     }
 
     #[test]
     fn test_preceding_no_migrate_comment_marks_next_entry_only() {
-        let path = write_test_env("# no-migrate\nAPI_KEY=secret-value\nOTHER_KEY=second-value\n");
+        let path =
+            write_test_env("# pw-env:ignore\nAPI_KEY=secret-value\nOTHER_KEY=second-value\n");
         let env_file = EnvFile::parse(&path).expect("parse should succeed");
         std::fs::remove_file(&path).expect("temp file should be removable");
 
@@ -671,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_blank_line_clears_pending_no_migrate_marker() {
-        let path = write_test_env("# no-migrate\n\nAPI_KEY=secret-value\n");
+        let path = write_test_env("# pw-env:ignore\n\nAPI_KEY=secret-value\n");
         let env_file = EnvFile::parse(&path).expect("parse should succeed");
         std::fs::remove_file(&path).expect("temp file should be removable");
 
@@ -681,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_preserves_inline_comments() {
-        let path = write_test_env("KEEP_ME=value # no-migrate\nCLEAR_ME=secret\n");
+        let path = write_test_env("KEEP_ME=value # pw-env:ignore\nCLEAR_ME=secret\n");
         let env_file = EnvFile::parse(&path).expect("parse should succeed");
         env_file
             .rewrite_with_cleared_keys(&["CLEAR_ME"])
@@ -690,7 +701,7 @@ mod tests {
         let rewritten = std::fs::read_to_string(&path).expect("rewritten file should be readable");
         std::fs::remove_file(&path).expect("temp file should be removable");
 
-        assert_eq!(rewritten, "KEEP_ME=value # no-migrate\nCLEAR_ME=\n");
+        assert_eq!(rewritten, "KEEP_ME=value # pw-env:ignore\nCLEAR_ME=\n");
     }
 
     #[test]
@@ -736,11 +747,10 @@ mod tests {
 
     #[test]
     fn comment_has_no_migrate_marker_returns_true_for_marker() {
-        assert!(comment_has_no_migrate_marker("# no-migrate"));
-        assert!(comment_has_no_migrate_marker("# NO-MIGRATE"));
-        assert!(comment_has_no_migrate_marker(
-            "# no-migrate: keep this in .env"
-        ));
+        assert!(comment_has_no_migrate_marker("# pw-env:ignore"));
+        assert!(comment_has_no_migrate_marker("# PW-ENV:IGNORE"));
+        assert!(comment_has_no_migrate_marker("#   pw-env   :   ignore   "));
+        assert!(comment_has_no_migrate_marker("  # pw-env:ignore "));
     }
 
     #[test]

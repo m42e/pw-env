@@ -19,8 +19,8 @@ API_KEY=bw://env-secrets/my-app/api_key
 LOG_LEVEL=debug
 ```
 
-Plaintext values are left alone until you migrate them. Add `# no-migrate` when a local value should never be treated as
-a migration candidate.
+Plaintext values are left alone until you migrate them. Add `# pw-env:ignore` when a local value should never be treated
+as a migration candidate.
 
 ## 2. Create the global config
 

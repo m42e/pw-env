@@ -4,13 +4,13 @@ pw-env does not rewrite plaintext values automatically. Migration is an explicit
 
 ## Keep safe local values out of migration
 
-Mark values that should remain plaintext with `no-migrate` either on the same line or on the comment line directly above
-the entry.
+Mark values that should remain plaintext with `pw-env:ignore` either on the same line or on the comment line directly
+above the entry.
 
 ```dotenv [.env]
-LOG_LEVEL=debug # no-migrate
+LOG_LEVEL=debug # pw-env:ignore
 
-# no-migrate
+# pw-env:ignore
 LOCAL_ONLY_TOKEN=dev-token
 ```
 
@@ -39,7 +39,7 @@ Before migration:
 ```dotenv [.env]
 DATABASE_URL=postgres://user:pass@localhost:5432/app
 API_KEY=super-secret-token
-LOG_LEVEL=debug # no-migrate
+LOG_LEVEL=debug # pw-env:ignore
 ```
 
 After a successful migration:
@@ -47,7 +47,7 @@ After a successful migration:
 ```dotenv [.env]
 DATABASE_URL=
 API_KEY=
-LOG_LEVEL=debug # no-migrate
+LOG_LEVEL=debug # pw-env:ignore
 ```
 
 Only values that were stored and verified are cleared. Skipped entries and failed writes stay in `.env`.
