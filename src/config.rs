@@ -2290,6 +2290,7 @@ backend = "op"
                 backend: None,
                 search_parent_env: None,
                 source_all: None,
+                warn_missing: None,
                 cache: None,
                 op: None,
                 bw: None,
