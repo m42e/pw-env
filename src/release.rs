@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tar::Archive;
 use tempfile::TempDir;
@@ -32,7 +34,7 @@ struct GithubRelease {
     html_url: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReleaseInfo {
     version: String,
     html_url: String,
@@ -149,6 +151,16 @@ pub fn update(requested_version: Option<&str>) -> Result<()> {
 }
 
 fn fetch_latest_release() -> Result<ReleaseInfo> {
+    #[cfg(test)]
+    {
+        let mut guard = latest_release_mock()
+            .lock()
+            .expect("latest release mock mutex poisoned");
+        if let Some(mock) = guard.take() {
+            return Ok(mock);
+        }
+    }
+
     let client = http_client(Duration::from_secs(REQUEST_TIMEOUT_SECS))?;
 
     let release = client
@@ -170,6 +182,12 @@ fn fetch_latest_release() -> Result<ReleaseInfo> {
     };
 
     Ok(ReleaseInfo { version, html_url })
+}
+
+#[cfg(test)]
+fn latest_release_mock() -> &'static Mutex<Option<ReleaseInfo>> {
+    static MOCK: OnceLock<Mutex<Option<ReleaseInfo>>> = OnceLock::new();
+    MOCK.get_or_init(|| Mutex::new(None))
 }
 
 fn resolve_release(requested_version: Option<&str>) -> Result<ResolvedRelease> {
@@ -482,6 +500,11 @@ impl ReleaseCheckState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn strips_v_prefix_from_release_tags() {
@@ -720,6 +743,9 @@ mod tests {
 
     #[test]
     fn maybe_check_for_update_returns_ok_when_state_is_not_due() {
+        let _lock = shared_release_test_lock()
+            .lock()
+            .expect("release test mutex poisoned");
         // Write a "just checked" state to the actual state path so is_due() returns false
         // and no network call is made.
         let Some(state_path) = state_path() else {
@@ -821,5 +847,243 @@ mod tests {
         let name = release_archive_name("v0.2.0", &asset);
         assert!(name.ends_with(".tar.gz"));
         assert!(name.contains("x86_64-unknown-linux-gnu"));
+    }
+
+    fn with_mock_latest_release(release: ReleaseInfo, test: impl FnOnce()) {
+        {
+            let mut guard = latest_release_mock()
+                .lock()
+                .expect("latest release mock mutex poisoned");
+            *guard = Some(release);
+        }
+
+        test();
+
+        let mut guard = latest_release_mock()
+            .lock()
+            .expect("latest release mock mutex poisoned");
+        *guard = None;
+    }
+
+    fn shared_release_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_state_file_setup(test: impl FnOnce(PathBuf)) {
+        let Some(state_path) = state_path() else {
+            return;
+        };
+
+        let original = if state_path.exists() {
+            std::fs::read_to_string(&state_path).ok()
+        } else {
+            None
+        };
+
+        test(state_path.clone());
+
+        match original {
+            Some(content) => {
+                let _ = std::fs::write(&state_path, content);
+            }
+            None => {
+                let _ = std::fs::remove_file(&state_path);
+            }
+        }
+    }
+
+    #[test]
+    fn maybe_check_for_update_updates_state_and_notified_version_when_due() {
+        let _lock = shared_release_test_lock()
+            .lock()
+            .expect("release test mutex poisoned");
+        with_state_file_setup(|state_path| {
+            let state = ReleaseCheckState {
+                last_checked_at: Some(1),
+                last_notified_version: Some("0.0.1".to_string()),
+            };
+            state.save(&state_path).unwrap();
+
+            let config = crate::config::Config {
+                defaults: crate::config::Defaults::default(),
+                log: crate::config::LogConfig::default(),
+                updates: crate::config::UpdateConfig {
+                    enabled: true,
+                    check_interval_hours: 0,
+                },
+                projects: vec![],
+            };
+
+            with_mock_latest_release(
+                ReleaseInfo {
+                    version: "999.0.0".to_string(),
+                    html_url: "https://example.invalid/release".to_string(),
+                },
+                || {
+                    maybe_check_for_update(&config).unwrap();
+                },
+            );
+
+            let updated = ReleaseCheckState::load(&state_path).unwrap();
+            assert_eq!(updated.last_notified_version.as_deref(), Some("999.0.0"));
+            assert!(updated.last_checked_at.unwrap_or(0) > 1);
+        });
+    }
+
+    #[test]
+    fn update_rejects_invalid_requested_version() {
+        let result = update(Some("not-a-semver"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_short_circuits_when_already_on_requested_version() {
+        let result = update(Some(env!("CARGO_PKG_VERSION")));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_release_latest_uses_latest_selector() {
+        with_mock_latest_release(
+            ReleaseInfo {
+                version: "9.8.7".to_string(),
+                html_url: "https://example.invalid/release".to_string(),
+            },
+            || {
+                let resolved = resolve_release(Some("latest")).unwrap();
+                assert_eq!(resolved.version, "9.8.7");
+                assert_eq!(resolved.tag, "v9.8.7");
+            },
+        );
+    }
+
+    #[test]
+    fn state_path_has_expected_location_and_filename() {
+        let path = state_path().expect("state path should exist on supported platforms");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(RELEASE_CHECK_STATE_FILE)
+        );
+        assert!(path.to_string_lossy().contains("pw-env"));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn detect_release_asset_matches_macos_arm64_target() {
+        let asset = detect_release_asset().unwrap();
+        assert_eq!(asset.target, "aarch64-apple-darwin");
+        assert_eq!(asset.archive_format, ArchiveFormat::TarGz);
+        assert_eq!(asset.binary_name, "pw-env");
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    #[test]
+    fn detect_release_asset_matches_macos_x64_target() {
+        let asset = detect_release_asset().unwrap();
+        assert_eq!(asset.target, "x86_64-apple-darwin");
+        assert_eq!(asset.archive_format, ArchiveFormat::TarGz);
+        assert_eq!(asset.binary_name, "pw-env");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detect_release_asset_linux_binary_name_is_pw_env() {
+        let asset = detect_release_asset().unwrap();
+        assert_eq!(asset.binary_name, "pw-env");
+        assert_eq!(asset.archive_format, ArchiveFormat::TarGz);
+    }
+
+    #[test]
+    fn download_file_writes_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Length: 11\r\n",
+                "Connection: close\r\n\r\n",
+                "hello world"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let temp_dir = TempDir::new().unwrap();
+        let destination = temp_dir.path().join("release.tar.gz");
+        let url = format!("http://{addr}/artifact");
+
+        download_file(&url, &destination).unwrap();
+        handle.join().unwrap();
+
+        assert!(destination.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn extract_binary_from_archive_tar_gz_extracts_expected_binary_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("archive.tar.gz");
+
+        let archive_file = File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let other_content = b"not-the-binary";
+        let mut other_header = tar::Header::new_gnu();
+        other_header.set_size(other_content.len() as u64);
+        other_header.set_mode(0o644);
+        other_header.set_cksum();
+        builder
+            .append_data(&mut other_header, "nested/readme.txt", &other_content[..])
+            .unwrap();
+
+        let binary_content = b"expected-binary-content";
+        let mut binary_header = tar::Header::new_gnu();
+        binary_header.set_size(binary_content.len() as u64);
+        binary_header.set_mode(0o755);
+        binary_header.set_cksum();
+        builder
+            .append_data(&mut binary_header, "nested/pw-env", &binary_content[..])
+            .unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let asset = ReleaseAsset {
+            target: "x86_64-apple-darwin",
+            archive_format: ArchiveFormat::TarGz,
+            binary_name: "pw-env",
+        };
+
+        let extracted_path = extract_binary_from_archive(&archive_path, &temp_dir, &asset).unwrap();
+        assert_eq!(extracted_path, temp_dir.path().join("pw-env"));
+        assert_eq!(std::fs::read(extracted_path).unwrap(), binary_content);
+    }
+
+    #[test]
+    fn http_client_applies_timeout_to_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Length: 2\r\n",
+                "Connection: close\r\n\r\n",
+                "ok"
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        let client = http_client(Duration::from_millis(25)).unwrap();
+        let result = client
+            .get(format!("http://{addr}/slow"))
+            .header(reqwest::header::USER_AGENT, user_agent())
+            .send();
+
+        handle.join().unwrap();
+        assert!(result.is_err());
     }
 }
