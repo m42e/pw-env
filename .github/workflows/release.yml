@@ -63,7 +63,15 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y libdbus-1-dev pkg-config
+        shell: bash
+        run: |
+          # Ubuntu images may ship either pkg-config or pkgconf; install whichever exists.
+          sudo apt-get update -q || sudo apt-get update -q
+          if apt-cache show pkg-config >/dev/null 2>&1; then
+            sudo apt-get install -y libdbus-1-dev pkg-config
+          else
+            sudo apt-get install -y libdbus-1-dev pkgconf
+          fi
 
       - name: Verify tag matches crate version
         shell: bash
