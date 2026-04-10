@@ -56,15 +56,21 @@ fn parse_git_config(contents: &str) -> (BTreeMap<String, String>, BTreeMap<Strin
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+        if line.is_empty() {
             continue;
         }
 
-        if line.starts_with('[') && line.ends_with(']') {
+        if matches!(line.as_bytes().first(), Some(b'#' | b';')) {
+            continue;
+        }
+
+        if let Some(section) = line
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
             current_remote = None;
             current_branch = None;
 
-            let section = &line[1..line.len() - 1];
             if let Some(name) = section
                 .strip_prefix("remote \"")
                 .and_then(|value| value.strip_suffix('"'))
@@ -494,7 +500,8 @@ pub fn resolve_env_file(
             }
         } else {
             let backend = backend::create_backend(default_backend_name)?;
-            let bitwarden_default_started_at = (backend.name() == "Bitwarden").then(Instant::now);
+            let bitwarden_default_started_at =
+                matches!(backend.name(), "Bitwarden").then(Instant::now);
             for entry in &default_entries {
                 let cache_key =
                     build_secret_cache_key(&env_file.path, entry, default_backend_name, &ctx);
@@ -527,7 +534,8 @@ pub fn resolve_env_file(
                 }
             }
             if let Some(backend_started_at) = bitwarden_default_started_at {
-                bitwarden_duration_ms += backend_started_at.elapsed().as_millis();
+                bitwarden_duration_ms =
+                    bitwarden_duration_ms.saturating_add(backend_started_at.elapsed().as_millis());
             }
         }
     }
@@ -730,6 +738,201 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
 
         assert!(remote.is_none());
+    }
+
+    #[test]
+    fn parse_git_config_ignores_comments_and_malformed_sections() {
+        let config = r#"
+[remote "origin"]
+  url = git@github.com:example/repo.git
+[branch "main"]
+  remote = origin
+; comment line should be ignored
+#[branch "shadow"]
+branch "broken"]
+  remote = backup
+"#;
+
+        let (remotes, branch_remotes) = parse_git_config(config);
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("git@github.com:example/repo.git")
+        );
+        assert_eq!(branch_remotes.len(), 1);
+        assert_eq!(
+            branch_remotes.get("main").map(String::as_str),
+            Some("backup")
+        );
+    }
+
+    #[test]
+    fn select_git_remote_name_handles_empty_and_single_remote_maps() {
+        let empty = BTreeMap::new();
+        assert_eq!(select_git_remote_name(&empty, Some("origin")), None);
+
+        let mut single = BTreeMap::new();
+        single.insert(
+            "upstream".to_string(),
+            "git@github.com:example/repo.git".to_string(),
+        );
+        assert_eq!(
+            select_git_remote_name(&single, Some("origin")).as_deref(),
+            Some("upstream")
+        );
+    }
+
+    #[test]
+    fn normalize_git_remote_url_rejects_local_and_windows_paths() {
+        for candidate in [
+            "",
+            "file:///tmp/repo.git",
+            "/tmp/repo.git",
+            "./repo.git",
+            "../repo.git",
+            "~/repo.git",
+            "C:/repo.git",
+        ] {
+            assert_eq!(
+                normalize_git_remote_url(candidate),
+                None,
+                "candidate={candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_git_remote_url_accepts_supported_remote_forms() {
+        assert_eq!(
+            normalize_git_remote_url("https://github.com/example/repo.git").as_deref(),
+            Some("https://github.com/example/repo.git")
+        );
+        assert_eq!(
+            normalize_git_remote_url("git@github.com:example/repo.git").as_deref(),
+            Some("git@github.com:example/repo.git")
+        );
+        assert_eq!(
+            normalize_git_remote_url("github.com:example/repo.git").as_deref(),
+            Some("github.com:example/repo.git")
+        );
+    }
+
+    #[test]
+    fn normalize_git_remote_url_rejects_invalid_scp_like_hosts() {
+        assert_eq!(normalize_git_remote_url("/github.com:repo.git"), None);
+        assert_eq!(normalize_git_remote_url(":repo.git"), None);
+    }
+
+    #[test]
+    fn cache_entry_kind_returns_expected_labels() {
+        let mk_entry = |kind: EntryKind| EnvEntry {
+            key: "K".to_string(),
+            raw_value: "v".to_string(),
+            trailing_comment: None,
+            no_migrate: false,
+            kind,
+        };
+
+        assert_eq!(cache_entry_kind(&mk_entry(EntryKind::Empty)), "empty");
+        assert_eq!(
+            cache_entry_kind(&mk_entry(EntryKind::OpReference("op://a/b/c".to_string()))),
+            "op-reference"
+        );
+        assert_eq!(
+            cache_entry_kind(&mk_entry(EntryKind::BwReference("bw://a/b".to_string()))),
+            "bw-reference"
+        );
+        assert_eq!(
+            cache_entry_kind(&mk_entry(EntryKind::Plaintext("x".to_string()))),
+            "plaintext"
+        );
+    }
+
+    #[test]
+    fn cache_backend_config_serializes_known_backends_and_defaults_unknown() {
+        let config = Config {
+            defaults: crate::config::Defaults {
+                op: crate::config::OpConfig {
+                    item: Some("op-item".to_string()),
+                    ..crate::config::OpConfig::default()
+                },
+                bw: crate::config::BwConfig {
+                    item: Some("bw-item".to_string()),
+                    ..crate::config::BwConfig::default()
+                },
+                gpg: crate::config::GpgConfig {
+                    file_pattern: ".env.secrets.gpg".to_string(),
+                    ..crate::config::GpgConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let dir = Path::new("/tmp");
+
+        let op = cache_backend_config(&config, dir, "op");
+        let bw = cache_backend_config(&config, dir, "bw");
+        let gpg = cache_backend_config(&config, dir, "gpg");
+        let unknown = cache_backend_config(&config, dir, "unknown");
+
+        assert!(op.contains("op-item"));
+        assert!(bw.contains("bw-item"));
+        assert!(gpg.contains(".env.secrets.gpg"));
+        assert_eq!(unknown, "{}");
+    }
+
+    #[test]
+    fn build_secret_cache_key_uses_effective_item_only_for_op_and_bw() {
+        let entry = EnvEntry {
+            key: "DATABASE_URL".to_string(),
+            raw_value: "op://vault/item/field".to_string(),
+            trailing_comment: None,
+            no_migrate: false,
+            kind: EntryKind::OpReference("op://vault/item/field".to_string()),
+        };
+
+        let op_config = Config {
+            defaults: crate::config::Defaults {
+                backend: "op".to_string(),
+                op: crate::config::OpConfig {
+                    item: Some("app-secrets".to_string()),
+                    ..crate::config::OpConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let dir = Path::new("/tmp");
+        let op_ctx = ResolveContext {
+            dir,
+            config: &op_config,
+            project: Some("proj".to_string()),
+            repository: Some("git@github.com:example/repo.git".to_string()),
+        };
+        let op_key = build_secret_cache_key(Path::new("/tmp/.env"), &entry, "op", &op_ctx);
+        assert_eq!(op_key.effective_item.as_deref(), Some("app-secrets"));
+
+        let gpg_config = Config {
+            defaults: crate::config::Defaults {
+                backend: "gpg".to_string(),
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let gpg_ctx = ResolveContext {
+            dir,
+            config: &gpg_config,
+            project: None,
+            repository: None,
+        };
+        let gpg_key = build_secret_cache_key(Path::new("/tmp/.env"), &entry, "gpg", &gpg_ctx);
+        assert_eq!(gpg_key.effective_item, None);
     }
 
     #[test]
