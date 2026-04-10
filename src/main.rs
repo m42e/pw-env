@@ -245,7 +245,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                     .collect::<Vec<_>>();
                 let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
 
-                if warn_missing {
+                if warn_missing || config.effective_warn_missing(&dir) {
                     emit_missing_entries_warning(&managed_keys, &resolved);
                 }
 
@@ -307,7 +307,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                 .collect();
             let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
 
-            if warn_missing {
+            if warn_missing || config.effective_warn_missing(&dir) {
                 emit_missing_entries_warning(&resolvable_keys, &resolved);
             }
 

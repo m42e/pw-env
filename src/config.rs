@@ -149,6 +149,9 @@ pub struct Defaults {
     /// alongside the resolved secret values.
     #[serde(default)]
     pub source_all: bool,
+    /// When true, a warning is printed for each .env entry that could not be resolved.
+    #[serde(default)]
+    pub warn_missing: bool,
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
@@ -165,6 +168,7 @@ impl Default for Defaults {
             backend: default_backend(),
             search_parent_env: default_search_parent_env(),
             source_all: false,
+            warn_missing: false,
             cache: CacheConfig::default(),
             op: OpConfig::default(),
             bw: BwConfig::default(),
@@ -307,6 +311,8 @@ pub struct ProjectOverride {
     #[serde(default)]
     pub source_all: Option<bool>,
     #[serde(default)]
+    pub warn_missing: Option<bool>,
+    #[serde(default)]
     pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub op: Option<OpConfig>,
@@ -329,6 +335,8 @@ struct ProjectDirectoryOverride {
     pub search_parent_env: Option<bool>,
     #[serde(default)]
     pub source_all: Option<bool>,
+    #[serde(default)]
+    pub warn_missing: Option<bool>,
     #[serde(default)]
     pub cache: Option<CacheConfig>,
     #[serde(default)]
@@ -400,6 +408,7 @@ impl Config {
                 backend: local_override.backend,
                 search_parent_env: local_override.search_parent_env,
                 source_all: local_override.source_all,
+                warn_missing: local_override.warn_missing,
                 cache: local_override.cache,
                 op: local_override.op,
                 bw: local_override.bw,
@@ -712,6 +721,13 @@ impl Config {
         self.project_for(dir)
             .and_then(|project| project.source_all)
             .unwrap_or(self.defaults.source_all)
+    }
+
+    /// Resolve whether a warning should be emitted for unresolved .env entries for a given directory.
+    pub fn effective_warn_missing(&self, dir: &Path) -> bool {
+        self.project_for(dir)
+            .and_then(|project| project.warn_missing)
+            .unwrap_or(self.defaults.warn_missing)
     }
 
     fn project_index_for(&self, dir: &Path) -> Option<usize> {
