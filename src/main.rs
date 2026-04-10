@@ -1559,6 +1559,9 @@ mod tests {
 
     #[test]
     fn handle_cache_clear_removes_folder_cache_file() {
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = TempDir::new().unwrap();
         let cache_path = temp_dir
             .path()
@@ -1604,6 +1607,9 @@ mod tests {
 
     #[test]
     fn handle_cache_clear_returns_ok_when_cache_file_is_absent() {
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = TempDir::new().unwrap();
         let cache_path = temp_dir
             .path()

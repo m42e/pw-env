@@ -327,33 +327,52 @@ fn now_unix_secs() -> u64 {
 #[cfg(test)]
 thread_local! {
     static TEST_SECRET_CACHE_INDEX_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-    static TEST_KEYRING_STATE: std::cell::RefCell<Option<TestKeyringState>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A process-wide mutex that serialises every test touching the keyring mock
+/// or the secret-cache index path.  All such tests must hold this lock for
+/// their entire duration so that `TEST_KEYRING` mutations are never
+/// interleaved across threads.
+#[cfg(test)]
+pub(crate) fn keyring_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Process-global keyring test state, protected by a mutex.
+///
+/// Thread-local storage was previously used here, but tests across `cache`,
+/// `resolve`, and `main` modules all touch the keyring mock concurrently
+/// without holding a shared lock, causing intermittent failures where a
+/// later test on a different thread didn't see values stored by an earlier
+/// test on its own thread.  A global mutex eliminates that class of race.
+#[cfg(test)]
+struct TestKeyringGlobal {
+    /// `None` means the test keyring is not active (fall through to real
+    /// keyring); `true` = available, `false` = unavailable.
+    active: Option<bool>,
+    values: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Default)]
-enum TestKeyringState {
-    #[default]
-    Available,
-    Unavailable,
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_KEYRING_VALUES: std::cell::RefCell<BTreeMap<String, String>> = const { std::cell::RefCell::new(BTreeMap::new()) };
-}
+static TEST_KEYRING: std::sync::LazyLock<std::sync::Mutex<TestKeyringGlobal>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(TestKeyringGlobal {
+            active: None,
+            values: BTreeMap::new(),
+        })
+    });
 
 #[cfg(test)]
 fn test_keyring_get(
     fingerprint: &str,
 ) -> Option<std::result::Result<Option<String>, KeyringAccess>> {
-    TEST_KEYRING_STATE.with(|state| match state.borrow().clone() {
+    let guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.active {
         None => None,
-        Some(TestKeyringState::Unavailable) => Some(Err(KeyringAccess::Unavailable)),
-        Some(TestKeyringState::Available) => Some(Ok(
-            TEST_KEYRING_VALUES.with(|values| values.borrow().get(fingerprint).cloned())
-        )),
-    })
+        Some(false) => Some(Err(KeyringAccess::Unavailable)),
+        Some(true) => Some(Ok(guard.values.get(fingerprint).cloned())),
+    }
 }
 
 #[cfg(test)]
@@ -361,28 +380,27 @@ fn test_keyring_set(
     fingerprint: &str,
     value: &str,
 ) -> Option<std::result::Result<(), KeyringAccess>> {
-    TEST_KEYRING_STATE.with(|state| match state.borrow().clone() {
+    let mut guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.active {
         None => None,
-        Some(TestKeyringState::Unavailable) => Some(Err(KeyringAccess::Unavailable)),
-        Some(TestKeyringState::Available) => Some(Ok(TEST_KEYRING_VALUES.with(|values| {
-            values
-                .borrow_mut()
+        Some(false) => Some(Err(KeyringAccess::Unavailable)),
+        Some(true) => {
+            guard
+                .values
                 .insert(fingerprint.to_string(), value.to_string());
-        }))),
-    })
+            Some(Ok(()))
+        }
+    }
 }
 
 #[cfg(test)]
 fn test_keyring_delete(fingerprint: &str) -> Option<std::result::Result<bool, KeyringAccess>> {
-    TEST_KEYRING_STATE.with(|state| match state.borrow().clone() {
+    let mut guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.active {
         None => None,
-        Some(TestKeyringState::Unavailable) => Some(Err(KeyringAccess::Unavailable)),
-        Some(TestKeyringState::Available) => {
-            Some(Ok(TEST_KEYRING_VALUES.with(|values| {
-                values.borrow_mut().remove(fingerprint).is_some()
-            })))
-        }
-    })
+        Some(false) => Some(Err(KeyringAccess::Unavailable)),
+        Some(true) => Some(Ok(guard.values.remove(fingerprint).is_some())),
+    }
 }
 
 #[cfg(test)]
@@ -392,25 +410,23 @@ pub(crate) fn set_test_secret_cache_index_path(path: Option<PathBuf>) {
 
 #[cfg(test)]
 pub(crate) fn set_test_keyring_available(available: bool) {
-    TEST_KEYRING_STATE.with(|state| {
-        *state.borrow_mut() = Some(if available {
-            TestKeyringState::Available
-        } else {
-            TestKeyringState::Unavailable
-        });
-    });
+    let mut guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
+    guard.active = Some(available);
 }
 
 #[cfg(test)]
 pub(crate) fn reset_test_keyring() {
-    TEST_KEYRING_STATE.with(|state| *state.borrow_mut() = None);
-    TEST_KEYRING_VALUES.with(|values| values.borrow_mut().clear());
+    let mut guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
+    guard.active = None;
+    guard.values.clear();
+    drop(guard);
     KEYRING_DISABLED.store(false, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 pub(crate) fn test_keyring_contains(fingerprint: &str) -> bool {
-    TEST_KEYRING_VALUES.with(|values| values.borrow().contains_key(fingerprint))
+    let guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
+    guard.values.contains_key(fingerprint)
 }
 
 #[cfg(test)]
@@ -444,6 +460,9 @@ mod tests {
 
     #[test]
     fn secret_value_cache_round_trips_with_test_keyring() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
         set_test_secret_cache_index_path(Some(index_path));
@@ -463,6 +482,9 @@ mod tests {
 
     #[test]
     fn clear_secret_cache_removes_index_and_keyring_entries() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
         set_test_secret_cache_index_path(Some(index_path.clone()));
@@ -487,6 +509,9 @@ mod tests {
 
     #[test]
     fn secret_value_cache_ignores_unavailable_keyring() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
         set_test_secret_cache_index_path(Some(index_path));
@@ -506,6 +531,9 @@ mod tests {
 
     #[test]
     fn secret_value_cache_expired_entry_is_removed_and_persisted() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
         set_test_secret_cache_index_path(Some(index_path));
@@ -523,11 +551,12 @@ mod tests {
         );
         index.save().unwrap();
 
-        TEST_KEYRING_VALUES.with(|values| {
-            values
-                .borrow_mut()
-                .insert(fingerprint, "stale-secret".to_string());
-        });
+        // Directly insert into the global keyring store (already holding the lock).
+        TEST_KEYRING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values
+            .insert(fingerprint, "stale-secret".to_string());
 
         let mut cache = SecretValueCache::load(&CacheConfig::default());
         let cached = cache.get(&key);
@@ -542,6 +571,9 @@ mod tests {
 
     #[test]
     fn secret_cache_index_path_returns_configured_test_path() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
         set_test_secret_cache_index_path(Some(index_path.clone()));
@@ -555,6 +587,9 @@ mod tests {
 
     #[test]
     fn clear_secret_cache_counts_keyring_failures_per_entry() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
         set_test_secret_cache_index_path(Some(index_path));

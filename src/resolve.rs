@@ -574,7 +574,6 @@ pub fn resolve_env_file(
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
 
     fn unique_subdir(name: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -582,11 +581,6 @@ mod tests {
             .expect("current time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("pw-env-{name}-{}-{nonce}", std::process::id()))
-    }
-
-    fn cache_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -1407,7 +1401,9 @@ branch "broken"]
     #[cfg(unix)]
     #[test]
     fn resolve_env_file_uses_secret_cache_for_op_entries() {
-        let _lock = cache_test_lock().lock().expect("cache test mutex poisoned");
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp = unique_subdir("resolve-op-cache");
         let env_path = temp.join(".env");
         let call_log = temp.join("op-calls.log");
@@ -1459,7 +1455,9 @@ branch "broken"]
     #[cfg(unix)]
     #[test]
     fn resolve_env_file_uses_secret_cache_for_bitwarden_entries() {
-        let _lock = cache_test_lock().lock().expect("cache test mutex poisoned");
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp = unique_subdir("resolve-bw-cache");
         let env_path = temp.join(".env");
         let call_log = temp.join("bw-calls.log");
@@ -1524,7 +1522,9 @@ branch "broken"]
     #[cfg(unix)]
     #[test]
     fn resolve_env_file_uses_secret_cache_for_gpg_entries() {
-        let _lock = cache_test_lock().lock().expect("cache test mutex poisoned");
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp = unique_subdir("resolve-gpg-cache");
         let env_path = temp.join(".env");
         let encrypted_path = temp.join(".env.gpg");
@@ -1587,7 +1587,9 @@ branch "broken"]
     #[cfg(unix)]
     #[test]
     fn resolve_env_file_falls_back_when_keyring_is_unavailable() {
-        let _lock = cache_test_lock().lock().expect("cache test mutex poisoned");
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
         let temp = unique_subdir("resolve-cache-unavailable");
         let env_path = temp.join(".env");
         let call_log = temp.join("op-calls.log");
