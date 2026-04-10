@@ -406,7 +406,7 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
                     env_file::EntryKind::OpReference(r) => format!("  (1Password: {r})"),
                     env_file::EntryKind::BwReference(r) => format!("  (Bitwarden: {r})"),
                     env_file::EntryKind::Plaintext(_) if entry.no_migrate => {
-                        "  (plaintext value, no-migrate)".to_string()
+                        "  (plaintext value, pw-env:ignore)".to_string()
                     }
                     env_file::EntryKind::Plaintext(_) if entry.is_likely_secret() => {
                         "  ⚠ PLAINTEXT SECRET (run `pw-env migrate`)".to_string()
