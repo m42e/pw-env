@@ -57,6 +57,12 @@ pub trait Backend {
     /// Store a key-value pair in the password manager.
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()>;
 
+    /// Return the backend reference URL to write into the .env file after storing.
+    /// Returns `None` for backends that do not use URL references (e.g. GPG).
+    fn reference_url(&self, _key: &str, _ctx: &StoreContext) -> Option<String> {
+        None
+    }
+
     /// Check if a key exists in the password manager.
     fn has(&self, key: &str, ctx: &ResolveContext) -> Result<bool>;
 

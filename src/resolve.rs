@@ -109,13 +109,14 @@ fn select_git_remote_name(
     remotes: &BTreeMap<String, String>,
     configured_remote: Option<&str>,
 ) -> Option<String> {
-    match remotes.len() {
-        0 => None,
-        1 => remotes.keys().next().cloned(),
-        _ if remotes.contains_key("origin") => Some("origin".to_string()),
-        _ => configured_remote
+    if remotes.len() == 1 {
+        remotes.keys().next().cloned()
+    } else if remotes.contains_key("origin") {
+        Some("origin".to_string())
+    } else {
+        configured_remote
             .filter(|remote| remotes.contains_key(*remote))
-            .map(ToOwned::to_owned),
+            .map(ToOwned::to_owned)
     }
 }
 
@@ -143,8 +144,11 @@ fn normalize_git_remote_url(url: &str) -> Option<String> {
         return Some(trimmed.to_string());
     }
 
-    let (host, _path) = trimmed.split_once(':')?;
+    let (host, path) = trimmed.split_once(':')?;
     if host.contains('/') || host.is_empty() {
+        return None;
+    }
+    if host.len() == 1 && path.starts_with('/') && !host.as_bytes()[0].is_ascii_alphabetic() {
         return None;
     }
 
@@ -387,7 +391,6 @@ pub fn resolve_env_file(
                 .map(|entry| {
                     let reference = match &entry.kind {
                         EntryKind::BwReference(r) => Some(r.as_str()),
-                        EntryKind::Empty => None,
                         _ => None,
                     };
                     (entry.key.as_str(), reference)
@@ -446,7 +449,7 @@ pub fn resolve_env_file(
                     .count(),
                 uncached_bw_entries.len()
             ));
-            bitwarden_duration_ms += bw_started_at.elapsed().as_millis();
+            bitwarden_duration_ms = bw_started_at.elapsed().as_millis();
         }
     }
 
@@ -821,6 +824,12 @@ branch "broken"]
     fn normalize_git_remote_url_rejects_invalid_scp_like_hosts() {
         assert_eq!(normalize_git_remote_url("/github.com:repo.git"), None);
         assert_eq!(normalize_git_remote_url(":repo.git"), None);
+    }
+
+    #[test]
+    fn normalize_git_remote_url_rejects_non_alphabetic_windows_drive_prefixes() {
+        assert_eq!(normalize_git_remote_url("1:/repo.git"), None);
+        assert_eq!(normalize_git_remote_url("_:/repo.git"), None);
     }
 
     #[test]

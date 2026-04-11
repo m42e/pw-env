@@ -40,6 +40,7 @@ struct SyncStateStore {
 thread_local! {
     static TEST_FOLDER_CACHE_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     static TEST_SYNC_STATE_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_PROMPT_UNLOCK_PASSWORD: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Write a file with owner-only permissions (0o600) on Unix.
@@ -492,11 +493,25 @@ impl BwBackend {
     fn prompt_unlock() -> Result<String> {
         info!("Bitwarden vault is locked, prompting for unlock");
         let password = {
-            let _progress_suspension = suspend_progress_output();
-            dialoguer::Password::new()
-                .with_prompt("Bitwarden master password")
-                .interact()
-                .context("Failed to read master password")?
+            #[cfg(test)]
+            if let Some(password) = TEST_PROMPT_UNLOCK_PASSWORD.with(|value| value.borrow().clone())
+            {
+                password
+            } else {
+                let _progress_suspension = suspend_progress_output();
+                dialoguer::Password::new()
+                    .with_prompt("Bitwarden master password")
+                    .interact()
+                    .context("Failed to read master password")?
+            }
+            #[cfg(not(test))]
+            {
+                let _progress_suspension = suspend_progress_output();
+                dialoguer::Password::new()
+                    .with_prompt("Bitwarden master password")
+                    .interact()
+                    .context("Failed to read master password")?
+            }
         };
 
         debug!("Running: bw unlock --raw --passwordenv ...");
@@ -632,6 +647,13 @@ impl BwBackend {
     #[cfg(test)]
     pub(crate) fn set_test_sync_throttle_override(sync_throttle_secs: Option<u64>) {
         *SYNC_THROTTLE_OVERRIDE_SECS.lock().unwrap() = sync_throttle_secs;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_prompt_unlock_password(password: Option<&str>) {
+        TEST_PROMPT_UNLOCK_PASSWORD.with(|value| {
+            *value.borrow_mut() = password.map(str::to_string);
+        });
     }
 
     fn run_bw(args: &[&str]) -> Result<String> {
@@ -1349,6 +1371,20 @@ impl Backend for BwBackend {
         }
     }
 
+    fn reference_url(&self, key: &str, ctx: &StoreContext) -> Option<String> {
+        let bw_config = ctx.config.effective_bw(ctx.dir);
+        let (item_name, field_name) = if let Some(item) = ctx.config.effective_item(ctx.dir) {
+            (item.to_string(), key.to_string())
+        } else {
+            (key.to_string(), "password".to_string())
+        };
+        if let Some(folder) = &bw_config.folder {
+            Some(format!("bw://{folder}/{item_name}/{field_name}"))
+        } else {
+            Some(format!("bw://{item_name}/{field_name}"))
+        }
+    }
+
     fn name(&self) -> &str {
         "Bitwarden"
     }
@@ -1359,7 +1395,46 @@ mod tests {
     use super::*;
     use crate::config::{BwConfig, Config, Defaults, LogConfig, UpdateConfig};
     use std::cell::Cell;
+    use std::io::Write;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    fn capture_debug_output(f: impl FnOnce()) -> String {
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct BufMakeWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufMakeWriter {
+            type Writer = BufWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                BufWriter(self.0.clone())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufMakeWriter(buf.clone()))
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
 
     #[test]
     fn test_parse_bw_reference_two_parts() {
@@ -1514,6 +1589,7 @@ mod tests {
         BwBackend::set_test_folder_cache_path(None);
         BwBackend::set_test_sync_state_path(None);
         BwBackend::set_test_sync_throttle_override(None);
+        BwBackend::set_test_prompt_unlock_password(None);
 
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("bw");
@@ -1550,6 +1626,7 @@ mod tests {
         BwBackend::set_test_folder_cache_path(None);
         BwBackend::set_test_sync_state_path(None);
         BwBackend::set_test_sync_throttle_override(None);
+        BwBackend::set_test_prompt_unlock_password(None);
     }
 
     #[test]
@@ -1599,6 +1676,32 @@ mod tests {
 
         let error = anyhow::anyhow!("permission denied");
         assert!(!BwBackend::should_retry_after_sync(&error));
+    }
+
+    #[test]
+    fn should_retry_after_sync_requires_both_field_markers() {
+        for message in [
+            "Field 'token' exists but retrieval timed out",
+            "Credential not found in Bitwarden item metadata",
+        ] {
+            let error = anyhow::anyhow!(message);
+            assert!(
+                !BwBackend::should_retry_after_sync(&error),
+                "expected non-retryable error: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn log_action_timing_emits_debug_log() {
+        let output = capture_debug_output(|| {
+            BwBackend::log_action_timing("bw status", Instant::now(), true);
+        });
+
+        assert!(output.contains("Bitwarden action finished"));
+        assert!(output.contains("bw status"));
+        assert!(output.contains("success=true"));
+        assert!(output.contains("duration_ms="));
     }
 
     #[test]
@@ -1760,6 +1863,34 @@ mod tests {
     }
 
     #[test]
+    fn prompt_unlock_runs_bw_unlock_and_returns_session() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let args_log = state_dir.path().join("bw-args.log");
+        let password_log = state_dir.path().join("bw-password.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" > '{}'\nprintf '%s' \"$BW_MASTER_PW\" > '{}'\necho 'session-from-bw'\n",
+            args_log.display(),
+            password_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            BwBackend::set_test_prompt_unlock_password(Some("correct horse battery staple"));
+
+            let session = BwBackend::prompt_unlock().unwrap();
+
+            assert_eq!(session, "session-from-bw");
+            assert_eq!(
+                std::fs::read_to_string(&args_log).unwrap().trim(),
+                "unlock --raw --passwordenv BW_MASTER_PW"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&password_log).unwrap(),
+                "correct horse battery staple"
+            );
+        });
+    }
+
+    #[test]
     fn sync_vault_runs_sync_when_state_is_stale() {
         let state_dir = tempfile::TempDir::new().unwrap();
         let sync_state_path = state_dir.path().join("pw-env").join(SYNC_STATE_FILE_NAME);
@@ -1848,6 +1979,16 @@ mod tests {
         let items = vec![serde_json::json!({"name":"OTHER_KEY"})];
         let result = BwBackend::select_item_from_list("MY_KEY", &items, None, None, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_item_from_list_does_not_log_available_names_for_empty_results() {
+        let output = capture_debug_output(|| {
+            let result = BwBackend::select_item_from_list("MY_KEY", &[], None, None, None);
+            assert!(result.is_err());
+        });
+
+        assert!(!output.contains("No exact match among search results"));
     }
 
     #[test]
@@ -2481,6 +2622,55 @@ mod tests {
     }
 
     #[test]
+    fn resolve_folder_id_logs_when_loading_nonempty_persisted_cache() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let cache_path = state_dir
+            .path()
+            .join("pw-env")
+            .join(FOLDER_ID_CACHE_FILE_NAME);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cache_path,
+            r#"{"folder_ids":{"Engineering":"folder-123"}}"#,
+        )
+        .unwrap();
+
+        with_mock_bw("#!/bin/sh\necho unexpected >&2\nexit 1\n", || {
+            BwBackend::set_test_folder_cache_path(Some(cache_path.clone()));
+
+            let output = capture_debug_output(|| {
+                let result = BwBackend::resolve_folder_id("Engineering").unwrap();
+                assert_eq!(result.as_deref(), Some("folder-123"));
+            });
+
+            assert!(output.contains("Loaded persisted Bitwarden folder cache"));
+            assert!(output.contains("entry_count=1"));
+        });
+    }
+
+    #[test]
+    fn resolve_folder_id_skips_loaded_cache_log_for_empty_persisted_cache() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let cache_path = state_dir
+            .path()
+            .join("pw-env")
+            .join(FOLDER_ID_CACHE_FILE_NAME);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, r#"{"folder_ids":{}}"#).unwrap();
+
+        with_mock_bw("#!/bin/sh\necho '[]'\n", || {
+            BwBackend::set_test_folder_cache_path(Some(cache_path.clone()));
+
+            let output = capture_debug_output(|| {
+                let result = BwBackend::resolve_folder_id("Missing").unwrap();
+                assert_eq!(result, None);
+            });
+
+            assert!(!output.contains("Loaded persisted Bitwarden folder cache"));
+        });
+    }
+
+    #[test]
     fn clear_folder_cache_removes_persisted_file() {
         let state_dir = tempfile::TempDir::new().unwrap();
         let cache_path = state_dir
@@ -2745,15 +2935,21 @@ mod tests {
     fn test_base64_encode_six_bytes() {
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
+
+    #[test]
+    fn test_base64_encode_binary_bytes() {
+        assert_eq!(base64_encode(&[0xff, 0x80, 0x01]), "/4AB");
+        assert_eq!(base64_encode(&[0x00, 0xff, 0x10]), "AP8Q");
+    }
 }
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
     for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let triple = u32::from_be_bytes([0, b0, b1, b2]);
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
         result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
         if chunk.len() > 1 {

@@ -56,7 +56,8 @@ pub fn add_entry(
         );
     }
 
-    let env_message = apply_env_entry_update(env_update, key)?;
+    let url = backend.reference_url(key, &store_ctx);
+    let env_message = apply_env_entry_update(env_update, key, url.as_deref())?;
 
     eprintln!("Stored {key} in {}.", backend.name());
     eprintln!("{env_message}");
@@ -191,34 +192,61 @@ fn plan_env_entry_update(dir: &Path, config: &Config, key: &str) -> Result<EnvEn
     Ok(EnvEntryUpdate::Append(env_path))
 }
 
-fn apply_env_entry_update(update: EnvEntryUpdate, key: &str) -> Result<String> {
+fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) -> Result<String> {
     match update {
         EnvEntryUpdate::Create(path) => {
-            std::fs::write(&path, format!("{key}=\n"))
+            let entry_value = url.unwrap_or("");
+            std::fs::write(&path, format!("{key}={entry_value}\n"))
                 .with_context(|| format!("Failed to create {}", path.display()))?;
-            Ok(format!(
-                "Created {} with an empty managed entry for {key}.",
-                path.display()
-            ))
+            if url.is_some() {
+                Ok(format!(
+                    "Created {} with a managed entry for {key}.",
+                    path.display()
+                ))
+            } else {
+                Ok(format!(
+                    "Created {} with an empty managed entry for {key}.",
+                    path.display()
+                ))
+            }
         }
         EnvEntryUpdate::Append(path) => {
+            let entry_value = url.unwrap_or("");
             let mut contents = std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             if !contents.is_empty() && !contents.ends_with('\n') {
                 contents.push('\n');
             }
-            contents.push_str(&format!("{key}=\n"));
+            contents.push_str(&format!("{key}={entry_value}\n"));
             std::fs::write(&path, contents)
                 .with_context(|| format!("Failed to update {}", path.display()))?;
-            Ok(format!(
-                "Added an empty managed entry for {key} to {}.",
-                path.display()
-            ))
+            if url.is_some() {
+                Ok(format!(
+                    "Added a managed entry for {key} to {}.",
+                    path.display()
+                ))
+            } else {
+                Ok(format!(
+                    "Added an empty managed entry for {key} to {}.",
+                    path.display()
+                ))
+            }
         }
-        EnvEntryUpdate::AlreadyManaged(path) => Ok(format!(
-            "{} already contains an empty managed entry for {key}.",
-            path.display()
-        )),
+        EnvEntryUpdate::AlreadyManaged(path) => {
+            if let Some(url) = url {
+                let env_file = env_file::EnvFile::parse(&path)?;
+                env_file.rewrite_with_key_value(key, url)?;
+                Ok(format!(
+                    "Updated {} to write the backend URL for {key}.",
+                    path.display()
+                ))
+            } else {
+                Ok(format!(
+                    "{} already contains an empty managed entry for {key}.",
+                    path.display()
+                ))
+            }
+        }
     }
 }
 
@@ -285,7 +313,7 @@ mod tests {
         let env_path = temp_dir.path().join(".env");
         std::fs::write(&env_path, "EXISTING_KEY=").unwrap();
 
-        apply_env_entry_update(EnvEntryUpdate::Append(env_path.clone()), "API_KEY").unwrap();
+        apply_env_entry_update(EnvEntryUpdate::Append(env_path.clone()), "API_KEY", None).unwrap();
 
         let contents = std::fs::read_to_string(env_path).unwrap();
         assert_eq!(contents, "EXISTING_KEY=\nAPI_KEY=\n");
@@ -297,7 +325,77 @@ mod tests {
         let env_path = temp_dir.path().join(".env");
         std::fs::write(&env_path, "").unwrap();
 
-        apply_env_entry_update(EnvEntryUpdate::Append(env_path.clone()), "API_KEY").unwrap();
+        apply_env_entry_update(EnvEntryUpdate::Append(env_path.clone()), "API_KEY", None).unwrap();
+
+        let contents = std::fs::read_to_string(env_path).unwrap();
+        assert_eq!(contents, "API_KEY=\n");
+    }
+
+    #[test]
+    fn apply_env_entry_update_writes_url_on_create() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+
+        apply_env_entry_update(
+            EnvEntryUpdate::Create(env_path.clone()),
+            "API_KEY",
+            Some("op://vault/item/password"),
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(env_path).unwrap();
+        assert_eq!(contents, "API_KEY=op://vault/item/password\n");
+    }
+
+    #[test]
+    fn apply_env_entry_update_writes_url_on_append() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "EXISTING_KEY=\n").unwrap();
+
+        apply_env_entry_update(
+            EnvEntryUpdate::Append(env_path.clone()),
+            "API_KEY",
+            Some("op://vault/item/password"),
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(env_path).unwrap();
+        assert_eq!(
+            contents,
+            "EXISTING_KEY=\nAPI_KEY=op://vault/item/password\n"
+        );
+    }
+
+    #[test]
+    fn apply_env_entry_update_updates_empty_entry_with_url_when_already_managed() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        apply_env_entry_update(
+            EnvEntryUpdate::AlreadyManaged(env_path.clone()),
+            "API_KEY",
+            Some("op://vault/item/password"),
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(env_path).unwrap();
+        assert_eq!(contents, "API_KEY=op://vault/item/password\n");
+    }
+
+    #[test]
+    fn apply_env_entry_update_already_managed_no_url_leaves_file_unchanged() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        apply_env_entry_update(
+            EnvEntryUpdate::AlreadyManaged(env_path.clone()),
+            "API_KEY",
+            None,
+        )
+        .unwrap();
 
         let contents = std::fs::read_to_string(env_path).unwrap();
         assert_eq!(contents, "API_KEY=\n");

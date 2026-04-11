@@ -44,7 +44,6 @@ struct ReleaseInfo {
 #[allow(dead_code)]
 enum ArchiveFormat {
     TarGz,
-    #[cfg(target_os = "windows")]
     Zip,
 }
 
@@ -108,7 +107,7 @@ pub fn update(requested_version: Option<&str>) -> Result<()> {
     let current_version = env!("CARGO_PKG_VERSION");
     let release = resolve_release(requested_version)?;
 
-    if release.version == current_version {
+    if should_skip_update(&release.version, current_version) {
         eprintln!("pw-env is already at v{}", current_version);
         return Ok(());
     }
@@ -148,6 +147,10 @@ pub fn update(requested_version: Option<&str>) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn should_skip_update(release_version: &str, current_version: &str) -> bool {
+    release_version == current_version
 }
 
 fn fetch_latest_release() -> Result<ReleaseInfo> {
@@ -221,62 +224,41 @@ fn detect_release_asset() -> Result<ReleaseAsset> {
     detect_release_asset_impl()
 }
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn detect_release_asset_impl() -> Result<ReleaseAsset> {
-    Ok(ReleaseAsset {
-        target: "x86_64-pc-windows-msvc",
-        archive_format: ArchiveFormat::Zip,
-        binary_name: "pw-env.exe",
-    })
+    detect_release_asset_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn detect_release_asset_impl() -> Result<ReleaseAsset> {
-    Ok(ReleaseAsset {
-        target: "aarch64-apple-darwin",
-        archive_format: ArchiveFormat::TarGz,
-        binary_name: "pw-env",
-    })
-}
-
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn detect_release_asset_impl() -> Result<ReleaseAsset> {
-    Ok(ReleaseAsset {
-        target: "x86_64-apple-darwin",
-        archive_format: ArchiveFormat::TarGz,
-        binary_name: "pw-env",
-    })
-}
-
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-fn detect_release_asset_impl() -> Result<ReleaseAsset> {
-    Ok(ReleaseAsset {
-        target: "aarch64-unknown-linux-gnu",
-        archive_format: ArchiveFormat::TarGz,
-        binary_name: "pw-env",
-    })
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn detect_release_asset_impl() -> Result<ReleaseAsset> {
-    Ok(ReleaseAsset {
-        target: "x86_64-unknown-linux-gnu",
-        archive_format: ArchiveFormat::TarGz,
-        binary_name: "pw-env",
-    })
-}
-
-#[cfg(not(any(
-    all(target_os = "windows", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "macos", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "aarch64"),
-    all(target_os = "linux", target_arch = "x86_64")
-)))]
-fn detect_release_asset_impl() -> Result<ReleaseAsset> {
-    Err(anyhow::anyhow!(
-        "self-update is not supported for this platform"
-    ))
+fn detect_release_asset_for(os: &str, arch: &str) -> Result<ReleaseAsset> {
+    match (os, arch) {
+        ("windows", "x86_64") => Ok(ReleaseAsset {
+            target: "x86_64-pc-windows-msvc",
+            archive_format: ArchiveFormat::Zip,
+            binary_name: "pw-env.exe",
+        }),
+        ("macos", "aarch64") => Ok(ReleaseAsset {
+            target: "aarch64-apple-darwin",
+            archive_format: ArchiveFormat::TarGz,
+            binary_name: "pw-env",
+        }),
+        ("macos", "x86_64") => Ok(ReleaseAsset {
+            target: "x86_64-apple-darwin",
+            archive_format: ArchiveFormat::TarGz,
+            binary_name: "pw-env",
+        }),
+        ("linux", "aarch64") => Ok(ReleaseAsset {
+            target: "aarch64-unknown-linux-gnu",
+            archive_format: ArchiveFormat::TarGz,
+            binary_name: "pw-env",
+        }),
+        ("linux", "x86_64") => Ok(ReleaseAsset {
+            target: "x86_64-unknown-linux-gnu",
+            archive_format: ArchiveFormat::TarGz,
+            binary_name: "pw-env",
+        }),
+        _ => Err(anyhow::anyhow!(
+            "self-update is not supported for this platform"
+        )),
+    }
 }
 
 fn release_archive_name(tag: &str, asset: &ReleaseAsset) -> String {
@@ -330,8 +312,10 @@ fn extract_binary_from_archive(
                 let entry_path = entry
                     .path()
                     .context("failed to read tar archive entry path")?;
-                if entry_path.file_name().and_then(|name| name.to_str()) == Some(asset.binary_name)
-                {
+                if archive_entry_matches_binary_name(
+                    entry_path.to_string_lossy().as_ref(),
+                    asset.binary_name,
+                ) {
                     entry.unpack(&extracted_binary_path).with_context(|| {
                         format!(
                             "failed to unpack {} to {}",
@@ -355,7 +339,7 @@ fn extract_binary_from_archive(
                     .by_index(index)
                     .context("failed to read zip archive entry")?;
                 let entry_name = entry.name().replace('\\', "/");
-                if entry_name.rsplit('/').next() == Some(asset.binary_name) {
+                if archive_entry_matches_binary_name(&entry_name, asset.binary_name) {
                     let mut output = File::create(&extracted_binary_path).with_context(|| {
                         format!("failed to create {}", extracted_binary_path.display())
                     })?;
@@ -364,6 +348,12 @@ fn extract_binary_from_archive(
                     return Ok(extracted_binary_path);
                 }
             }
+        }
+        #[cfg(not(target_os = "windows"))]
+        ArchiveFormat::Zip => {
+            return Err(anyhow::anyhow!(
+                "zip release archives are only supported on Windows builds"
+            ));
         }
     }
 
@@ -396,6 +386,10 @@ fn normalize_tag(input: &str) -> String {
     }
 }
 
+fn archive_entry_matches_binary_name(entry_name: &str, binary_name: &str) -> bool {
+    entry_name.rsplit('/').next() == Some(binary_name)
+}
+
 fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
@@ -411,7 +405,6 @@ impl ArchiveFormat {
     fn extension(self) -> &'static str {
         match self {
             ArchiveFormat::TarGz => "tar.gz",
-            #[cfg(target_os = "windows")]
             ArchiveFormat::Zip => "zip",
         }
     }
@@ -944,6 +937,12 @@ mod tests {
     }
 
     #[test]
+    fn should_skip_update_only_for_matching_versions() {
+        assert!(should_skip_update("1.2.3", "1.2.3"));
+        assert!(!should_skip_update("1.2.4", "1.2.3"));
+    }
+
+    #[test]
     fn resolve_release_latest_uses_latest_selector() {
         with_mock_latest_release(
             ReleaseInfo {
@@ -992,6 +991,66 @@ mod tests {
         let asset = detect_release_asset().unwrap();
         assert_eq!(asset.binary_name, "pw-env");
         assert_eq!(asset.archive_format, ArchiveFormat::TarGz);
+    }
+
+    #[test]
+    fn detect_release_asset_for_supported_targets_returns_expected_assets() {
+        let cases = [
+            (
+                "windows",
+                "x86_64",
+                ReleaseAsset {
+                    target: "x86_64-pc-windows-msvc",
+                    archive_format: ArchiveFormat::Zip,
+                    binary_name: "pw-env.exe",
+                },
+            ),
+            (
+                "macos",
+                "aarch64",
+                ReleaseAsset {
+                    target: "aarch64-apple-darwin",
+                    archive_format: ArchiveFormat::TarGz,
+                    binary_name: "pw-env",
+                },
+            ),
+            (
+                "macos",
+                "x86_64",
+                ReleaseAsset {
+                    target: "x86_64-apple-darwin",
+                    archive_format: ArchiveFormat::TarGz,
+                    binary_name: "pw-env",
+                },
+            ),
+            (
+                "linux",
+                "aarch64",
+                ReleaseAsset {
+                    target: "aarch64-unknown-linux-gnu",
+                    archive_format: ArchiveFormat::TarGz,
+                    binary_name: "pw-env",
+                },
+            ),
+            (
+                "linux",
+                "x86_64",
+                ReleaseAsset {
+                    target: "x86_64-unknown-linux-gnu",
+                    archive_format: ArchiveFormat::TarGz,
+                    binary_name: "pw-env",
+                },
+            ),
+        ];
+
+        for (os, arch, expected) in cases {
+            assert_eq!(detect_release_asset_for(os, arch).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn detect_release_asset_for_rejects_unsupported_targets() {
+        assert!(detect_release_asset_for("linux", "riscv64").is_err());
     }
 
     #[test]
@@ -1070,6 +1129,20 @@ mod tests {
         let extracted_path = extract_binary_from_archive(&archive_path, &temp_dir, &asset).unwrap();
         assert_eq!(extracted_path, temp_dir.path().join("pw-env"));
         assert_eq!(std::fs::read(extracted_path).unwrap(), binary_content);
+    }
+
+    #[test]
+    fn archive_entry_matches_binary_name_checks_only_the_basename() {
+        assert!(archive_entry_matches_binary_name("nested/pw-env", "pw-env"));
+        assert!(archive_entry_matches_binary_name("pw-env", "pw-env"));
+        assert!(!archive_entry_matches_binary_name(
+            "nested/not-pw-env",
+            "pw-env"
+        ));
+        assert!(!archive_entry_matches_binary_name(
+            "nested/pw-env.sig",
+            "pw-env"
+        ));
     }
 
     #[test]

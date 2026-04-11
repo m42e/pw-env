@@ -308,6 +308,16 @@ impl Backend for OpBackend {
         }
     }
 
+    fn reference_url(&self, key: &str, ctx: &StoreContext) -> Option<String> {
+        let op_config = ctx.config.effective_op(ctx.dir);
+        let vault = op_config.vault.as_deref()?;
+        if let Some(item) = ctx.config.effective_item(ctx.dir) {
+            Some(format!("op://{vault}/{item}/{key}"))
+        } else {
+            Some(format!("op://{vault}/{key}/password"))
+        }
+    }
+
     fn name(&self) -> &str {
         "1Password"
     }

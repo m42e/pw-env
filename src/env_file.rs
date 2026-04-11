@@ -236,6 +236,40 @@ impl EnvFile {
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())
     }
+
+    /// Rewrite the .env file, setting a specific key to the given value.
+    pub fn rewrite_with_key_value(&self, key: &str, value: &str) -> Result<()> {
+        let mut output = String::new();
+        for line in &self.lines {
+            match line {
+                EnvLine::Comment(c) => {
+                    output.push_str(c);
+                    output.push('\n');
+                }
+                EnvLine::Entry(entry) => {
+                    if entry.key == key {
+                        output.push_str(&format_entry_line(
+                            &entry.key,
+                            value,
+                            entry.trailing_comment.as_deref(),
+                        ));
+                        output.push('\n');
+                    } else {
+                        output.push_str(&format_entry_line(
+                            &entry.key,
+                            &entry.raw_value,
+                            entry.trailing_comment.as_deref(),
+                        ));
+                        output.push('\n');
+                    }
+                }
+            }
+        }
+        std::fs::write(&self.path, output)
+            .with_context(|| format!("Failed to rewrite .env file: {}", self.path.display()))?;
+        debug!("Rewrote .env file: {}", self.path.display());
+        Ok(())
+    }
 }
 
 fn topmost_git_root(dir: &Path) -> Option<PathBuf> {

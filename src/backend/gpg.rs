@@ -283,6 +283,7 @@ impl GpgBackend {
 mod tests {
     use super::*;
     use crate::config::{Config, Defaults, LogConfig, UpdateConfig};
+    use std::cell::Cell;
 
     #[test]
     fn test_parse_stored_secrets_with_line_without_equals() {
@@ -371,6 +372,56 @@ mod tests {
         let dir = std::path::Path::new("/some/dir");
         let path = GpgBackend::gpg_file_path(dir, &config);
         assert_eq!(path, PathBuf::from("/some/dir/.env.gpg"));
+    }
+
+    #[test]
+    fn test_gpg_file_path_keeps_existing_path_within_project_dir() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let nested = temp_dir.path().join("secrets").join("custom.gpg");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "ciphertext").unwrap();
+
+        let config = Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    file_pattern: "secrets/custom.gpg".to_string(),
+                    recipient: None,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let path = GpgBackend::gpg_file_path(temp_dir.path(), &config);
+        assert_eq!(path, nested);
+    }
+
+    #[test]
+    fn test_gpg_file_path_falls_back_when_existing_path_escapes_project_dir() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside_dir = tempfile::TempDir::new().unwrap();
+        let outside_file = outside_dir.path().join("outside.gpg");
+        let linked_path = temp_dir.path().join("linked.gpg");
+        std::fs::write(&outside_file, "ciphertext").unwrap();
+        std::os::unix::fs::symlink(&outside_file, &linked_path).unwrap();
+
+        let config = Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    file_pattern: "linked.gpg".to_string(),
+                    recipient: None,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let path = GpgBackend::gpg_file_path(temp_dir.path(), &config);
+        assert_eq!(path, temp_dir.path().join(".env.gpg"));
     }
 
     #[test]
@@ -506,6 +557,23 @@ PLAIN=value
         assert!(result.is_err());
     }
 
+    #[test]
+    fn load_all_stored_secrets_returns_err_when_gpg_file_missing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = make_gpg_resolve_context(&config, temp_dir.path());
+
+        let result = GpgBackend::load_all_stored_secrets(&ctx);
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains(".env.gpg"));
+    }
+
     // ------- Mock-gpg infrastructure -------
 
     fn with_mock_gpg<F: FnOnce()>(decrypt_output: &str, f: F) {
@@ -536,6 +604,15 @@ PLAIN=value
         unsafe { std::env::set_var("PATH", &new_path) };
         f();
         unsafe { std::env::set_var("PATH", &old_path) };
+    }
+
+    #[test]
+    fn with_mock_gpg_executes_callback() {
+        let called = Cell::new(false);
+        with_mock_gpg("", || {
+            called.set(true);
+        });
+        assert!(called.get(), "expected callback to be executed");
     }
 
     #[test]
@@ -726,6 +803,38 @@ PLAIN=value
             // File exists → load_all_stored_secrets is called (decrypt), then encrypt
             let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
             assert!(result.is_ok(), "store failed: {:?}", result);
+        });
+    }
+
+    #[test]
+    fn load_all_stored_secrets_reads_mocked_gpg_content() {
+        let gpg_content = "\
+# pw-env: project=service-a\n\
+# pw-env: migrated_from=/tmp/work/service-a\n\
+# pw-env: created-with=pw-env (0.0.0)\n\
+API_KEY=secret\n";
+
+        with_mock_gpg(gpg_content, || {
+            let temp_dir = tempfile::TempDir::new().unwrap();
+            let gpg_file = temp_dir.path().join(".env.gpg");
+            std::fs::write(&gpg_file, "placeholder").unwrap();
+
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_gpg_resolve_context(&config, temp_dir.path());
+
+            let stored = GpgBackend::load_all_stored_secrets(&ctx).unwrap();
+            let secret = stored.get("API_KEY").unwrap();
+
+            assert_eq!(stored.len(), 1);
+            assert_eq!(secret.value, "secret");
+            assert_eq!(secret.project.as_deref(), Some("service-a"));
+            assert_eq!(secret.migrated_from.as_deref(), Some("/tmp/work/service-a"));
+            assert_eq!(secret.created_with.as_deref(), Some("pw-env (0.0.0)"));
         });
     }
 
