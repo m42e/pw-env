@@ -41,7 +41,7 @@ pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> R
         plaintext_entries.len(),
         env_path.display()
     );
-    if likely_secret_count > 0 {
+    if likely_secret_count != 0 {
         eprintln!(
             "{} of them look like secrets based on key names or secret-like values.",
             likely_secret_count
@@ -71,16 +71,17 @@ pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> R
         eprintln!("No entries selected for migration.");
     }
 
-    let selected_fingerprints = plaintext_entries
+    let (selected_entries, skipped_entries): (Vec<_>, Vec<_>) = plaintext_entries
         .iter()
         .enumerate()
-        .filter(|(index, _)| selected_indexes.contains(index))
+        .partition(|(index, _)| selected_indexes.contains(index));
+
+    let selected_fingerprints = selected_entries
+        .into_iter()
         .filter_map(|(_, entry)| entry.review_fingerprint())
         .collect::<Vec<_>>();
-    let skipped_fingerprints = plaintext_entries
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !selected_indexes.contains(index))
+    let skipped_fingerprints = skipped_entries
+        .into_iter()
         .filter_map(|(_, entry)| entry.review_fingerprint())
         .collect::<Vec<_>>();
 
@@ -502,6 +503,26 @@ mod tests {
     #[allow(dead_code)]
     fn clear_mock_prompt() {
         MOCK_PROMPT_RESULT.with(|r| *r.borrow_mut() = None);
+    }
+
+    #[test]
+    fn prompt_for_entries_returns_configured_mock_selection() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        fs::write(
+            &env_path,
+            "FIRST_SECRET=super_secret_long_value\nSECOND_SECRET=another_secret_value\n",
+        )
+        .unwrap();
+
+        let env_file = EnvFile::parse(&env_path).unwrap();
+        let entries = env_file.plaintext_entries();
+
+        set_mock_prompt(BTreeSet::from([1]));
+        let selected = prompt_for_entries(&entries, "op").unwrap();
+        clear_mock_prompt();
+
+        assert_eq!(selected, BTreeSet::from([1]));
     }
 
     #[cfg(unix)]

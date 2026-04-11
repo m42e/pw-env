@@ -439,7 +439,8 @@ fn run(cli: Cli, _config: config::Config) -> Result<()> {
             }
 
             let missing = missing_resolvable_keys(&resolvable_keys, &resolved);
-            if !missing.is_empty() {
+            if missing.is_empty() {
+            } else {
                 eprintln!();
                 emit_missing_entries_warning(&resolvable_keys, &resolved);
             }
@@ -569,12 +570,15 @@ fn emit_missing_entries_warning(
     resolved: &std::collections::BTreeMap<String, String>,
 ) -> usize {
     let missing = missing_resolvable_keys(resolvable_keys, resolved);
-    if !missing.is_empty() {
-        eprintln!(
-            "pw-env: warning: could not resolve the following entries: {}",
-            missing.join(", ")
-        );
+    if missing.is_empty() {
+        return 0;
     }
+
+    eprintln!(
+        "pw-env: warning: could not resolve the following entries: {}",
+        missing.join(", ")
+    );
+
     missing.len()
 }
 

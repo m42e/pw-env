@@ -978,15 +978,14 @@ impl ApprovedSecretFetches {
         // reachable len above MAX is MAX+1, where `>` vs `>=` and `-` vs `/`
         // produce the same eviction count (1).
         const MAX_HASHES_PER_PROJECT: usize = 10;
-        if hashes.len() > MAX_HASHES_PER_PROJECT {
-            let to_remove: Vec<String> = hashes
-                .iter()
-                .take(hashes.len() - MAX_HASHES_PER_PROJECT)
-                .cloned()
-                .collect();
-            for key in to_remove {
-                hashes.remove(&key);
-            }
+        let overflow = hashes.len().saturating_sub(MAX_HASHES_PER_PROJECT);
+        if overflow == 0 {
+            return;
+        }
+
+        let to_remove: Vec<String> = hashes.iter().take(overflow).cloned().collect();
+        for key in to_remove {
+            hashes.remove(&key);
         }
     }
 
