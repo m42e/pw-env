@@ -658,4 +658,59 @@ exit 0
         clear_mock_prompt();
         crate::config::set_test_reviewed_migrations_path(None);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrate_only_clears_entries_selected_by_prompt() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        fs::write(
+            &env_path,
+            "FIRST_VALUE=plain_visible_value\nSECOND_VALUE=another_plaintext_value\n",
+        )
+        .unwrap();
+
+        let reviewed_dir = TempDir::new().unwrap();
+        crate::config::set_test_reviewed_migrations_path(Some(
+            reviewed_dir.path().join("reviewed-migrations.json"),
+        ));
+
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        set_mock_interactive(true);
+        set_mock_prompt(BTreeSet::from([1]));
+
+        let script = r#"#!/bin/sh
+echo "mock-value"
+exit 0
+"#;
+
+        with_mock_op_backend(script, || {
+            let result = migrate(temp_dir.path(), &config, None);
+            assert!(result.is_ok(), "migration failed: {:?}", result);
+
+            let content = fs::read_to_string(&env_path).unwrap();
+            assert!(
+                content.contains("FIRST_VALUE=plain_visible_value"),
+                "unselected entry should remain unchanged"
+            );
+            assert!(
+                content.contains("SECOND_VALUE="),
+                "selected entry key should remain present"
+            );
+            assert!(
+                !content.contains("SECOND_VALUE=another_plaintext_value"),
+                "selected entry value should be cleared from .env"
+            );
+        });
+
+        clear_mock_interactive();
+        clear_mock_prompt();
+        crate::config::set_test_reviewed_migrations_path(None);
+    }
 }
