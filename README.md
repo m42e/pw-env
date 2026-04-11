@@ -122,6 +122,15 @@ Run mutation tests with:
 cargo mutants
 ```
 
+Run a specific shard (for example shard 0 out of 8) with:
+
+```bash
+cargo mutants --no-shuffle -vV --baseline=skip --shard 0/8
+```
+
+CI uses this same sharding approach in [`.github/workflows/mutants.yml`](.github/workflows/mutants.yml) and
+[`.github/workflows/mutants-pr.yml`](.github/workflows/mutants-pr.yml).
+
 On macOS, you can experiment with a RAM-backed temp directory for additional speedups:
 
 ```bash

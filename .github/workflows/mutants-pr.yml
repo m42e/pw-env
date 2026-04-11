@@ -10,8 +10,12 @@ permissions:
 
 jobs:
   incremental-mutants:
-    name: Incremental Mutation Testing
+    name: Incremental Mutation Testing (Shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
         with:
@@ -30,14 +34,19 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Compute diff
-        run: git diff origin/${{ github.base_ref }}.. | tee git.diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff origin/${{ github.base_ref }}.. | tee git.diff
+          else
+            git diff HEAD^..HEAD | tee git.diff
+          fi
 
       - name: Run incremental mutation tests
-        run: cargo mutants --no-shuffle -vV --in-diff git.diff
+        run: cargo mutants --no-shuffle -vV --baseline=skip --in-diff git.diff --shard ${{ matrix.shard }}/4
 
       - name: Upload mutants.out
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: mutants-incremental.out
+          name: mutants-incremental-shard-${{ matrix.shard }}.out
           path: mutants.out/
