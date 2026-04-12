@@ -384,6 +384,10 @@ body::before {
   color: var(--vp-c-text-2);
 }
 
+.vp-doc {
+  text-decoration: none;
+}
+
 .vp-doc div[class*='language-'] {
   border: 1px solid var(--vp-c-border);
   border-radius: 0.75rem;
