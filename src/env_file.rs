@@ -1048,4 +1048,31 @@ mod tests {
         assert_eq!(entries[1].key, "DB_PASS");
         assert!(matches!(entries[1].kind, EntryKind::OpReference(_)));
     }
+
+    #[test]
+    fn find_example_returns_correct_path() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let example = dir.path().join(".env.example");
+        std::fs::write(&example, "KEY=value\n").expect("write should succeed");
+
+        let result = EnvFile::find_example(dir.path());
+        assert_eq!(result, Some(example));
+    }
+
+    #[test]
+    fn find_example_none_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        assert_eq!(EnvFile::find_example(dir.path()), None);
+    }
+
+    #[test]
+    fn find_example_none_when_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let real_file = dir.path().join("real.env");
+        std::fs::write(&real_file, "KEY=value\n").expect("write should succeed");
+        let example = dir.path().join(".env.example");
+        std::os::unix::fs::symlink(&real_file, &example).expect("symlink should be created");
+
+        assert_eq!(EnvFile::find_example(dir.path()), None);
+    }
 }
