@@ -1,6 +1,17 @@
 name: Mutation Testing (PR)
 
 on:
+  workflow_dispatch:
+    inputs:
+      diff_base:
+        description: Base revision for the diff (branch, tag, or commit)
+        required: true
+        default: origin/main
+        type: string
+      diff_head:
+        description: Optional head revision to test and diff against (branch, tag, or commit). Defaults to the selected workflow ref.
+        required: false
+        type: string
   pull_request:
   push:
     branches: [main]
@@ -12,11 +23,12 @@ jobs:
   list-mutants-in-diff:
     name: List Mutations in Diff
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
         with:
           fetch-depth: 0
+          ref: ${{ inputs.diff_head || github.ref }}
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # pin: v1
         with:
@@ -30,8 +42,38 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked
 
+      - name: Fetch refs for diff resolution
+        run: git fetch --force --tags origin "+refs/heads/*:refs/remotes/origin/*"
+
       - name: Compute diff
-        run: git diff origin/${{ github.base_ref }}.. | tee git.diff
+        shell: bash
+        env:
+          DIFF_BASE_INPUT: ${{ inputs.diff_base || '' }}
+        run: |
+          set -euo pipefail
+
+          case "${{ github.event_name }}" in
+            pull_request)
+              diff_base="origin/${{ github.base_ref }}"
+              ;;
+            workflow_dispatch)
+              diff_base="$DIFF_BASE_INPUT"
+              ;;
+            *)
+              echo "::error::Unsupported event: ${{ github.event_name }}"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$diff_base" ]; then
+            echo "::error::diff_base is required for manual runs."
+            exit 1
+          fi
+
+          git rev-parse --verify "$diff_base^{commit}" >/dev/null
+          echo "Diff range: $diff_base..HEAD"
+          echo "Diff range: $diff_base..HEAD" >> "$GITHUB_STEP_SUMMARY"
+          git diff "$diff_base..HEAD" | tee git.diff
 
       - name: List mutations in diff
         run: cargo mutants --list --in-diff git.diff
@@ -47,6 +89,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
         with:
           fetch-depth: 0
+          ref: ${{ inputs.diff_head || github.ref }}
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # pin: v1
         with:
@@ -60,13 +103,41 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked
 
+      - name: Fetch refs for diff resolution
+        run: git fetch --force --tags origin "+refs/heads/*:refs/remotes/origin/*"
+
       - name: Compute diff
+        shell: bash
+        env:
+          DIFF_BASE_INPUT: ${{ inputs.diff_base || '' }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff origin/${{ github.base_ref }}.. | tee git.diff
-          else
-            git diff HEAD^..HEAD | tee git.diff
+          set -euo pipefail
+
+          case "${{ github.event_name }}" in
+            pull_request)
+              diff_base="origin/${{ github.base_ref }}"
+              ;;
+            workflow_dispatch)
+              diff_base="$DIFF_BASE_INPUT"
+              ;;
+            push)
+              diff_base="HEAD^"
+              ;;
+            *)
+              echo "::error::Unsupported event: ${{ github.event_name }}"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$diff_base" ]; then
+            echo "::error::diff_base is required for manual runs."
+            exit 1
           fi
+
+          git rev-parse --verify "$diff_base^{commit}" >/dev/null
+          echo "Diff range: $diff_base..HEAD"
+          echo "Diff range: $diff_base..HEAD" >> "$GITHUB_STEP_SUMMARY"
+          git diff "$diff_base..HEAD" | tee git.diff
 
       - name: Run incremental mutation tests
         run: cargo mutants --no-shuffle -vV --baseline=skip --in-diff git.diff --shard ${{ matrix.shard }}/4
