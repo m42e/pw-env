@@ -15,6 +15,8 @@ backend = "op"
 # search_parent_env = true
 # Also export plaintext (non-secret) values from .env alongside resolved secrets
 # source_all = false
+# Use .env.example as fallback when no .env file exists
+# fallback_example_env = false
 
 [defaults.cache]
 # Cache resolved secret values in the OS keyring when available
@@ -86,14 +88,14 @@ check_interval_hours = 24
 
 | Section | Keys | Notes |
 | --- | --- | --- |
-| `[defaults]` | `backend`, `search_parent_env`, `source_all` | Selects the default backend for empty `.env` values, controls parent `.env` discovery, and controls whether plaintext values are exported |
+| `[defaults]` | `backend`, `search_parent_env`, `source_all`, `fallback_example_env` | Selects the default backend for empty `.env` values, controls parent `.env` discovery, controls whether plaintext values are exported, and enables `.env.example` fallback |
 | `[defaults.cache]` | `enabled`, `ttl_hours` | Enables OS-keyring caching of resolved secrets and sets the expiry window |
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings |
 | `[defaults.bw]` | `folder`, `organization`, `item` | Default Bitwarden lookup settings |
 | `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
-| `[[projects]]` | `path`, `backend`, `search_parent_env`, `source_all`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
+| `[[projects]]` | `path`, `backend`, `search_parent_env`, `source_all`, `fallback_example_env`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
 | `[projects.cache]`, `[projects.op]`, `[projects.bw]`, `[projects.gpg]` | backend-specific keys | Extra settings for the most recent `[[projects]]` block |
 
 ## Valid backend values
@@ -109,6 +111,7 @@ repository.
 backend = "op"
 search_parent_env = true
 source_all = false
+fallback_example_env = false
 item = "api-server-env"
 commands = ["cargo", "npm"]
 
@@ -137,6 +140,11 @@ exported.
 When `[defaults.cache]` or `[cache]` is enabled, pw-env stores resolved secret values in the OS keyring when that
 secure store is available. If the keyring is unavailable, pw-env keeps resolving from the backend normally and simply
 skips secret-value caching for that run.
+
+When `fallback_example_env` is `true` and no `.env` file is found in the project directory (or its
+parents when `search_parent_env` is enabled), pw-env falls back to `.env.example` instead.
+This is useful for repositories that check in a `.env.example` as a template with empty or
+placeholder values. The default is `false`.
 
 ## Command-scoped shell integration
 

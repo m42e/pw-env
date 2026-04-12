@@ -152,6 +152,10 @@ pub struct Defaults {
     /// When true, a warning is printed for each .env entry that could not be resolved.
     #[serde(default)]
     pub warn_missing: bool,
+    /// When true, pw-env uses `.env.example` as a fallback when no `.env`
+    /// file is found in the project directory.
+    #[serde(default)]
+    pub fallback_example_env: bool,
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
@@ -169,6 +173,7 @@ impl Default for Defaults {
             search_parent_env: default_search_parent_env(),
             source_all: false,
             warn_missing: false,
+            fallback_example_env: false,
             cache: CacheConfig::default(),
             op: OpConfig::default(),
             bw: BwConfig::default(),
@@ -313,6 +318,8 @@ pub struct ProjectOverride {
     #[serde(default)]
     pub warn_missing: Option<bool>,
     #[serde(default)]
+    pub fallback_example_env: Option<bool>,
+    #[serde(default)]
     pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub op: Option<OpConfig>,
@@ -337,6 +344,8 @@ struct ProjectDirectoryOverride {
     pub source_all: Option<bool>,
     #[serde(default)]
     pub warn_missing: Option<bool>,
+    #[serde(default)]
+    pub fallback_example_env: Option<bool>,
     #[serde(default)]
     pub cache: Option<CacheConfig>,
     #[serde(default)]
@@ -409,6 +418,7 @@ impl Config {
                 search_parent_env: local_override.search_parent_env,
                 source_all: local_override.source_all,
                 warn_missing: local_override.warn_missing,
+                fallback_example_env: local_override.fallback_example_env,
                 cache: local_override.cache,
                 op: local_override.op,
                 bw: local_override.bw,
@@ -728,6 +738,13 @@ impl Config {
         self.project_for(dir)
             .and_then(|project| project.warn_missing)
             .unwrap_or(self.defaults.warn_missing)
+    }
+
+    /// Resolve whether `.env.example` files should be included for a given directory.
+    pub fn effective_fallback_example_env(&self, dir: &Path) -> bool {
+        self.project_for(dir)
+            .and_then(|project| project.fallback_example_env)
+            .unwrap_or(self.defaults.fallback_example_env)
     }
 
     fn project_index_for(&self, dir: &Path) -> Option<usize> {
@@ -2374,6 +2391,7 @@ backend = "op"
                 search_parent_env: None,
                 source_all: None,
                 warn_missing: None,
+                fallback_example_env: None,
                 cache: None,
                 op: None,
                 bw: None,

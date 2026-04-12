@@ -270,6 +270,21 @@ impl EnvFile {
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())
     }
+
+    /// Find a `.env.example` file next to the given `.env` path or in the given directory.
+    pub fn find_example(env_or_dir: &Path) -> Option<PathBuf> {
+        let dir = if env_or_dir.is_dir() {
+            env_or_dir
+        } else {
+            env_or_dir.parent()?
+        };
+        let example_path = dir.join(".env.example");
+        if example_path.exists() && !example_path.is_symlink() {
+            Some(example_path)
+        } else {
+            None
+        }
+    }
 }
 
 fn topmost_git_root(dir: &Path) -> Option<PathBuf> {

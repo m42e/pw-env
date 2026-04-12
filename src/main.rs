@@ -690,11 +690,22 @@ fn build_hook_output(
 }
 
 fn find_env_path(dir: &Path, config: &config::Config) -> Option<PathBuf> {
-    if config.effective_search_parent_env(dir) {
+    let primary = if config.effective_search_parent_env(dir) {
         env_file::EnvFile::find_with_parents(dir, true)
     } else {
         env_file::EnvFile::find(dir)
+    };
+
+    if primary.is_some() {
+        return primary;
     }
+
+    // Fall back to .env.example when fallback_example_env is enabled
+    if config.effective_fallback_example_env(dir) {
+        return env_file::EnvFile::find_example(dir);
+    }
+
+    None
 }
 
 fn env_owner_dir(env_path: &Path) -> &Path {
@@ -1922,6 +1933,7 @@ mod tests {
                 search_parent_env: None,
                 source_all: None,
                 warn_missing: None,
+                fallback_example_env: None,
                 cache: None,
                 op: None,
                 bw: None,
