@@ -1491,6 +1491,43 @@ vault = "Work"
     }
 
     #[test]
+    fn test_effective_fallback_example_env_uses_project_override_and_default() {
+        let config = Config {
+            defaults: Defaults {
+                fallback_example_env: false,
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![
+                ProjectOverride {
+                    path: "/home/user/work/true".to_string(),
+                    fallback_example_env: Some(true),
+                    ..ProjectOverride::default()
+                },
+                ProjectOverride {
+                    path: "/home/user/work/false".to_string(),
+                    fallback_example_env: Some(false),
+                    ..ProjectOverride::default()
+                },
+            ],
+        };
+
+        assert_eq!(
+            config.effective_fallback_example_env(Path::new("/home/user/work/true/app")),
+            true
+        );
+        assert_eq!(
+            config.effective_fallback_example_env(Path::new("/home/user/work/false/app")),
+            false
+        );
+        assert_eq!(
+            config.effective_fallback_example_env(Path::new("/home/user/other")),
+            false
+        );
+    }
+
+    #[test]
     fn test_approve_hash_keeps_max_hashes_and_evicts_oldest_lexicographic() {
         let project_path = Path::new("/tmp/project");
         let mut approvals = ApprovedSecretFetches::default();
