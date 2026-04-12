@@ -1934,6 +1934,63 @@ mod tests {
     }
 
     #[test]
+    fn load_config_for_command_uses_defaults_for_config_wizard_on_parse_error() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("pw-env");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[defaults\nbackend = \"op\"\n",
+        )
+        .unwrap();
+
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", temp_dir.path()) };
+
+        let result = load_config_for_command(&Commands::ConfigWizard).unwrap();
+
+        assert_eq!(result.defaults.backend, "op");
+        assert_eq!(result.log.level, "info");
+        assert!(result.updates.enabled);
+        assert!(result.projects.is_empty());
+
+        match old_xdg {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+    }
+
+    #[test]
+    fn load_config_for_command_returns_error_for_non_wizard_parse_error() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("pw-env");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[defaults\nbackend = \"op\"\n",
+        )
+        .unwrap();
+
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", temp_dir.path()) };
+
+        let error = load_config_for_command(&Commands::Check).unwrap_err();
+
+        assert!(error.to_string().contains("Failed to parse config"));
+
+        match old_xdg {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+    }
+
+    #[test]
     fn build_hook_output_with_fish_syntax_and_commands_configured() {
         let temp_dir = TempDir::new().unwrap();
         let canonical = temp_dir.path().canonicalize().unwrap();

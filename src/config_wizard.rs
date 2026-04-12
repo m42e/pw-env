@@ -887,8 +887,17 @@ mod tests {
     use crate::config::{
         BwConfig, CacheConfig, Defaults, GpgConfig, LogConfig, OpConfig, UpdateConfig,
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::fs;
     use tempfile::TempDir;
+
+    fn key_event(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_key_event(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
 
     #[test]
     fn is_interactive_check_requires_all_terminal_streams() {
@@ -1056,5 +1065,190 @@ mod tests {
         assert_eq!(state.backend.as_str(), "op");
         assert_eq!(state.bw_sync_throttle_secs, DEFAULT_BW_SYNC_THROTTLE_SECS);
         assert_eq!(state.gpg_file_pattern, DEFAULT_GPG_FILE_PATTERN);
+    }
+
+    #[test]
+    fn log_level_choice_from_value_maps_warn_and_error() {
+        assert_eq!(LogLevelChoice::from_value("warn").as_str(), "warn");
+        assert_eq!(LogLevelChoice::from_value("error").as_str(), "error");
+    }
+
+    #[test]
+    fn field_labels_and_help_text_match_expected_copy() {
+        assert_eq!(FieldId::LogLevel.label(), "Log level");
+        assert_eq!(
+            FieldId::LogLevel.help(),
+            "How verbose should pw-env logging be?"
+        );
+    }
+
+    #[test]
+    fn backend_specific_fields_follow_backend_and_shared_visibility_rules() {
+        assert!(FieldId::OpVault.is_backend_specific(BackendChoice::Op));
+        assert!(!FieldId::OpVault.is_backend_specific(BackendChoice::Bw));
+        assert!(FieldId::LogLevel.is_backend_specific(BackendChoice::Gpg));
+    }
+
+    #[test]
+    fn adjust_toggles_boolean_fields_and_cycles_log_level() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+
+        FieldId::SearchParentEnv.adjust(&mut state, 1);
+        FieldId::SourceAll.adjust(&mut state, 1);
+        FieldId::WarnMissing.adjust(&mut state, 1);
+        FieldId::FallbackExampleEnv.adjust(&mut state, 1);
+        FieldId::CacheEnabled.adjust(&mut state, 1);
+        FieldId::LogLevel.adjust(&mut state, 1);
+        FieldId::UpdatesEnabled.adjust(&mut state, 1);
+
+        assert!(!state.search_parent_env);
+        assert!(state.source_all);
+        assert!(state.warn_missing);
+        assert!(state.fallback_example_env);
+        assert!(!state.cache_enabled);
+        assert_eq!(state.log_level.as_str(), "warn");
+        assert!(!state.updates_enabled);
+    }
+
+    #[test]
+    fn apply_edit_updates_optional_and_numeric_fields() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+
+        FieldId::OpVault.apply_edit(&mut state, " work ").unwrap();
+        FieldId::OpAccount.apply_edit(&mut state, " team ").unwrap();
+        FieldId::BwSyncThrottleSecs
+            .apply_edit(&mut state, "7200")
+            .unwrap();
+        FieldId::GpgFilePattern
+            .apply_edit(&mut state, " .secrets.gpg ")
+            .unwrap();
+
+        assert_eq!(state.op_vault.as_deref(), Some("work"));
+        assert_eq!(state.op_account.as_deref(), Some("team"));
+        assert_eq!(state.bw_sync_throttle_secs, 7200);
+        assert_eq!(state.gpg_file_pattern, ".secrets.gpg");
+    }
+
+    #[test]
+    fn handle_key_delegates_normal_mode_keys() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app.handle_key(key_event(KeyCode::Esc)).unwrap();
+
+        assert!(matches!(outcome, Some(WizardOutcome::Cancelled)));
+    }
+
+    #[test]
+    fn handle_normal_key_esc_cancels() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Esc)).unwrap();
+
+        assert!(matches!(outcome, Some(WizardOutcome::Cancelled)));
+    }
+
+    #[test]
+    fn handle_normal_key_up_moves_selection_up() {
+        let mut app = WizardApp::new(&Config::default());
+        app.selected = 1;
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Up)).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn handle_normal_key_left_cycles_backend_backward() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Left)).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(app.state.backend.as_str(), "gpg");
+    }
+
+    #[test]
+    fn handle_normal_key_right_cycles_backend_forward() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Right)).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(app.state.backend.as_str(), "bw");
+    }
+
+    #[test]
+    fn handle_normal_key_enter_starts_editing_for_editable_field() {
+        let mut config = Config::default();
+        config.defaults.op.vault = Some("Work".to_string());
+        let mut app = WizardApp::new(&config);
+        app.selected = 7;
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Enter)).unwrap();
+
+        assert!(outcome.is_none());
+        assert!(matches!(
+            app.mode,
+            InputMode::Editing { ref buffer } if buffer == "Work"
+        ));
+        assert_eq!(
+            app.status,
+            "Press Enter to apply 1Password vault or Esc to cancel."
+        );
+    }
+
+    #[test]
+    fn handle_normal_key_space_toggles_selected_field() {
+        let mut app = WizardApp::new(&Config::default());
+        app.selected = 1;
+
+        let outcome = app
+            .handle_normal_key(key_event(KeyCode::Char(' ')))
+            .unwrap();
+
+        assert!(outcome.is_none());
+        assert!(!app.state.search_parent_env);
+    }
+
+    #[test]
+    fn handle_normal_key_saves_rendered_config() {
+        let mut app = WizardApp::new(&Config::default());
+        let expected = app.state.render_config();
+
+        let outcome = app
+            .handle_normal_key(key_event(KeyCode::Char('s')))
+            .unwrap();
+
+        match outcome {
+            Some(WizardOutcome::Save(rendered)) => assert_eq!(rendered, expected),
+            _ => panic!("expected save outcome"),
+        }
+    }
+
+    #[test]
+    fn handle_editing_key_appends_plain_characters() {
+        let mut app = WizardApp::new(&Config::default());
+        let mut buffer = "ab".to_string();
+
+        let keep_editing = app
+            .handle_editing_key(key_event(KeyCode::Char('c')), &mut buffer)
+            .unwrap();
+
+        assert!(keep_editing);
+        assert_eq!(buffer, "abc");
+    }
+
+    #[test]
+    fn handle_editing_key_ignores_control_characters() {
+        let mut app = WizardApp::new(&Config::default());
+        let mut buffer = "ab".to_string();
+
+        let keep_editing = app
+            .handle_editing_key(ctrl_key_event('c'), &mut buffer)
+            .unwrap();
+
+        assert!(keep_editing);
+        assert_eq!(buffer, "ab");
     }
 }
