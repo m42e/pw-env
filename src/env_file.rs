@@ -1066,6 +1066,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn find_example_none_when_symlink() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let real_file = dir.path().join("real.env");
