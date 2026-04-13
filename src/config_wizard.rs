@@ -1375,6 +1375,16 @@ mod tests {
     }
 
     #[test]
+    fn handle_normal_key_up_at_first_field_keeps_selection_at_zero() {
+        let mut app = WizardApp::new(&Config::default());
+
+        let outcome = app.handle_normal_key(key_event(KeyCode::Up)).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
     fn handle_normal_key_down_moves_selection_down() {
         let mut app = WizardApp::new(&Config::default());
 
@@ -1468,6 +1478,57 @@ mod tests {
     }
 
     #[test]
+    fn handle_editing_key_escape_cancels_current_edit() {
+        let mut app = WizardApp::new(&Config::default());
+        app.selected = 11;
+        app.mode = InputMode::Editing {
+            buffer: "acme".to_string(),
+        };
+        let mut buffer = "acme".to_string();
+
+        let keep_editing = app
+            .handle_editing_key(key_event(KeyCode::Esc), &mut buffer)
+            .unwrap();
+
+        assert!(!keep_editing);
+        assert!(matches!(app.mode, InputMode::Normal));
+        assert_eq!(buffer, "acme");
+        assert_eq!(app.status, "Cancelled edit for Bitwarden organization.");
+    }
+
+    #[test]
+    fn handle_editing_key_enter_applies_bitwarden_organization_edit() {
+        let mut app = WizardApp::new(&Config::default());
+        app.selected = 11;
+        app.mode = InputMode::Editing {
+            buffer: " acme ".to_string(),
+        };
+        let mut buffer = " acme ".to_string();
+
+        let keep_editing = app
+            .handle_editing_key(key_event(KeyCode::Enter), &mut buffer)
+            .unwrap();
+
+        assert!(!keep_editing);
+        assert!(matches!(app.mode, InputMode::Normal));
+        assert_eq!(app.state.bw_organization.as_deref(), Some("acme"));
+        assert_eq!(app.status, "Updated Bitwarden organization.");
+    }
+
+    #[test]
+    fn handle_editing_key_backspace_removes_last_character() {
+        let mut app = WizardApp::new(&Config::default());
+        let mut buffer = "acme".to_string();
+
+        let keep_editing = app
+            .handle_editing_key(key_event(KeyCode::Backspace), &mut buffer)
+            .unwrap();
+
+        assert!(keep_editing);
+        assert_eq!(buffer, "acm");
+    }
+
+    #[test]
     fn handle_editing_key_ignores_control_characters() {
         let mut app = WizardApp::new(&Config::default());
         let mut buffer = "ab".to_string();
@@ -1478,6 +1539,26 @@ mod tests {
 
         assert!(keep_editing);
         assert_eq!(buffer, "ab");
+    }
+
+    #[test]
+    fn edit_buffer_returns_bitwarden_organization_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.bw_organization = Some("acme".to_string());
+
+        let buffer = FieldId::BwOrganization.edit_buffer(&state);
+
+        assert_eq!(buffer, "acme");
+    }
+
+    #[test]
+    fn edit_buffer_returns_bitwarden_item_value() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.bw_item = Some("api".to_string());
+
+        let buffer = FieldId::BwItem.edit_buffer(&state);
+
+        assert_eq!(buffer, "api");
     }
 
     #[test]
