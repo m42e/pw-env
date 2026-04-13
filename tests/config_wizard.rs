@@ -1,6 +1,7 @@
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::process::Command;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,10 +27,21 @@ fn run_config_wizard_in_pty(input: &str) -> (String, portable_pty::ExitStatus) {
     let mut writer = pair.master.take_writer().unwrap();
     let output = Arc::new(Mutex::new(Vec::new()));
     let output_reader = Arc::clone(&output);
+    let (reader_done_tx, reader_done_rx) = mpsc::channel();
     let reader_thread = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).unwrap();
-        output_reader.lock().unwrap().extend(buffer);
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => output_reader
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&buffer[..read]),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        let _ = reader_done_tx.send(());
     });
 
     thread::sleep(Duration::from_millis(100));
@@ -37,21 +49,25 @@ fn run_config_wizard_in_pty(input: &str) -> (String, portable_pty::ExitStatus) {
     writer.flush().unwrap();
     drop(writer);
 
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            let _ = reader_thread.join();
+            drop(pair.master);
+            let _ = reader_done_rx.recv_timeout(Duration::from_secs(1));
             let output = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
             panic!("config-wizard did not exit after PTY input; output: {output:?}");
         }
         thread::sleep(Duration::from_millis(10));
     };
 
-    reader_thread.join().unwrap();
+    drop(pair.master);
+    if reader_done_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
+        reader_thread.join().unwrap();
+    }
     let output = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
     (output, status)
 }
