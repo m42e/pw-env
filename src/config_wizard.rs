@@ -8,7 +8,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
@@ -104,11 +104,11 @@ fn render(frame: &mut Frame, app: &WizardApp) {
             let label_style = if field.is_backend_specific(app.state.backend) {
                 Style::default().fg(Color::White)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(Color::DarkGray)
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{}: ", field.label()), label_style),
-                Span::raw(field.value(&app.state)),
+                value_span(field.value(&app.state)),
             ]))
         })
         .collect::<Vec<_>>();
@@ -124,35 +124,65 @@ fn render(frame: &mut Frame, app: &WizardApp) {
         .highlight_symbol("> ");
     frame.render_stateful_widget(questions, panes[0], &mut list_state);
 
-    let preview = Paragraph::new(app.state.render_config())
+    let config_preview = app.state.render_config();
+    let preview = Paragraph::new(highlight_toml(&config_preview))
         .block(Block::default().borders(Borders::ALL).title("Built Config"))
         .wrap(Wrap { trim: false });
     frame.render_widget(preview, panes[1]);
 
     let selected_field = app.selected_field();
-    let mode_line = match &app.mode {
-        InputMode::Normal => {
-            "Arrows move. Space toggles booleans. Left/right cycles choices. Enter edits text. s saves. q quits.".to_string()
-        }
-        InputMode::Editing { buffer } => format!(
-            "Editing {}: {}",
-            selected_field.label(),
-            if buffer.is_empty() {
+    let (mode_line, controls_block) = match &app.mode {
+        InputMode::Normal => (
+            Line::from(
+                "Arrows move. Space toggles booleans. Left/right cycles choices. Enter edits text. s saves. q quits.",
+            ),
+            Block::default().borders(Borders::ALL).title("Controls"),
+        ),
+        InputMode::Editing { buffer } => {
+            let displayed = if buffer.is_empty() {
                 "<empty>".to_string()
             } else {
                 buffer.clone()
-            }
-        ),
+            };
+            (
+                Line::from(vec![
+                    Span::raw("Editing "),
+                    Span::styled(
+                        selected_field.label(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(": "),
+                    Span::styled(displayed, Style::default().fg(Color::Yellow)),
+                ]),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(Span::styled(
+                        "Controls",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+        }
     };
-    let help = Paragraph::new(format!(
-        "{}\n{}",
-        selected_field.help(),
-        app.status.as_str()
-    ))
+    let status_style = if app.status.starts_with("Updated") {
+        Style::default().fg(Color::Green)
+    } else if app.status.starts_with("Cancelled") {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let help = Paragraph::new(Text::from(vec![
+        Line::from(Span::raw(selected_field.help())),
+        Line::from(Span::styled(app.status.clone(), status_style)),
+    ]))
     .block(Block::default().borders(Borders::ALL).title("Help"))
     .wrap(Wrap { trim: false });
     let mode = Paragraph::new(mode_line)
-        .block(Block::default().borders(Borders::ALL).title("Controls"))
+        .block(controls_block)
         .wrap(Wrap { trim: false });
 
     let bottom = Layout::default()
@@ -888,6 +918,62 @@ fn yes_no(value: bool) -> String {
 
 fn quoted(value: &str) -> String {
     toml::Value::String(value.to_string()).to_string()
+}
+
+fn value_span(value: String) -> Span<'static> {
+    let style = match value.as_str() {
+        "yes" => Style::default().fg(Color::Green),
+        "no" => Style::default().fg(Color::Red),
+        "<empty>" => Style::default().fg(Color::DarkGray),
+        "op" => Style::default().fg(Color::Cyan),
+        "bw" => Style::default().fg(Color::Yellow),
+        "gpg" => Style::default().fg(Color::Magenta),
+        "trace" => Style::default().fg(Color::Gray),
+        "debug" => Style::default().fg(Color::Blue),
+        "info" => Style::default().fg(Color::Green),
+        "warn" => Style::default().fg(Color::Yellow),
+        "error" => Style::default().fg(Color::Red),
+        _ => Style::default(),
+    };
+    Span::styled(value, style)
+}
+
+fn highlight_toml(text: &str) -> Text<'static> {
+    let lines = text
+        .lines()
+        .map(|line| {
+            if line.starts_with('#') {
+                Line::from(Span::styled(
+                    line.to_owned(),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            } else if line.starts_with('[') {
+                Line::from(Span::styled(
+                    line.to_owned(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else if let Some(eq_pos) = line.find('=') {
+                let key = line[..eq_pos].to_owned();
+                let value = line[eq_pos + 1..].to_owned();
+                let value_style = match value.trim() {
+                    "true" => Style::default().fg(Color::Green),
+                    "false" => Style::default().fg(Color::Red),
+                    v if v.starts_with('"') => Style::default().fg(Color::Green),
+                    _ => Style::default().fg(Color::Cyan),
+                };
+                Line::from(vec![
+                    Span::styled(key, Style::default().fg(Color::Cyan)),
+                    Span::raw("="),
+                    Span::styled(value, value_style),
+                ])
+            } else {
+                Line::from(Span::raw(line.to_owned()))
+            }
+        })
+        .collect::<Vec<_>>();
+    Text::from(lines)
 }
 
 #[cfg(test)]
