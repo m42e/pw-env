@@ -143,6 +143,14 @@ Invoke-Expression (& pw-env completions powershell)
 
 See [Shell integration](shell-integration.md) for the full hook behavior.
 
+## See the full flow
+
+This screencast walks through the same setup end to end with a GPG-backed project: create the global config, migrate
+plaintext secrets, install the shell hook, and watch values load and clear automatically as you move between project
+directories.
+
+![Screencast showing pw-env configuration, migration, shell init, and automatic loading on directory changes](../pw-env-config-init-migrate-auto-load.gif)
+
 ## Next steps
 
 Move to [Shell integration](shell-integration.md) when you want automatic loading on `cd`, or to
