@@ -487,10 +487,12 @@ mod tests {
         assert!(!is_interactive_check(false, false, false));
     }
 
+    #[cfg(unix)]
     fn set_mock_interactive(val: bool) {
         MOCK_INTERACTIVE.with(|c| c.set(Some(val)));
     }
 
+    #[cfg(unix)]
     #[allow(dead_code)]
     fn clear_mock_interactive() {
         MOCK_INTERACTIVE.with(|c| c.set(None));

@@ -1165,7 +1165,7 @@ impl ReviewedMigrations {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn set_test_reviewed_migrations_path(path: Option<PathBuf>) {
     TEST_REVIEWED_MIGRATIONS_PATH.with(|v| *v.borrow_mut() = path);
 }

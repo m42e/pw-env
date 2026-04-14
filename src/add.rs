@@ -253,7 +253,9 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Defaults, GpgConfig, LogConfig, OpConfig, UpdateConfig};
+    use crate::config::Config;
+    #[cfg(unix)]
+    use crate::config::{Defaults, GpgConfig, LogConfig, OpConfig, UpdateConfig};
     use tempfile::TempDir;
 
     #[test]

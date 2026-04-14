@@ -625,7 +625,7 @@ impl BwBackend {
     }
 
     /// Invalidate the folder ID cache (used in tests).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn invalidate_folder_cache() {
         *FOLDER_ID_CACHE.lock().unwrap() = None;
     }
@@ -644,12 +644,12 @@ impl BwBackend {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_test_sync_throttle_override(sync_throttle_secs: Option<u64>) {
         *SYNC_THROTTLE_OVERRIDE_SECS.lock().unwrap() = sync_throttle_secs;
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_test_prompt_unlock_password(password: Option<&str>) {
         TEST_PROMPT_UNLOCK_PASSWORD.with(|value| {
             *value.borrow_mut() = password.map(str::to_string);
