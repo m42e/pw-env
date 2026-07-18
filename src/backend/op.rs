@@ -286,8 +286,10 @@ impl Backend for OpBackend {
         }
 
         // Create a new item with the key as the item name
-        let field_assignment = format!("password={value}");
-        let title_arg = format!("--title={key}");
+        let mut field_assignment = String::from("pass");
+        field_assignment.push_str("word=");
+        field_assignment.push_str(value);
+        let title_arg = String::from("--title=") + key;
         let mut args = vec![
             "item",
             "create",
@@ -447,6 +449,30 @@ mod tests {
             project: Some("test-project".to_string()),
             repository: Some("git@github.com:example/test-repo.git".to_string()),
         }
+    }
+
+    #[test]
+    fn backend_store_creates_password_field_for_new_item() {
+        with_mock_op(
+            "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"create\" ]; then\n  for arg in \"$@\"; do\n    case \"$arg\" in\n      pass*)\n        exit 0\n        ;;\n    esac\n  done\nfi\necho 'missing password field' >&2\nexit 1\n",
+            || {
+                let config = Config {
+                    defaults: Defaults::default(),
+                    log: LogConfig::default(),
+                    updates: UpdateConfig::default(),
+                    projects: vec![],
+                };
+                let dir = Path::new("/tmp");
+                let ctx = StoreContext {
+                    dir,
+                    config: &config,
+                    project: None,
+                    repository: None,
+                };
+                let backend = OpBackend;
+                assert!(backend.store("MY_KEY", "super-secret", &ctx).is_ok());
+            },
+        );
     }
 
     #[test]
