@@ -30,22 +30,24 @@ pub struct SecretCacheKey {
 }
 
 impl SecretCacheKey {
+    /// Generate a cryptographically-secure fingerprint of this cache key.
+    /// The fingerprint includes a version marker to prevent collisions if
+    /// the structure of SecretCacheKey changes in the future.
     pub fn fingerprint(&self) -> String {
-        let serialized = serde_json::to_vec(self).unwrap_or_else(|_| {
-            format!(
-                "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-                self.env_path,
-                self.backend,
-                self.entry_key,
-                self.entry_kind,
-                self.raw_value,
-                self.project.as_deref().unwrap_or_default(),
-                self.repository.as_deref().unwrap_or_default(),
-                self.effective_item.as_deref().unwrap_or_default(),
-                self.backend_config,
-            )
-            .into_bytes()
-        });
+        // Explicit version marker prevents collisions if schema changes
+        let versioned_material = format!(
+            "v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            self.env_path,
+            self.backend,
+            self.entry_key,
+            self.entry_kind,
+            self.raw_value,
+            self.project.as_deref().unwrap_or_default(),
+            self.repository.as_deref().unwrap_or_default(),
+            self.effective_item.as_deref().unwrap_or_default(),
+            self.backend_config,
+        );
+        let serialized = versioned_material.into_bytes();
         let digest = Sha256::digest(serialized);
         digest.iter().map(|b| format!("{b:02x}")).collect()
     }

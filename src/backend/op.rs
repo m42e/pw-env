@@ -177,9 +177,16 @@ impl OpBackend {
             }
         }
 
-        bail!(
-            "Multiple 1Password items found for '{key}' but repository/project metadata did not disambiguate them"
+        let mut error_msg = format!(
+            "Multiple 1Password items found for '{key}' but metadata did not uniquely identify one"
         );
+        if repository.is_none() && project.is_none() {
+            error_msg.push_str(".\n\nTo disambiguate, add custom fields to your 1Password item:\n");
+            error_msg.push_str("  - 'repository': e.g., 'github.com/your-org/your-repo'\n");
+            error_msg.push_str("  - 'project': e.g., 'my-project'\n\n");
+            error_msg.push_str("These are auto-detected from your .git config and current directory.");
+        }
+        bail!("{}", error_msg);
     }
 }
 

@@ -10,6 +10,7 @@ mod progress;
 mod release;
 mod resolve;
 mod shell;
+mod signal_handler;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -186,6 +187,8 @@ enum ApprovalCommands {
 
 #[derive(Subcommand)]
 enum CacheCommands {
+    /// Display cache status and metrics
+    Status,
     /// Clear persisted Bitwarden metadata and resolved-secret cache state
     Clear,
 }
@@ -276,6 +279,9 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                     env_path.display()
                 );
             }
+
+            // Set up signal handlers to propagate signals to child process
+            signal_handler::setup_exec_signal_handlers();
 
             #[cfg(unix)]
             {
@@ -1076,6 +1082,52 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
 
 fn handle_cache(command: CacheCommands) -> Result<()> {
     match command {
+        CacheCommands::Status => {
+            let config = config::Config::load()?;
+            let cache_config = &config.defaults.cache;
+            
+            eprintln!("Cache Configuration:");
+            eprintln!(
+                "  Enabled: {}",
+                if cache_config.enabled { "yes" } else { "no" }
+            );
+            eprintln!("  TTL: {} hours", cache_config.ttl_hours);
+            
+            if let Some(index_path) = crate::cache::secret_cache_index_path() {
+                if index_path.exists() {
+                    if let Ok(metadata) = std::fs::metadata(&index_path) {
+                        if let Ok(modified) = metadata.modified() {
+                            let secs_ago = std::time::SystemTime::now()
+                                .duration_since(modified)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let hours_ago = secs_ago / 3600;
+                            let minutes_ago = (secs_ago % 3600) / 60;
+                            eprintln!(
+                                "  Cache index last modified: {} hours {} minutes ago",
+                                hours_ago, minutes_ago
+                            );
+                        }
+                    }
+                    
+                    // Try to read index and count entries
+                    if let Ok(contents) = std::fs::read_to_string(&index_path) {
+                        if let Ok(index_json) = serde_json::from_str::<serde_json::Value>(&contents) {
+                            if let Some(entries) = index_json.get("entries").and_then(|e| e.as_object()) {
+                                eprintln!("  Cached credentials: {}", entries.len());
+                            }
+                        }
+                    }
+                    eprintln!("  Index location: {}", index_path.display());
+                } else {
+                    eprintln!("  No cache file present");
+                }
+            }
+            
+            eprintln!();
+            eprintln!("Use 'pw-env cache --clear' to remove all cached data.");
+            Ok(())
+        }
         CacheCommands::Clear => {
             let folder_cache_path = backend::bw::BwBackend::folder_cache_path();
             let sync_state_path = backend::bw::BwBackend::sync_state_path();

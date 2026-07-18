@@ -179,6 +179,7 @@ pub fn is_safe_command_name(command: &str) -> bool {
 mod tests {
     use super::*;
 
+    // === POSIX Shell Escaping Tests ===
     #[test]
     fn test_shell_escape_simple() {
         assert_eq!(shell_escape_single_quote("hello"), "hello");
@@ -199,6 +200,58 @@ mod tests {
         assert_eq!(shell_escape_single_quote("say \"hello\""), "say \"hello\"");
     }
 
+    #[test]
+    fn test_shell_escape_multiple_quotes() {
+        assert_eq!(shell_escape_single_quote("it's don't"), "it'\\''s don'\\''t");
+    }
+
+    #[test]
+    fn test_shell_escape_with_backslash() {
+        assert_eq!(shell_escape_single_quote("path\\file"), "path\\file");
+    }
+
+    #[test]
+    fn test_shell_escape_with_dollar_sign() {
+        assert_eq!(shell_escape_single_quote("$HOME"), "$HOME");
+    }
+
+    #[test]
+    fn test_shell_escape_with_backtick() {
+        assert_eq!(shell_escape_single_quote("`whoami`"), "`whoami`");
+    }
+
+    #[test]
+    fn test_shell_escape_command_substitution() {
+        assert_eq!(shell_escape_single_quote("$(whoami)"), "$(whoami)");
+    }
+
+    #[test]
+    fn test_shell_escape_empty() {
+        assert_eq!(shell_escape_single_quote(""), "");
+    }
+
+    // === PowerShell Escaping Tests ===
+    #[test]
+    fn test_powershell_escape_simple() {
+        assert_eq!(powershell_escape_single_quote("hello"), "hello");
+    }
+
+    #[test]
+    fn test_powershell_escape_with_single_quote() {
+        assert_eq!(powershell_escape_single_quote("it's"), "it''s");
+    }
+
+    #[test]
+    fn test_powershell_escape_multiple_quotes() {
+        assert_eq!(powershell_escape_single_quote("it's don't"), "it''s don''t");
+    }
+
+    #[test]
+    fn test_powershell_escape_with_dollar() {
+        assert_eq!(powershell_escape_single_quote("$env:PATH"), "$env:PATH");
+    }
+
+    // === Export Formatting Tests ===
     #[test]
     fn test_format_exports_posix() {
         let mut vars = BTreeMap::new();
@@ -226,6 +279,26 @@ mod tests {
     }
 
     #[test]
+    fn test_format_exports_filters_invalid_keys() {
+        let mut vars = BTreeMap::new();
+        vars.insert("VALID_KEY".to_string(), "value1".to_string());
+        vars.insert("1INVALID".to_string(), "value2".to_string());
+        vars.insert("".to_string(), "value3".to_string());
+        let output = format_exports(&vars, ShellSyntax::Posix);
+        assert!(output.contains("VALID_KEY"));
+        assert!(!output.contains("1INVALID"));
+    }
+
+    #[test]
+    fn test_format_exports_complex_value() {
+        let mut vars = BTreeMap::new();
+        vars.insert("URL".to_string(), "https://user:pass@example.com:8080/path?query=1&other=2".to_string());
+        let output = format_exports(&vars, ShellSyntax::Posix);
+        assert!(output.contains("export URL='https://user:pass@example.com:8080/path?query=1&other=2'\n"));
+    }
+
+    // === Value Obfuscation Tests ===
+    #[test]
     fn test_obfuscate_value_long() {
         assert_eq!(obfuscate_value("abcdef"), "abc***");
     }
@@ -240,6 +313,17 @@ mod tests {
         assert_eq!(obfuscate_value("a😀bcdef"), "a😀b***");
     }
 
+    #[test]
+    fn test_obfuscate_value_single_char() {
+        assert_eq!(obfuscate_value("a"), "***");
+    }
+
+    #[test]
+    fn test_obfuscate_value_empty() {
+        assert_eq!(obfuscate_value(""), "***");
+    }
+
+    // === Environment Key Validation Tests ===
     #[test]
     fn test_valid_env_key() {
         assert!(is_valid_env_key("DATABASE_URL"));
