@@ -2176,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "pw-env"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "clap",
