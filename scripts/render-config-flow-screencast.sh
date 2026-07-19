@@ -198,41 +198,35 @@ Type "clear"
 Enter
 Show
 
-Type "pw-env --version"
-Enter
-Sleep 3s
-
-Type "cat ~/.config/pw-env/config.toml"
-Enter
-Sleep 4s
-
 Type "cd ~/demo-app"
 Enter
 Sleep 1500ms
 
-Type "cat .env"
+Type "pw-env check"
 Enter
 Sleep 4s
 
+Type "cat .env"
+Enter
+Sleep 3s
+
+Type "pw-env load ."
+Enter
+Sleep 5s
+
 Type "pw-env migrate ."
-Hide
 Enter
 Sleep 2s
 Enter
-Sleep 3s
-Type "clear"
-Enter
-Sleep 1500ms
-Show
-Sleep 1000ms
+Sleep 5s
 
 Type "cat .env"
 Enter
-Sleep 4s
-
-Type "ls -1a"
-Enter
 Sleep 3s
+
+Type "pw-env load ."
+Enter
+Sleep 5s
 
 Type "cd .."
 Enter
@@ -246,23 +240,15 @@ Type "cd ~/demo-app"
 Enter
 Sleep 3500ms
 
-Type "printenv DATABASE_URL"
+Type \`printf 'DATABASE_URL=%s\\n' "\$DATABASE_URL"\`
 Enter
-Sleep 3500ms
+Sleep 2500ms
 
-Type "printenv API_KEY"
+Type \`printf 'API_KEY=%s\\n' "\$API_KEY"\`
 Enter
-Sleep 3500ms
+Sleep 2500ms
 
-Type "cd nested"
-Enter
-Sleep 2000ms
-
-Type "printenv API_KEY"
-Enter
-Sleep 3500ms
-
-Type "cd ../.."
+Type "cd .."
 Enter
 Sleep 2000ms
 
