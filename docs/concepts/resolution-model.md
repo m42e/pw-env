@@ -62,3 +62,13 @@ That makes `pw-env load .` the best inspection command when a project is only pa
 
 When log file output is configured, successful credential fetches are written as `AUDIT credential_fetch ...` lines. The
 log includes the project, working directory, `.env` path, backend, and key name, but never the secret value itself.
+
+## Library and CLI boundary
+
+The reusable parsing and replacement implementation lives in the `pw-env-lib` package. Its `EnvFile` type parses and
+classifies `.env` entries, and `resolve_env_file` returns successfully resolved key-value pairs. The library does not
+read from a terminal or render progress output.
+
+The `pw-env` package remains the complete CLI. It owns shell syntax and hook generation, interactive migration and
+configuration workflows, approval prompts, Bitwarden password prompts, and progress display. Embedding applications
+can provide equivalent UI through the callback-based configuration and resolution APIs.

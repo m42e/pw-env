@@ -239,6 +239,7 @@ impl Backend for GpgBackend {
             config: ctx.config,
             project: None,
             repository: None,
+            interaction: None,
         };
         let mut existing = if path.exists() {
             Self::load_all_stored_secrets(&resolve_ctx).unwrap_or_default()
@@ -508,6 +509,7 @@ PLAIN=value
             config,
             project: None,
             repository: None,
+            interaction: None,
         }
     }
 

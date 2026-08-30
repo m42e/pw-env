@@ -207,7 +207,7 @@ impl SecretCacheIndex {
     }
 
     fn path() -> Option<PathBuf> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(path) = TEST_SECRET_CACHE_INDEX_PATH.with(|value| value.borrow().clone()) {
             return Some(path);
         }
@@ -257,7 +257,7 @@ enum KeyringAccess {
 }
 
 fn get_secret(fingerprint: &str) -> std::result::Result<Option<String>, KeyringAccess> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(value) = test_keyring_get(fingerprint) {
         return value;
     }
@@ -276,7 +276,7 @@ fn get_secret(fingerprint: &str) -> std::result::Result<Option<String>, KeyringA
 }
 
 fn set_secret(fingerprint: &str, value: &str) -> std::result::Result<(), KeyringAccess> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(result) = test_keyring_set(fingerprint, value) {
         return result;
     }
@@ -291,7 +291,7 @@ fn set_secret(fingerprint: &str, value: &str) -> std::result::Result<(), Keyring
 }
 
 fn delete_secret(fingerprint: &str) -> std::result::Result<bool, KeyringAccess> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(result) = test_keyring_delete(fingerprint) {
         return result;
     }
@@ -324,7 +324,7 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_SECRET_CACHE_INDEX_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
@@ -333,8 +333,8 @@ thread_local! {
 /// or the secret-cache index path.  All such tests must hold this lock for
 /// their entire duration so that `TEST_KEYRING` mutations are never
 /// interleaved across threads.
-#[cfg(test)]
-pub(crate) fn keyring_test_lock() -> &'static std::sync::Mutex<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn keyring_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
@@ -346,7 +346,7 @@ pub(crate) fn keyring_test_lock() -> &'static std::sync::Mutex<()> {
 /// without holding a shared lock, causing intermittent failures where a
 /// later test on a different thread didn't see values stored by an earlier
 /// test on its own thread.  A global mutex eliminates that class of race.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct TestKeyringGlobal {
     /// `None` means the test keyring is not active (fall through to real
     /// keyring); `true` = available, `false` = unavailable.
@@ -354,7 +354,7 @@ struct TestKeyringGlobal {
     values: BTreeMap<String, String>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_KEYRING: std::sync::LazyLock<std::sync::Mutex<TestKeyringGlobal>> =
     std::sync::LazyLock::new(|| {
         std::sync::Mutex::new(TestKeyringGlobal {
@@ -363,7 +363,7 @@ static TEST_KEYRING: std::sync::LazyLock<std::sync::Mutex<TestKeyringGlobal>> =
         })
     });
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_keyring_get(
     fingerprint: &str,
 ) -> Option<std::result::Result<Option<String>, KeyringAccess>> {
@@ -375,7 +375,7 @@ fn test_keyring_get(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_keyring_set(
     fingerprint: &str,
     value: &str,
@@ -393,7 +393,7 @@ fn test_keyring_set(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_keyring_delete(fingerprint: &str) -> Option<std::result::Result<bool, KeyringAccess>> {
     let mut guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
     match guard.active {
@@ -403,19 +403,19 @@ fn test_keyring_delete(fingerprint: &str) -> Option<std::result::Result<bool, Ke
     }
 }
 
-#[cfg(test)]
-pub(crate) fn set_test_secret_cache_index_path(path: Option<PathBuf>) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_secret_cache_index_path(path: Option<PathBuf>) {
     TEST_SECRET_CACHE_INDEX_PATH.with(|value| *value.borrow_mut() = path);
 }
 
-#[cfg(test)]
-pub(crate) fn set_test_keyring_available(available: bool) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_keyring_available(available: bool) {
     let mut guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
     guard.active = Some(available);
 }
 
-#[cfg(test)]
-pub(crate) fn reset_test_keyring() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_test_keyring() {
     let mut guard = TEST_KEYRING.lock().unwrap_or_else(|p| p.into_inner());
     guard.active = None;
     guard.values.clear();

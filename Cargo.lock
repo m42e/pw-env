@@ -2198,16 +2198,15 @@ dependencies = [
  "dirs",
  "flate2",
  "glob",
- "keyring",
  "mutants",
  "portable-pty",
+ "pw-env-lib",
  "ratatui",
  "reqwest",
  "self-replace",
  "semver",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tar",
  "tempfile",
  "toml",
@@ -2215,6 +2214,22 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "zip",
+]
+
+[[package]]
+name = "pw-env-lib"
+version = "0.3.12"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "keyring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

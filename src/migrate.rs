@@ -5,7 +5,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use tracing::{info, warn};
 
-use crate::backend::{self, ResolveContext, StoreContext};
+use crate::backend::{self, ResolutionInteraction, ResolveContext, StoreContext};
 use crate::config::Config;
 use crate::env_file::EnvFile;
 use crate::resolve;
@@ -18,7 +18,17 @@ thread_local! {
 
 /// Run the migration process: detect plaintext secrets in .env, offer to store them
 /// in the configured password backend, then rewrite .env to clear them.
+#[cfg(test)]
 pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> Result<()> {
+    migrate_with_interaction(dir, config, backend_override, None)
+}
+
+pub fn migrate_with_interaction(
+    dir: &Path,
+    config: &Config,
+    backend_override: Option<&str>,
+    interaction: Option<&dyn ResolutionInteraction>,
+) -> Result<()> {
     let effective_config = config_for_migration(config, dir, backend_override);
     let env_path =
         EnvFile::find_with_parents(dir, effective_config.effective_search_parent_env(dir))
@@ -88,6 +98,11 @@ pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> R
     Config::forget_reviewed_migration_entries(&env_path, selected_fingerprints)?;
 
     let backend = backend::create_backend(backend_name)?;
+    if backend_name == "bw"
+        && let Some(interaction) = interaction
+    {
+        backend::bw::BwBackend::ensure_unlocked_with(interaction)?;
+    }
     let project = resolve::detect_project_name(dir);
     let repository = resolve::detect_repository_remote(dir);
     let store_ctx = StoreContext {
@@ -101,6 +116,7 @@ pub fn migrate(dir: &Path, config: &Config, backend_override: Option<&str>) -> R
         config: &effective_config,
         project,
         repository,
+        interaction,
     };
     let mut migrated_keys: Vec<&str> = Vec::new();
 

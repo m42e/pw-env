@@ -26,6 +26,11 @@ jobs:
         id: version
         run: |
           version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          library_version=$(grep '^version' pw-env-lib/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$library_version" != "$version" ]; then
+            echo "::error::Library version $library_version does not match CLI version $version"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 

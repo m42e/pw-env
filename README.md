@@ -102,6 +102,23 @@ For local development, you can also run it directly with Cargo:
 cargo run -- --help
 ```
 
+## Rust library
+
+The reusable environment model is published as the `pw-env-lib` package. The original `pw-env` package remains the
+complete CLI, including shell hooks, shell export formatting, prompts, the migration workflow, and the interactive
+configuration wizard.
+
+Add the library package to a Rust application with:
+
+```toml
+pw-env-lib = "0.3"
+```
+
+Use `pw_env_lib::EnvFile` to parse and classify `.env` entries, and `pw_env_lib::resolve_env_file` to resolve them
+without terminal interaction. Applications that provide their own UI can use `Config::load_for_dir_with_approval`,
+`Config::ensure_secret_fetch_approved_with`, and `resolve_env_file_with_interaction` to supply approval, password, and
+progress callbacks.
+
 ## Mutation Testing
 
 Install cargo-mutants:

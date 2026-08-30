@@ -5,11 +5,10 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::backend::bw::BwBackend;
-use crate::backend::{self, ResolveContext};
+use crate::backend::{self, ResolutionInteraction, ResolveContext};
 use crate::cache::{SecretCacheKey, SecretValueCache};
 use crate::config::Config;
 use crate::env_file::{EntryKind, EnvEntry, EnvFile};
-use crate::progress::ActivitySpinner;
 
 /// Walk up from `dir` to find a `.git` directory, returning the containing folder.
 pub(crate) fn find_git_root(dir: &Path) -> Option<PathBuf> {
@@ -155,7 +154,7 @@ fn normalize_git_remote_url(url: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-pub(crate) fn detect_repository_remote(dir: &Path) -> Option<String> {
+pub fn detect_repository_remote(dir: &Path) -> Option<String> {
     let git_dir = find_git_dir(dir)?;
     let config_contents = std::fs::read_to_string(git_dir.join("config")).ok()?;
     let (remotes, branch_remotes) = parse_git_config(&config_contents);
@@ -268,6 +267,16 @@ pub fn resolve_env_file(
     config: &Config,
     dir: &Path,
 ) -> Result<BTreeMap<String, String>> {
+    resolve_env_file_with_interaction(env_file, config, dir, None)
+}
+
+/// Resolve all entries from an `.env` file with optional application-provided UI hooks.
+pub fn resolve_env_file_with_interaction(
+    env_file: &EnvFile,
+    config: &Config,
+    dir: &Path,
+    interaction: Option<&dyn ResolutionInteraction>,
+) -> Result<BTreeMap<String, String>> {
     let started_at = Instant::now();
     let mut resolved = BTreeMap::new();
     let mut bitwarden_duration_ms = 0u128;
@@ -302,6 +311,7 @@ pub fn resolve_env_file(
         config,
         project: project.clone(),
         repository: repository.clone(),
+        interaction,
     };
     let mut secret_cache = SecretValueCache::load(config.effective_cache(dir));
 
@@ -397,29 +407,23 @@ pub fn resolve_env_file(
                 })
                 .collect();
 
-            let step_label = format!(
-                "Bitwarden: resolving {} uncached entries",
-                uncached_bw_entries.len()
-            );
-            let mut spinner = ActivitySpinner::new(step_label);
-
+            let mut progress = ctx.interaction.map(|interaction| {
+                interaction.start_progress(&format!(
+                    "Bitwarden: resolving {} uncached entries",
+                    uncached_bw_entries.len()
+                ))
+            });
             let batch_results = BwBackend::resolve_batch(&batch_keys, &ctx);
 
-            for (idx, entry) in uncached_bw_entries.iter().enumerate() {
-                spinner.set_message(format!(
-                    "Bitwarden: resolving {} ({}/{})",
-                    entry.key,
-                    idx + 1,
-                    uncached_bw_entries.len()
-                ));
+            for entry in &uncached_bw_entries {
+                if let Some(progress) = progress.as_mut() {
+                    progress.set_message(&format!("Bitwarden: resolving {}", entry.key));
+                }
                 match batch_results.get(&entry.key) {
                     Some(Ok(value)) => {
-                        spinner.set_message(format!(
-                            "Bitwarden: resolved {} ({}/{})",
-                            entry.key,
-                            idx + 1,
-                            uncached_bw_entries.len()
-                        ));
+                        if let Some(progress) = progress.as_mut() {
+                            progress.set_message(&format!("Bitwarden: resolved {}", entry.key));
+                        }
                         info!("Resolved {} via Bitwarden", entry.key);
                         if let Some(cache_key) = bw_cache_keys.get(&entry.key) {
                             secret_cache.set(cache_key, value);
@@ -441,14 +445,16 @@ pub fn resolve_env_file(
                     }
                 }
             }
-            spinner.finish(format!(
-                "Bitwarden: resolved {}/{} uncached entries",
-                uncached_bw_entries
-                    .iter()
-                    .filter(|entry| resolved.contains_key(&entry.key))
-                    .count(),
-                uncached_bw_entries.len()
-            ));
+            if let Some(progress) = progress.as_mut() {
+                progress.finish(&format!(
+                    "Bitwarden: resolved {}/{} uncached entries",
+                    uncached_bw_entries
+                        .iter()
+                        .filter(|entry| resolved.contains_key(&entry.key))
+                        .count(),
+                    uncached_bw_entries.len()
+                ));
+            }
             bitwarden_duration_ms = bw_started_at.elapsed().as_millis();
         }
     }
@@ -1048,6 +1054,7 @@ branch "broken"]
             config: &op_config,
             project: Some("proj".to_string()),
             repository: Some("git@github.com:example/repo.git".to_string()),
+            interaction: None,
         };
         let op_key = build_secret_cache_key(Path::new("/tmp/.env"), &entry, "op", &op_ctx);
         assert_eq!(op_key.effective_item.as_deref(), Some("app-secrets"));
@@ -1066,6 +1073,7 @@ branch "broken"]
             config: &gpg_config,
             project: None,
             repository: None,
+            interaction: None,
         };
         let gpg_key = build_secret_cache_key(Path::new("/tmp/.env"), &entry, "gpg", &gpg_ctx);
         assert_eq!(gpg_key.effective_item, None);

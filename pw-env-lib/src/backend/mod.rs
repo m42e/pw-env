@@ -15,8 +15,8 @@ pub const REPOSITORY_FIELD_NAME: &str = "repository";
 /// Single shared mutex for all mock PATH manipulations in tests.
 /// All backend mock helpers (bw, gpg, op) must hold this lock while modifying PATH
 /// to prevent cross-module races when running tests in parallel.
-#[cfg(test)]
-pub(crate) static MOCK_PATH_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
+#[cfg(any(test, feature = "test-support"))]
+pub static MOCK_PATH_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// Context passed to backend operations for resolving secrets.
@@ -27,6 +27,8 @@ pub struct ResolveContext<'a> {
     pub project: Option<String>,
     /// Selected git remote URL for repository-aware disambiguation.
     pub repository: Option<String>,
+    /// Optional CLI-provided interaction implementation.
+    pub interaction: Option<&'a dyn ResolutionInteraction>,
 }
 
 /// Context passed to backend operations for storing secrets.
@@ -35,6 +37,28 @@ pub struct StoreContext<'a> {
     pub config: &'a Config,
     pub project: Option<String>,
     pub repository: Option<String>,
+}
+
+/// UI operations that may be needed while resolving or storing secrets.
+///
+/// The library never reads from a terminal or writes progress output itself.
+/// Applications such as the `pw-env` CLI can provide these operations when
+/// they want interactive Bitwarden unlocks and progress reporting.
+pub trait ResolutionInteraction {
+    /// Ask the caller for a Bitwarden master password.
+    fn prompt_bitwarden_password(&self) -> Result<String>;
+
+    /// Start a progress reporter for a long-running operation.
+    fn start_progress(&self, initial_message: &str) -> Box<dyn ProgressReporter>;
+}
+
+/// Progress output supplied by an embedding application.
+pub trait ProgressReporter {
+    /// Update the current operation message.
+    fn set_message(&mut self, message: &str);
+
+    /// Finish the current operation with a final message.
+    fn finish(&mut self, message: &str);
 }
 
 impl StoreContext<'_> {

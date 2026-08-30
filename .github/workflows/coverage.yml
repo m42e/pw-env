@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - src/**
+      - pw-env-lib/**
       - tests/**
       - Cargo.toml
       - Cargo.lock
   pull_request:
     paths:
       - src/**
+      - pw-env-lib/**
       - tests/**
       - Cargo.toml
       - Cargo.lock

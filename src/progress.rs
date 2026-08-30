@@ -112,6 +112,16 @@ impl Drop for ActivitySpinner {
     }
 }
 
+impl pw_env_lib::backend::ProgressReporter for ActivitySpinner {
+    fn set_message(&mut self, message: &str) {
+        ActivitySpinner::set_message(self, message.to_string());
+    }
+
+    fn finish(&mut self, message: &str) {
+        ActivitySpinner::finish(self, message.to_string());
+    }
+}
+
 fn terminal_output_coordinator() -> &'static TerminalOutputCoordinator {
     static COORDINATOR: OnceLock<TerminalOutputCoordinator> = OnceLock::new();
     COORDINATOR.get_or_init(TerminalOutputCoordinator::default)

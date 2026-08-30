@@ -1,15 +1,12 @@
 mod add;
-mod backend;
-mod cache;
-mod config;
 mod config_wizard;
-mod env_file;
 mod migrate;
 mod output;
 mod progress;
 mod release;
-mod resolve;
 mod shell;
+
+pub use pw_env_lib::{backend, cache, config, env_file, resolve};
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -17,7 +14,7 @@ use clap_complete::{Shell, generate};
 use glob::Pattern;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -26,6 +23,22 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use tracing::{debug, error, info};
+
+struct CliResolutionInteraction;
+
+impl backend::ResolutionInteraction for CliResolutionInteraction {
+    fn prompt_bitwarden_password(&self) -> Result<String> {
+        let _progress_suspension = progress::suspend_progress_output();
+        dialoguer::Password::new()
+            .with_prompt("Bitwarden master password")
+            .interact()
+            .context("Failed to read master password")
+    }
+
+    fn start_progress(&self, initial_message: &str) -> Box<dyn backend::ProgressReporter> {
+        Box::new(progress::ActivitySpinner::new(initial_message.to_string()))
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -227,7 +240,102 @@ fn load_config_for_command(command: &Commands) -> Result<config::Config> {
     }
 }
 
+fn load_config_for_dir(dir: &Path) -> Result<config::Config> {
+    config::Config::load_for_dir_with_approval(dir, prompt_project_override)
+}
+
+fn prompt_project_override(path: &Path, previously_approved: bool) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        let state = if previously_approved {
+            "changed since its last approval"
+        } else {
+            "has not been approved yet"
+        };
+        eprintln!(
+            "pw-env: project override {} {}. Skipping it until you approve the current file contents in an interactive session.",
+            path.display(),
+            state
+        );
+        return Ok(false);
+    }
+
+    eprintln!("Project override found: {}", path.display());
+    if previously_approved {
+        eprintln!("This file changed since the last approval.");
+    } else {
+        eprintln!("This file can override pw-env settings for the current project.");
+    }
+    eprint!("Approve loading this file? [y/N] ");
+    io::stderr().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let approved = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !approved {
+        eprintln!("Skipping project override: {}", path.display());
+    }
+    Ok(approved)
+}
+
+fn prompt_secret_fetch(
+    request: &config::SecretFetchApprovalRequest,
+) -> Result<Option<config::SecretFetchApprovalMode>> {
+    if !io::stdin().is_terminal() {
+        let state = if request.previously_approved {
+            "changed since its last approved .env contents"
+        } else {
+            "has not been approved yet"
+        };
+        anyhow::bail!(
+            "pw-env: credential fetching for project {} with {} {}. Re-run in an interactive session to approve this .env hash or allow the whole project.",
+            request.project_path.display(),
+            request.env_path.display(),
+            state,
+        );
+    }
+
+    eprintln!(
+        "Credential fetch approval required for project {}",
+        request.project_path.display()
+    );
+    eprintln!(".env file: {}", request.env_path.display());
+    if request.previously_approved {
+        eprintln!("This .env file changed since the last approved version.");
+    } else {
+        eprintln!(
+            "This .env file can trigger secret lookups from your configured password backend."
+        );
+    }
+    eprintln!(
+        "Approve the current .env hash only, or allow any future .env changes in this project."
+    );
+    eprint!("Approve secret fetching? [y] current hash / [a]ll project changes / [N] no ");
+    io::stderr().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(config::SecretFetchApprovalMode::CurrentEnvHash),
+        "a" | "all" | "always" => Some(config::SecretFetchApprovalMode::ProjectWide),
+        _ => None,
+    })
+}
+
+fn resolve_environment(
+    env_file: &env_file::EnvFile,
+    config: &config::Config,
+    dir: &Path,
+    interaction: Option<&dyn backend::ResolutionInteraction>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    if !env_file.resolvable_entries().is_empty() {
+        config::Config::ensure_secret_fetch_approved_with(&env_file.path, prompt_secret_fetch)?;
+    }
+    resolve::resolve_env_file_with_interaction(env_file, config, dir, interaction)
+}
+
 fn run(cli: Cli, config: config::Config) -> Result<()> {
+    let interaction = CliResolutionInteraction;
+
     match cli.command {
         Commands::Init { shell } => {
             print!("{}", shell::generate_hook(&shell));
@@ -240,7 +348,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             warn_missing,
         } => {
             let dir = resolve_dir(dir)?;
-            let config = config::Config::load_for_dir(&dir)?;
+            let config = load_config_for_dir(&dir)?;
             let mut command_iter = command.into_iter();
             let program = command_iter
                 .next()
@@ -259,7 +367,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                     .into_iter()
                     .map(|entry| entry.key.clone())
                     .collect::<Vec<_>>();
-                let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
+                let resolved = resolve_environment(&env_file, &config, &dir, Some(&interaction))?;
 
                 if should_warn_missing(warn_missing, config.effective_warn_missing(&dir)) {
                     emit_missing_entries_warning(&managed_keys, &resolved);
@@ -298,7 +406,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             warn_missing,
         } => {
             let dir = resolve_dir(dir)?;
-            let config = config::Config::load_for_dir(&dir)?;
+            let config = load_config_for_dir(&dir)?;
             let shell_syntax = match shell.as_str() {
                 "fish" => output::ShellSyntax::Fish,
                 "powershell" => output::ShellSyntax::PowerShell,
@@ -321,7 +429,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                 .into_iter()
                 .map(|e| e.key.clone())
                 .collect();
-            let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
+            let resolved = resolve_environment(&env_file, &config, &dir, Some(&interaction))?;
 
             if should_warn_missing(warn_missing, config.effective_warn_missing(&dir)) {
                 emit_missing_entries_warning(&resolvable_keys, &resolved);
@@ -381,15 +489,20 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
 
         Commands::Hook { dir, shell } => {
             let dir = resolve_dir(dir)?;
-            let config = config::Config::load_for_dir(&dir)?;
+            let config = load_config_for_dir(&dir)?;
             let shell_syntax = match shell.as_str() {
                 "fish" => output::ShellSyntax::Fish,
                 "powershell" => output::ShellSyntax::PowerShell,
                 _ => output::ShellSyntax::Posix,
             };
 
-            let hook_output =
-                build_hook_output(&dir, shell_syntax, &config, std::env::var_os("PATH"))?;
+            let hook_output = build_hook_output_with_interaction(
+                &dir,
+                shell_syntax,
+                &config,
+                std::env::var_os("PATH"),
+                Some(&interaction),
+            )?;
             print!("{hook_output}");
 
             Ok(())
@@ -397,7 +510,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
 
         Commands::Load { dir, reveal } => {
             let dir = resolve_dir(dir)?;
-            let config = config::Config::load_for_dir(&dir)?;
+            let config = load_config_for_dir(&dir)?;
             let env_path = find_env_path(&dir, &config)
                 .ok_or_else(|| anyhow::anyhow!("No .env file found in {}", dir.display()))?;
             let env_file = env_file::EnvFile::parse(&env_path)?;
@@ -439,7 +552,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                 .into_iter()
                 .map(|e| e.key.clone())
                 .collect();
-            let resolved = resolve::resolve_env_file(&env_file, &config, &dir)?;
+            let resolved = resolve_environment(&env_file, &config, &dir, Some(&interaction))?;
             eprintln!(
                 "Resolved {}/{} entries:",
                 resolved.len(),
@@ -488,19 +601,26 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             value,
         } => {
             let dir = resolve_dir(dir)?;
-            let config = config::Config::load_for_dir(&dir)?;
-            add::add_entry(&dir, &config, &key, value, backend.as_deref())
+            let config = load_config_for_dir(&dir)?;
+            add::add_entry_with_interaction(
+                &dir,
+                &config,
+                &key,
+                value,
+                backend.as_deref(),
+                Some(&interaction),
+            )
         }
 
         Commands::Migrate { dir, backend } => {
             let dir = resolve_dir(dir)?;
-            let config = config::Config::load_for_dir(&dir)?;
-            migrate::migrate(&dir, &config, backend.as_deref())
+            let config = load_config_for_dir(&dir)?;
+            migrate::migrate_with_interaction(&dir, &config, backend.as_deref(), Some(&interaction))
         }
 
         Commands::Check => {
             let dir = resolve_dir(None)?;
-            let config = config::Config::load_for_dir(&dir)?;
+            let config = load_config_for_dir(&dir)?;
             check_backends();
             eprintln!();
             check_config(&config, &dir);
@@ -634,11 +754,22 @@ fn resolve_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+#[cfg(test)]
 fn build_hook_output(
     dir: &Path,
     shell_syntax: output::ShellSyntax,
     config: &config::Config,
     path_var: Option<std::ffi::OsString>,
+) -> Result<String> {
+    build_hook_output_with_interaction(dir, shell_syntax, config, path_var, None)
+}
+
+fn build_hook_output_with_interaction(
+    dir: &Path,
+    shell_syntax: output::ShellSyntax,
+    config: &config::Config,
+    path_var: Option<std::ffi::OsString>,
+    interaction: Option<&dyn backend::ResolutionInteraction>,
 ) -> Result<String> {
     let env_path = match find_env_path(dir, config) {
         Some(path) => path,
@@ -666,7 +797,7 @@ fn build_hook_output(
 
     let env_file = env_file::EnvFile::parse(&env_path)?;
     emit_plaintext_secret_warning(&env_file)?;
-    let resolved = resolve::resolve_env_file(&env_file, config, dir)?;
+    let resolved = resolve_environment(&env_file, config, dir, interaction)?;
 
     if resolved.is_empty() {
         debug!("No variables resolved");
