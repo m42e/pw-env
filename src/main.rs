@@ -1504,11 +1504,12 @@ mod tests {
 
     #[test]
     fn cli_interaction_returns_configured_bitwarden_password() {
-        let interaction = CliResolutionInteraction::with_password("expected-password");
+        let expected_value = format!("test-value-{}", std::process::id());
+        let interaction = CliResolutionInteraction::with_password(&expected_value);
         let password = backend::ResolutionInteraction::prompt_bitwarden_password(&interaction)
             .expect("configured password should be returned");
 
-        assert_eq!(password, "expected-password");
+        assert_eq!(password, expected_value);
     }
 
     #[test]
