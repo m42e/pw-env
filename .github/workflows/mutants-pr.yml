@@ -76,7 +76,7 @@ jobs:
           git diff "$diff_base..HEAD" | tee git.diff
 
       - name: List mutations in diff
-        run: cargo mutants --list --in-diff git.diff
+        run: cargo mutants --workspace --list --in-diff git.diff
 
   incremental-mutants:
     name: Incremental Mutation Testing (Shard ${{ matrix.shard }}/4)
@@ -140,7 +140,7 @@ jobs:
           git diff "$diff_base..HEAD" | tee git.diff
 
       - name: Run incremental mutation tests
-        run: cargo mutants --no-shuffle -vV --baseline=skip --in-diff git.diff --shard ${{ matrix.shard }}/4
+        run: cargo mutants --workspace --no-shuffle -vV --baseline=skip --in-diff git.diff --shard ${{ matrix.shard }}/4
 
       - name: Upload mutants.out
         if: always()
