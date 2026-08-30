@@ -98,7 +98,7 @@ pub fn migrate_with_interaction(
     Config::forget_reviewed_migration_entries(&env_path, selected_fingerprints)?;
 
     let backend = backend::create_backend(backend_name)?;
-    if backend_name == "bw"
+    if uses_bitwarden_backend(backend_name)
         && let Some(interaction) = interaction
     {
         backend::bw::BwBackend::ensure_unlocked_with(interaction)?;
@@ -174,6 +174,10 @@ pub fn migrate_with_interaction(
     }
 
     Ok(())
+}
+
+fn uses_bitwarden_backend(backend_name: &str) -> bool {
+    backend_name == "bw"
 }
 
 fn config_for_migration(config: &Config, dir: &Path, backend_override: Option<&str>) -> Config {
@@ -267,6 +271,12 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn bitwarden_unlock_is_selected_only_for_bitwarden_backend() {
+        assert_eq!(uses_bitwarden_backend("bw"), true);
+        assert_eq!(uses_bitwarden_backend("gpg"), false);
+    }
 
     #[test]
     fn mask_value_returns_stars_for_short_values() {

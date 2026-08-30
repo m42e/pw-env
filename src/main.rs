@@ -24,10 +24,40 @@ use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use tracing::{debug, error, info};
 
-struct CliResolutionInteraction;
+#[cfg(test)]
+use std::cell::{Cell, RefCell};
+
+#[cfg(test)]
+thread_local! {
+    static MOCK_PROMPT_TERMINAL: Cell<Option<bool>> = const { Cell::new(None) };
+    static MOCK_PROMPT_INPUT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+struct CliResolutionInteraction {
+    password_override: Option<String>,
+}
+
+impl CliResolutionInteraction {
+    fn new() -> Self {
+        Self {
+            password_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_password(password: &str) -> Self {
+        Self {
+            password_override: Some(password.to_string()),
+        }
+    }
+}
 
 impl backend::ResolutionInteraction for CliResolutionInteraction {
     fn prompt_bitwarden_password(&self) -> Result<String> {
+        if let Some(password) = &self.password_override {
+            return Ok(password.clone());
+        }
+
         let _progress_suspension = progress::suspend_progress_output();
         dialoguer::Password::new()
             .with_prompt("Bitwarden master password")
@@ -244,8 +274,28 @@ fn load_config_for_dir(dir: &Path) -> Result<config::Config> {
     config::Config::load_for_dir_with_approval(dir, prompt_project_override)
 }
 
+fn prompt_stdin_is_terminal() -> bool {
+    #[cfg(test)]
+    if let Some(value) = MOCK_PROMPT_TERMINAL.with(Cell::get) {
+        return value;
+    }
+
+    io::stdin().is_terminal()
+}
+
+fn read_prompt_line() -> Result<String> {
+    #[cfg(test)]
+    if let Some(input) = MOCK_PROMPT_INPUT.with(|value| value.borrow_mut().take()) {
+        return Ok(input);
+    }
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input)
+}
+
 fn prompt_project_override(path: &Path, previously_approved: bool) -> Result<bool> {
-    if !io::stdin().is_terminal() {
+    if !prompt_stdin_is_terminal() {
         let state = if previously_approved {
             "changed since its last approval"
         } else {
@@ -268,19 +318,19 @@ fn prompt_project_override(path: &Path, previously_approved: bool) -> Result<boo
     eprint!("Approve loading this file? [y/N] ");
     io::stderr().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    let input = read_prompt_line()?;
     let approved = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
     if !approved {
         eprintln!("Skipping project override: {}", path.display());
+        return Ok(false);
     }
-    Ok(approved)
+    Ok(true)
 }
 
 fn prompt_secret_fetch(
     request: &config::SecretFetchApprovalRequest,
 ) -> Result<Option<config::SecretFetchApprovalMode>> {
-    if !io::stdin().is_terminal() {
+    if !prompt_stdin_is_terminal() {
         let state = if request.previously_approved {
             "changed since its last approved .env contents"
         } else {
@@ -312,8 +362,7 @@ fn prompt_secret_fetch(
     eprint!("Approve secret fetching? [y] current hash / [a]ll project changes / [N] no ");
     io::stderr().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    let input = read_prompt_line()?;
     Ok(match input.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(config::SecretFetchApprovalMode::CurrentEnvHash),
         "a" | "all" | "always" => Some(config::SecretFetchApprovalMode::ProjectWide),
@@ -334,7 +383,7 @@ fn resolve_environment(
 }
 
 fn run(cli: Cli, config: config::Config) -> Result<()> {
-    let interaction = CliResolutionInteraction;
+    let interaction = CliResolutionInteraction::new();
 
     match cli.command {
         Commands::Init { shell } => {
@@ -1435,6 +1484,98 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
+
+    fn with_mock_prompt_io<T>(terminal: bool, input: &str, f: impl FnOnce() -> T) -> T {
+        MOCK_PROMPT_TERMINAL.with(|value| value.set(Some(terminal)));
+        MOCK_PROMPT_INPUT.with(|value| *value.borrow_mut() = Some(input.to_string()));
+        let result = f();
+        MOCK_PROMPT_TERMINAL.with(|value| value.set(None));
+        MOCK_PROMPT_INPUT.with(|value| value.borrow_mut().take());
+        result
+    }
+
+    fn test_secret_fetch_request() -> config::SecretFetchApprovalRequest {
+        config::SecretFetchApprovalRequest {
+            project_path: PathBuf::from("/tmp/project"),
+            env_path: PathBuf::from("/tmp/project/.env"),
+            previously_approved: false,
+        }
+    }
+
+    #[test]
+    fn cli_interaction_returns_configured_bitwarden_password() {
+        let interaction = CliResolutionInteraction::with_password("expected-password");
+        let password = backend::ResolutionInteraction::prompt_bitwarden_password(&interaction)
+            .expect("configured password should be returned");
+
+        assert_eq!(password, "expected-password");
+    }
+
+    #[test]
+    fn project_override_prompt_denies_noninteractive_input() {
+        let result = with_mock_prompt_io(false, "y\n", || {
+            prompt_project_override(Path::new("/tmp/.pw-env.toml"), false)
+        });
+
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[test]
+    fn project_override_prompt_accepts_yes() {
+        let result = with_mock_prompt_io(true, "yes\n", || {
+            prompt_project_override(Path::new("/tmp/.pw-env.toml"), false)
+        });
+
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn project_override_prompt_rejects_no() {
+        let result = with_mock_prompt_io(true, "n\n", || {
+            prompt_project_override(Path::new("/tmp/.pw-env.toml"), true)
+        });
+
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[test]
+    fn secret_fetch_prompt_requires_interactive_terminal() {
+        let request = test_secret_fetch_request();
+        let result = with_mock_prompt_io(false, "y\n", || prompt_secret_fetch(&request));
+
+        let error = result.expect_err("noninteractive approval must fail");
+        assert!(error.to_string().contains("interactive"));
+    }
+
+    #[test]
+    fn secret_fetch_prompt_returns_current_hash_mode_for_yes() {
+        let request = test_secret_fetch_request();
+        let result = with_mock_prompt_io(true, "y\n", || prompt_secret_fetch(&request));
+
+        assert_eq!(
+            result.unwrap(),
+            Some(config::SecretFetchApprovalMode::CurrentEnvHash)
+        );
+    }
+
+    #[test]
+    fn secret_fetch_prompt_returns_project_wide_mode_for_all() {
+        let request = test_secret_fetch_request();
+        let result = with_mock_prompt_io(true, "a\n", || prompt_secret_fetch(&request));
+
+        assert_eq!(
+            result.unwrap(),
+            Some(config::SecretFetchApprovalMode::ProjectWide)
+        );
+    }
+
+    #[test]
+    fn secret_fetch_prompt_returns_none_for_other_answers() {
+        let request = test_secret_fetch_request();
+        let result = with_mock_prompt_io(true, "n\n", || prompt_secret_fetch(&request));
+
+        assert_eq!(result.unwrap(), None);
+    }
 
     #[test]
     fn should_warn_missing_truth_table() {

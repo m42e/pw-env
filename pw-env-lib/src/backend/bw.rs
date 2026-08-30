@@ -1472,6 +1472,32 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
+    struct TestProgressReporter;
+
+    impl super::super::ProgressReporter for TestProgressReporter {
+        fn set_message(&mut self, _message: &str) {}
+
+        fn finish(&mut self, _message: &str) {}
+    }
+
+    struct RecordingInteraction {
+        prompt_count: Cell<usize>,
+    }
+
+    impl super::super::ResolutionInteraction for RecordingInteraction {
+        fn prompt_bitwarden_password(&self) -> Result<String> {
+            self.prompt_count.set(self.prompt_count.get() + 1);
+            Ok("expected-password".to_string())
+        }
+
+        fn start_progress(
+            &self,
+            _initial_message: &str,
+        ) -> Box<dyn super::super::ProgressReporter> {
+            Box::new(TestProgressReporter)
+        }
+    }
+
     fn capture_debug_output(f: impl FnOnce()) -> String {
         struct BufWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -1893,6 +1919,39 @@ mod tests {
             let log = std::fs::read_to_string(&call_log).unwrap();
             assert!(log.lines().any(|line| line == "sync"));
         });
+    }
+
+    #[test]
+    fn ensure_unlocked_with_uses_application_interaction() {
+        let interaction = RecordingInteraction {
+            prompt_count: Cell::new(0),
+        };
+        let script = r#"#!/bin/sh
+if [ "$1" = "status" ]; then
+    echo '{"status":"locked"}'
+    exit 0
+fi
+if [ "$1" = "unlock" ]; then
+    if [ "$BW_MASTER_PW" != "expected-password" ]; then
+        exit 1
+    fi
+    echo 'new-session'
+    exit 0
+fi
+if [ "$1" = "sync" ]; then
+    exit 0
+fi
+exit 1
+"#;
+
+        with_mock_bw(script, || {
+            // SAFETY: with_mock_bw serializes environment changes.
+            unsafe { std::env::remove_var("BW_SESSION") };
+            BwBackend::ensure_unlocked_with(&interaction)
+                .expect("application interaction should unlock Bitwarden");
+        });
+
+        assert_eq!(interaction.prompt_count.get(), 1);
     }
 
     #[test]
@@ -2887,7 +2946,7 @@ mod tests {
                 repository: None,
             };
             let result = BwBackend.store("NEW_KEY", "new-value", &ctx);
-            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+            assert!(result.is_ok());
         });
     }
 
@@ -2970,7 +3029,7 @@ mod tests {
                 repository: None,
             };
             let result = BwBackend.store("MY_KEY", "my-value", &ctx);
-            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+            assert!(result.is_ok());
         });
     }
     #[test]

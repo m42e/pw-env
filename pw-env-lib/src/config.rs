@@ -2306,6 +2306,56 @@ backend = "op"
     }
 
     #[test]
+    fn config_load_for_dir_reads_global_config_values() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let test_dir = unique_test_dir("load-for-dir-config");
+        let config_dir = test_dir.join("config");
+        fs::create_dir_all(config_dir.join("pw-env")).unwrap();
+        fs::write(
+            config_dir.join("pw-env").join("config.toml"),
+            "[defaults]\nbackend = \"gpg\"\n",
+        )
+        .unwrap();
+
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let result = Config::load_for_dir(&test_dir);
+        match old_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert_eq!(result.unwrap().defaults.backend, "gpg");
+    }
+
+    #[test]
+    fn config_load_for_dir_with_approval_applies_local_override() {
+        let test_dir = unique_test_dir("load-for-dir-approved");
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(
+            test_dir.join(PROJECT_OVERRIDE_FILE_NAME),
+            "backend = \"gpg\"\n",
+        )
+        .unwrap();
+
+        let mut callback_calls = 0;
+        let result = Config::load_for_dir_with_approval(&test_dir, |path, changed| {
+            callback_calls += 1;
+            assert_eq!(path, &test_dir.join(PROJECT_OVERRIDE_FILE_NAME));
+            assert_eq!(changed, false);
+            Ok(true)
+        });
+        let _ = fs::remove_dir_all(&test_dir);
+
+        let config = result.unwrap();
+        assert_eq!(callback_calls, 1);
+        assert_eq!(config.effective_backend(&test_dir), "gpg");
+    }
+
+    #[test]
     fn test_find_git_root_in_config_module() {
         let test_dir = unique_test_dir("find-git-root-config");
         let repo_dir = test_dir.join("repo");
@@ -2855,7 +2905,8 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
 
-        let result = Config::ensure_secret_fetch_approved_with(&env_path, |_| {
+        let result = Config::ensure_secret_fetch_approved_with(&env_path, |request| {
+            assert_eq!(request.previously_approved, false);
             Ok(Some(SecretFetchApprovalMode::CurrentEnvHash))
         });
         let _ = fs::remove_dir_all(&test_dir);

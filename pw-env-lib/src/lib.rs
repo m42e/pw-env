@@ -36,3 +36,27 @@ pub mod test_support {
         crate::backend::bw::BwBackend::set_test_sync_state_path(path);
     }
 }
+
+#[cfg(all(test, feature = "test-support"))]
+mod test_support_tests {
+    use super::*;
+
+    #[test]
+    fn test_support_path_setters_update_bitwarden_paths() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let folder_path = temp_dir.path().join("folder-cache.json");
+        let sync_path = temp_dir.path().join("sync-state.json");
+
+        test_support::set_test_folder_cache_path(Some(folder_path.clone()));
+        test_support::set_test_sync_state_path(Some(sync_path.clone()));
+
+        assert_eq!(
+            backend::bw::BwBackend::folder_cache_path(),
+            Some(folder_path)
+        );
+        assert_eq!(backend::bw::BwBackend::sync_state_path(), Some(sync_path));
+
+        test_support::set_test_folder_cache_path(None);
+        test_support::set_test_sync_state_path(None);
+    }
+}
