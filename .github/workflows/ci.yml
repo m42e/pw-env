@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - src/**
+      - pw-env-lib/**
       - Cargo.toml
       - Cargo.lock
 

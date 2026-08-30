@@ -21,8 +21,8 @@ You can also run the same workflow from the GitHub Actions UI.
 
 2. Review the generated release PR.
 
-The workflow creates branch `release/v0.1.1`, updates `Cargo.toml`, refreshes `Cargo.lock` when needed, generates
-`release-notes/v0.1.1.md`, refreshes `docs/pw-env-config-init-migrate-auto-load.gif`, and opens PR `Release v0.1.1`
+The workflow creates branch `release/v0.1.1`, updates `Cargo.toml` and `pw-env-lib/Cargo.toml`, refreshes `Cargo.lock`
+when needed, generates `release-notes/v0.1.1.md`, refreshes `docs/pw-env-config-init-migrate-auto-load.gif`, and opens PR `Release v0.1.1`
 labeled `release`.
 
 If you close that PR without merging it, the `release/v0.1.1` branch is removed automatically.
@@ -42,12 +42,14 @@ annotated tag `v0.1.1`, and dispatches `.github/workflows/release.yml`.
 - `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
 
+The publish job publishes `pw-env-lib` before `pw-env`, because the CLI depends on the library package.
+
 The workflow then generates release notes, creates the GitHub release, and uploads the build artifacts.
 
 5. Confirm the release output.
 
-Verify that the GitHub release title is `v0.1.1`, the crate version in `Cargo.toml` matches `0.1.1`, and the expected
-artifacts are attached to the release.
+Verify that the GitHub release title is `v0.1.1`, both crate manifests match `0.1.1`, and the expected artifacts are
+attached to the release.
 
 ## Manual Fallback
 

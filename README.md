@@ -102,6 +102,23 @@ For local development, you can also run it directly with Cargo:
 cargo run -- --help
 ```
 
+## Rust library
+
+The reusable environment model is published as the `pw-env-lib` package. The original `pw-env` package remains the
+complete CLI, including shell hooks, shell export formatting, prompts, the migration workflow, and the interactive
+configuration wizard.
+
+Add the library package to a Rust application with:
+
+```toml
+pw-env-lib = "0.3"
+```
+
+Use `pw_env_lib::EnvFile` to parse and classify `.env` entries, and `pw_env_lib::resolve_env_file` to resolve them
+without terminal interaction. Applications that provide their own UI can use `Config::load_for_dir_with_approval`,
+`Config::ensure_secret_fetch_approved_with`, and `resolve_env_file_with_interaction` to supply approval, password, and
+progress callbacks.
+
 ## Mutation Testing
 
 Install cargo-mutants:
@@ -110,7 +127,8 @@ Install cargo-mutants:
 cargo install --locked cargo-mutants
 ```
 
-This repository includes `.cargo/mutants.toml` and a dedicated `mutants` Cargo profile to speed up runs:
+This repository includes `.cargo/mutants.toml` and a dedicated `mutants` Cargo profile to speed up runs. Mutation
+commands use Cargo's workspace mode so both `pw-env` and `pw-env-lib` are tested:
 
 - uses a `mutants` profile without debug symbols
 - skips doctests by passing `--all-targets`
@@ -119,13 +137,13 @@ This repository includes `.cargo/mutants.toml` and a dedicated `mutants` Cargo p
 Run mutation tests with:
 
 ```bash
-cargo mutants
+cargo mutants --workspace
 ```
 
 Run a specific shard (for example shard 0 out of 8) with:
 
 ```bash
-cargo mutants --no-shuffle -vV --baseline=skip --shard 0/8
+cargo mutants --workspace --no-shuffle -vV --baseline=skip --shard 0/8
 ```
 
 CI uses this same sharding approach in [`.github/workflows/mutants.yml`](.github/workflows/mutants.yml) and
@@ -135,7 +153,7 @@ On macOS, you can experiment with a RAM-backed temp directory for additional spe
 
 ```bash
 mkdir -p /tmp/pw-env-mutants
-TMPDIR=/tmp/pw-env-mutants cargo mutants -j2
+TMPDIR=/tmp/pw-env-mutants cargo mutants --workspace -j2
 ```
 
 Tune `-j` conservatively. Start with `-j2` and increase only if your machine has enough CPU, RAM, and disk bandwidth.

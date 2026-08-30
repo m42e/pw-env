@@ -112,6 +112,16 @@ impl Drop for ActivitySpinner {
     }
 }
 
+impl pw_env_lib::backend::ProgressReporter for ActivitySpinner {
+    fn set_message(&mut self, message: &str) {
+        ActivitySpinner::set_message(self, message.to_string());
+    }
+
+    fn finish(&mut self, message: &str) {
+        ActivitySpinner::finish(self, message.to_string());
+    }
+}
+
 fn terminal_output_coordinator() -> &'static TerminalOutputCoordinator {
     static COORDINATOR: OnceLock<TerminalOutputCoordinator> = OnceLock::new();
     COORDINATOR.get_or_init(TerminalOutputCoordinator::default)
@@ -391,6 +401,22 @@ mod tests {
     }
 
     #[test]
+    fn progress_reporter_set_message_delegates_to_spinner() {
+        let _test_guard = test_mutex()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let (mut spinner, probe_rx) = spinner_with_probe();
+        let reporter: &mut dyn pw_env_lib::backend::ProgressReporter = &mut spinner;
+        reporter.set_message("trait update");
+
+        match probe_rx.recv_timeout(Duration::from_millis(250)).unwrap() {
+            SpinnerCommand::UpdateMessage(message) => assert_eq!(message, "trait update"),
+            _ => panic!("expected update message command"),
+        }
+    }
+
+    #[test]
     fn activity_spinner_finish_sends_finish_command_and_stops() {
         let _test_guard = test_mutex()
             .lock()
@@ -401,6 +427,24 @@ mod tests {
 
         match probe_rx.recv_timeout(Duration::from_millis(250)).unwrap() {
             SpinnerCommand::Finish(message) => assert_eq!(message, "done"),
+            _ => panic!("expected finish command"),
+        }
+
+        assert!(spinner.state.is_none());
+    }
+
+    #[test]
+    fn progress_reporter_finish_delegates_to_spinner() {
+        let _test_guard = test_mutex()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let (mut spinner, probe_rx) = spinner_with_probe();
+        let reporter: &mut dyn pw_env_lib::backend::ProgressReporter = &mut spinner;
+        reporter.finish("trait done");
+
+        match probe_rx.recv_timeout(Duration::from_millis(250)).unwrap() {
+            SpinnerCommand::Finish(message) => assert_eq!(message, "trait done"),
             _ => panic!("expected finish command"),
         }
 

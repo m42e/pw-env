@@ -53,6 +53,7 @@ export default defineConfig({
         items: [
           { text: "CLI", link: "/reference/cli" },
           { text: "Configuration file", link: "/reference/configuration-file" },
+          { text: "Library API", link: "/reference/library-api" },
         ],
       },
       {

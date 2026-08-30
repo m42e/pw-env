@@ -448,6 +448,7 @@ mod tests {
             config,
             project: Some("test-project".to_string()),
             repository: Some("git@github.com:example/test-repo.git".to_string()),
+            interaction: None,
         }
     }
 
@@ -868,6 +869,7 @@ mod tests {
                 config: &config,
                 project: None,
                 repository: Some("git@github.com:example/test-repo.git".to_string()),
+                interaction: None,
             };
             let result = OpBackend.resolve("MY_KEY", None, &ctx);
             assert_eq!(result.unwrap(), "resolved-value");
@@ -958,6 +960,7 @@ mod tests {
                 config: &config,
                 project: None,
                 repository: Some("git@github.com:example/test-repo.git".to_string()),
+                interaction: None,
             };
             let result = OpBackend.resolve("MY_KEY", None, &ctx);
             assert_eq!(result.unwrap(), "resolved-value");

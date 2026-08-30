@@ -9,9 +9,8 @@ use tracing::{debug, info, trace, warn};
 
 use super::{
     Backend, CREATED_WITH_FIELD_NAME, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME,
-    REPOSITORY_FIELD_NAME, ResolveContext, StoreContext,
+    REPOSITORY_FIELD_NAME, ResolutionInteraction, ResolveContext, StoreContext,
 };
-use crate::progress::suspend_progress_output;
 
 /// Cached BW_SESSION key. `None` means not yet determined.
 static SESSION: Mutex<Option<String>> = Mutex::new(None);
@@ -36,7 +35,7 @@ struct SyncStateStore {
     last_sync_unix_secs: Option<u64>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_FOLDER_CACHE_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     static TEST_SYNC_STATE_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
@@ -116,7 +115,7 @@ impl FolderIdCacheStore {
     }
 
     fn path() -> Option<PathBuf> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(path) = TEST_FOLDER_CACHE_PATH.with(|value| value.borrow().clone()) {
             return Some(path);
         }
@@ -171,7 +170,7 @@ impl SyncStateStore {
     }
 
     fn path() -> Option<PathBuf> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(path) = TEST_SYNC_STATE_PATH.with(|value| value.borrow().clone()) {
             return Some(path);
         }
@@ -351,7 +350,12 @@ impl BwBackend {
     ///    - *unauthenticated* → fail fast, ask user to `bw login`.
     ///    - *locked*          → interactively prompt `bw unlock` and cache the key.
     ///    - *unlocked*        → proceed without a session key.
+    #[cfg(test)]
     fn ensure_session() -> Result<String> {
+        Self::ensure_session_with(None)
+    }
+
+    fn ensure_session_with(interaction: Option<&dyn ResolutionInteraction>) -> Result<String> {
         let mut guard = SESSION.lock().unwrap();
         if let Some(ref session) = *guard {
             trace!("Reusing cached Bitwarden session");
@@ -366,7 +370,7 @@ impl BwBackend {
                 info!("Using BW_SESSION from environment");
                 *guard = Some(session.clone());
                 drop(guard);
-                Self::sync_vault();
+                Self::sync_vault_with(interaction);
                 return Ok(session);
             }
             debug!("BW_SESSION is set but empty, falling back to bw status");
@@ -399,10 +403,10 @@ impl BwBackend {
                 bail!("Not logged in to Bitwarden. Please log in first:\n\n  bw login\n");
             }
             "locked" => {
-                let session = Self::prompt_unlock()?;
+                let session = Self::prompt_unlock_with(interaction)?;
                 *guard = Some(session.clone());
                 drop(guard);
-                Self::sync_vault();
+                Self::sync_vault_with(interaction);
                 Ok(session)
             }
             "unlocked" => {
@@ -410,7 +414,7 @@ impl BwBackend {
                 let session = String::new();
                 *guard = Some(session.clone());
                 drop(guard);
-                Self::sync_vault();
+                Self::sync_vault_with(interaction);
                 Ok(session)
             }
             other => {
@@ -419,18 +423,28 @@ impl BwBackend {
         }
     }
 
+    /// Ensure Bitwarden is ready for an interactive CLI operation.
+    pub fn ensure_unlocked_with(interaction: &dyn ResolutionInteraction) -> Result<()> {
+        Self::ensure_session_with(Some(interaction)).map(|_| ())
+    }
+
     /// Sync the Bitwarden vault to ensure the local cache is up to date.
     /// Logs a warning on failure but does not abort — a stale cache is
     /// better than blocking the entire workflow.
+    #[cfg(test)]
     fn sync_vault() {
-        Self::sync_vault_with_mode(false);
+        Self::sync_vault_with(None);
     }
 
-    fn force_sync_vault() {
-        Self::sync_vault_with_mode(true);
+    fn sync_vault_with(interaction: Option<&dyn ResolutionInteraction>) {
+        Self::sync_vault_with_mode(false, interaction);
     }
 
-    fn sync_vault_with_mode(force: bool) {
+    fn force_sync_vault_with(interaction: Option<&dyn ResolutionInteraction>) {
+        Self::sync_vault_with_mode(true, interaction);
+    }
+
+    fn sync_vault_with_mode(force: bool, interaction: Option<&dyn ResolutionInteraction>) {
         let sync_throttle_secs = Self::effective_sync_throttle_secs();
         if !force {
             match SyncStateStore::load() {
@@ -458,7 +472,7 @@ impl BwBackend {
         }
 
         debug!("Syncing Bitwarden vault");
-        match Self::run_bw(&["sync"]) {
+        match Self::run_bw_with(&["sync"], interaction) {
             Ok(_) => {
                 info!("Bitwarden vault synced");
                 if let Some(now) = Self::current_unix_secs()
@@ -476,7 +490,11 @@ impl BwBackend {
 
     /// Create a pre-configured `bw` [`Command`] with the session key set.
     fn bw_command() -> Result<Command> {
-        let session = Self::ensure_session()?;
+        Self::bw_command_with(None)
+    }
+
+    fn bw_command_with(interaction: Option<&dyn ResolutionInteraction>) -> Result<Command> {
+        let session = Self::ensure_session_with(interaction)?;
         let mut cmd = Command::new("bw");
         if !session.is_empty() {
             trace!("Injecting BW_SESSION into command environment");
@@ -487,10 +505,14 @@ impl BwBackend {
 
     /// Prompt the user for their master password and unlock the vault.
     ///
-    /// Uses `dialoguer` for the password prompt (no ANSI escape leakage)
-    /// and passes the password to `bw unlock` via `--passwordenv` so the
-    /// child process never writes interactive escape codes.
+    /// Uses an application-provided password and passes it to `bw unlock` via
+    /// `--passwordenv` so the child process never writes interactive escape codes.
+    #[cfg(test)]
     fn prompt_unlock() -> Result<String> {
+        Self::prompt_unlock_with(None)
+    }
+
+    fn prompt_unlock_with(interaction: Option<&dyn ResolutionInteraction>) -> Result<String> {
         info!("Bitwarden vault is locked, prompting for unlock");
         let password = {
             #[cfg(test)]
@@ -498,19 +520,21 @@ impl BwBackend {
             {
                 password
             } else {
-                let _progress_suspension = suspend_progress_output();
-                dialoguer::Password::new()
-                    .with_prompt("Bitwarden master password")
-                    .interact()
-                    .context("Failed to read master password")?
+                let interaction = interaction.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Bitwarden vault is locked; set BW_SESSION or provide a CLI interaction"
+                    )
+                })?;
+                interaction.prompt_bitwarden_password()?
             }
             #[cfg(not(test))]
             {
-                let _progress_suspension = suspend_progress_output();
-                dialoguer::Password::new()
-                    .with_prompt("Bitwarden master password")
-                    .interact()
-                    .context("Failed to read master password")?
+                let interaction = interaction.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Bitwarden vault is locked; set BW_SESSION or provide a CLI interaction"
+                    )
+                })?;
+                interaction.prompt_bitwarden_password()?
             }
         };
 
@@ -564,6 +588,13 @@ impl BwBackend {
 
     /// Resolve a Bitwarden folder name to its UUID, using an in-process cache.
     fn resolve_folder_id(folder_name: &str) -> Result<Option<String>> {
+        Self::resolve_folder_id_with(folder_name, None)
+    }
+
+    fn resolve_folder_id_with(
+        folder_name: &str,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<Option<String>> {
         {
             let mut guard = FOLDER_ID_CACHE.lock().unwrap();
             if guard.is_none() {
@@ -593,7 +624,8 @@ impl BwBackend {
         }
 
         debug!(folder_name, "Looking up Bitwarden folder ID");
-        let folders_json = Self::run_bw(&["list", "folders", "--search", folder_name])?;
+        let folders_json =
+            Self::run_bw_with(&["list", "folders", "--search", folder_name], interaction)?;
         let folders: serde_json::Value = serde_json::from_str(&folders_json)?;
         if let Some(folder_arr) = folders.as_array() {
             // --search is a fuzzy/substring match; find the exact name match
@@ -630,15 +662,15 @@ impl BwBackend {
         *FOLDER_ID_CACHE.lock().unwrap() = None;
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_test_folder_cache_path(path: Option<PathBuf>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_test_folder_cache_path(path: Option<PathBuf>) {
         TEST_FOLDER_CACHE_PATH.with(|value| {
             *value.borrow_mut() = path;
         });
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_test_sync_state_path(path: Option<PathBuf>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_test_sync_state_path(path: Option<PathBuf>) {
         TEST_SYNC_STATE_PATH.with(|value| {
             *value.borrow_mut() = path;
         });
@@ -657,7 +689,14 @@ impl BwBackend {
     }
 
     fn run_bw(args: &[&str]) -> Result<String> {
-        let mut cmd = Self::bw_command()?;
+        Self::run_bw_with(args, None)
+    }
+
+    fn run_bw_with(
+        args: &[&str],
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<String> {
+        let mut cmd = Self::bw_command_with(interaction)?;
         cmd.args(args);
         cmd.stdin(std::process::Stdio::null());
         let action = format!("bw {}", args.join(" "));
@@ -675,7 +714,7 @@ impl BwBackend {
             if Self::is_stale_session_error(&stderr) {
                 warn!("Bitwarden session is stale, re-authenticating");
                 Self::invalidate_session();
-                let mut retry_cmd = Self::bw_command()?;
+                let mut retry_cmd = Self::bw_command_with(interaction)?;
                 retry_cmd.args(args);
                 retry_cmd.stdin(std::process::Stdio::null());
                 debug!("Retrying: {}", action);
@@ -786,26 +825,46 @@ impl BwBackend {
     /// If more than one candidate remains after all filters, a warning is
     /// printed and an empty string is returned so the caller can proceed
     /// without blocking the entire env resolution.
+    #[cfg(test)]
     fn disambiguate_items(
         key: &str,
         repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
-        let search_json = Self::run_bw(&["list", "items", "--search", key])?;
+        Self::disambiguate_items_with(key, repository, folder_id, project, None)
+    }
+
+    fn disambiguate_items_with(
+        key: &str,
+        repository: Option<&str>,
+        folder_id: Option<&str>,
+        project: Option<&str>,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<String> {
+        let search_json = Self::run_bw_with(&["list", "items", "--search", key], interaction)?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
 
         Self::disambiguate_items_from_list(key, &items, repository, folder_id, project)
     }
 
+    #[cfg(test)]
     fn resolve_reference_folder_id(
         reference_folder: Option<&str>,
         configured_folder: Option<&str>,
     ) -> Result<Option<String>> {
+        Self::resolve_reference_folder_id_with(reference_folder, configured_folder, None)
+    }
+
+    fn resolve_reference_folder_id_with(
+        reference_folder: Option<&str>,
+        configured_folder: Option<&str>,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<Option<String>> {
         reference_folder
             .or(configured_folder)
-            .map(Self::resolve_folder_id)
+            .map(|folder| Self::resolve_folder_id_with(folder, interaction))
             .transpose()
             .map(|folder_id| folder_id.flatten())
     }
@@ -920,14 +979,21 @@ impl BwBackend {
         Ok(None)
     }
 
-    fn resolve_reference_field(
+    fn resolve_reference_field_with(
         item_name: &str,
         field_name: &str,
         repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
+        interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<String> {
-        let Some(item) = Self::resolve_reference_item(item_name, repository, folder_id, project)?
+        let Some(item) = Self::resolve_reference_item_with(
+            item_name,
+            repository,
+            folder_id,
+            project,
+            interaction,
+        )?
         else {
             return Ok(String::new());
         };
@@ -935,13 +1001,15 @@ impl BwBackend {
         Self::extract_field_from_value(&item, field_name)
     }
 
-    fn resolve_reference_item(
+    fn resolve_reference_item_with(
         item_name: &str,
         repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
+        interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<Option<serde_json::Value>> {
-        let search_json = Self::run_bw(&["list", "items", "--search", item_name])?;
+        let search_json =
+            Self::run_bw_with(&["list", "items", "--search", item_name], interaction)?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
 
@@ -955,7 +1023,7 @@ impl BwBackend {
             .get("id")
             .and_then(|id| id.as_str())
             .unwrap_or(item_name);
-        let item_json = Self::run_bw(&["get", "item", item_identifier])?;
+        let item_json = Self::run_bw_with(&["get", "item", item_identifier], interaction)?;
         let item: serde_json::Value =
             serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
         Ok(Some(item))
@@ -1006,7 +1074,7 @@ impl BwBackend {
             warn!(
                 "Bitwarden batch resolve failed for at least one lookup, forcing sync and retrying once"
             );
-            Self::force_sync_vault();
+            Self::force_sync_vault_with(ctx.interaction);
             results = Self::resolve_batch_once(keys, ctx);
             retried_after_sync = true;
         }
@@ -1058,9 +1126,10 @@ impl BwBackend {
                 if let Some((reference_folder, item_name, field_name)) =
                     Self::parse_bw_reference(ref_str)
                 {
-                    let folder_id = Self::resolve_reference_folder_id(
+                    let folder_id = Self::resolve_reference_folder_id_with(
                         reference_folder,
                         bw_config.folder.as_deref(),
+                        ctx.interaction,
                     );
                     results.insert(
                         env_key.to_string(),
@@ -1070,11 +1139,12 @@ impl BwBackend {
                                 let folder_id_for_lookup = folder_id.clone();
                                 let cached_item =
                                     reference_item_cache.entry(cache_key).or_insert_with(|| {
-                                        Self::resolve_reference_item(
+                                        Self::resolve_reference_item_with(
                                             item_name,
                                             ctx.repository.as_deref(),
                                             folder_id_for_lookup.as_deref(),
                                             ctx.project.as_deref(),
+                                            ctx.interaction,
                                         )
                                         .map_err(|error| error.to_string())
                                     });
@@ -1109,7 +1179,7 @@ impl BwBackend {
                     "Batch resolving {} keys as fields on Bitwarden item '{item_name}'",
                     key_entries.len()
                 );
-                match Self::run_bw(&["get", "item", item_name]) {
+                match Self::run_bw_with(&["get", "item", item_name], ctx.interaction) {
                     Ok(item_json) => {
                         let item: std::result::Result<serde_json::Value, _> =
                             serde_json::from_str(&item_json);
@@ -1154,13 +1224,13 @@ impl BwBackend {
                 let folder_id: Option<String> = bw_config
                     .folder
                     .as_deref()
-                    .map(Self::resolve_folder_id)
+                    .map(|folder| Self::resolve_folder_id_with(folder, ctx.interaction))
                     .transpose()
                     .ok()
                     .flatten()
                     .flatten();
 
-                match Self::run_bw(&["list", "items"]) {
+                match Self::run_bw_with(&["list", "items"], ctx.interaction) {
                     Ok(items_json) => {
                         let all_items: Vec<serde_json::Value> =
                             serde_json::from_str(&items_json).unwrap_or_default();
@@ -1202,16 +1272,18 @@ impl BwBackend {
         {
             if let Some((reference_folder, item, field)) = Self::parse_bw_reference(ref_str) {
                 debug!("Resolving Bitwarden reference: {ref_str}");
-                let folder_id = Self::resolve_reference_folder_id(
+                let folder_id = Self::resolve_reference_folder_id_with(
                     reference_folder,
                     bw_config.folder.as_deref(),
+                    ctx.interaction,
                 )?;
-                return Self::resolve_reference_field(
+                return Self::resolve_reference_field_with(
                     item,
                     field,
                     ctx.repository.as_deref(),
                     folder_id.as_deref(),
                     ctx.project.as_deref(),
+                    ctx.interaction,
                 );
             } else {
                 bail!(
@@ -1224,7 +1296,7 @@ impl BwBackend {
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             // Look up key as a custom field on the configured item
             debug!("Resolving key '{key}' as field on Bitwarden item '{item}'");
-            let item_json = Self::run_bw(&["get", "item", item])?;
+            let item_json = Self::run_bw_with(&["get", "item", item], ctx.interaction)?;
             Self::extract_field_from_item(&item_json, key)
         } else {
             // Look up the key as a password item using list + exact-name filter
@@ -1234,14 +1306,15 @@ impl BwBackend {
             let folder_id: Option<String> = bw_config
                 .folder
                 .as_deref()
-                .map(Self::resolve_folder_id)
+                .map(|folder| Self::resolve_folder_id_with(folder, ctx.interaction))
                 .transpose()?
                 .flatten();
-            Self::disambiguate_items(
+            Self::disambiguate_items_with(
                 key,
                 ctx.repository.as_deref(),
                 folder_id.as_deref(),
                 ctx.project.as_deref(),
+                ctx.interaction,
             )
         }
     }
@@ -1258,7 +1331,7 @@ impl Backend for BwBackend {
                     key,
                     "Bitwarden lookup failed, forcing sync and retrying once"
                 );
-                Self::force_sync_vault();
+                Self::force_sync_vault_with(ctx.interaction);
                 Self::resolve_once(key, reference, ctx)
             }
             Err(error) => Err(error),
@@ -1398,6 +1471,32 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
+
+    struct TestProgressReporter;
+
+    impl super::super::ProgressReporter for TestProgressReporter {
+        fn set_message(&mut self, _message: &str) {}
+
+        fn finish(&mut self, _message: &str) {}
+    }
+
+    struct RecordingInteraction {
+        prompt_count: Cell<usize>,
+    }
+
+    impl super::super::ResolutionInteraction for RecordingInteraction {
+        fn prompt_bitwarden_password(&self) -> Result<String> {
+            self.prompt_count.set(self.prompt_count.get() + 1);
+            Ok("expected-password".to_string())
+        }
+
+        fn start_progress(
+            &self,
+            _initial_message: &str,
+        ) -> Box<dyn super::super::ProgressReporter> {
+            Box::new(TestProgressReporter)
+        }
+    }
 
     fn capture_debug_output(f: impl FnOnce()) -> String {
         struct BufWriter(Arc<Mutex<Vec<u8>>>);
@@ -1823,6 +1922,39 @@ mod tests {
     }
 
     #[test]
+    fn ensure_unlocked_with_uses_application_interaction() {
+        let interaction = RecordingInteraction {
+            prompt_count: Cell::new(0),
+        };
+        let script = r#"#!/bin/sh
+if [ "$1" = "status" ]; then
+    echo '{"status":"locked"}'
+    exit 0
+fi
+if [ "$1" = "unlock" ]; then
+    if [ "$BW_MASTER_PW" != "expected-password" ]; then
+        exit 1
+    fi
+    echo 'new-session'
+    exit 0
+fi
+if [ "$1" = "sync" ]; then
+    exit 0
+fi
+exit 1
+"#;
+
+        with_mock_bw(script, || {
+            // SAFETY: with_mock_bw serializes environment changes.
+            unsafe { std::env::remove_var("BW_SESSION") };
+            BwBackend::ensure_unlocked_with(&interaction)
+                .expect("application interaction should unlock Bitwarden");
+        });
+
+        assert_eq!(interaction.prompt_count.get(), 1);
+    }
+
+    #[test]
     fn run_bw_does_not_inject_empty_bw_session_env() {
         let script = "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo '{\"status\":\"unlocked\"}'\n  exit 0\nfi\nif printenv BW_SESSION >/dev/null 2>&1; then\n  echo 'BW_SESSION should not be present for unlocked status' >&2\n  exit 1\nfi\necho 'ok'\n";
 
@@ -1851,6 +1983,7 @@ mod tests {
             config,
             project: Some("test-project".to_string()),
             repository: Some("git@github.com:example/test-repo.git".to_string()),
+            interaction: None,
         }
     }
 
@@ -2813,7 +2946,7 @@ mod tests {
                 repository: None,
             };
             let result = BwBackend.store("NEW_KEY", "new-value", &ctx);
-            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+            assert!(result.is_ok());
         });
     }
 
@@ -2896,7 +3029,7 @@ mod tests {
                 repository: None,
             };
             let result = BwBackend.store("MY_KEY", "my-value", &ctx);
-            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+            assert!(result.is_ok());
         });
     }
     #[test]

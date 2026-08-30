@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
@@ -43,7 +42,7 @@ pub fn state_dir() -> PathBuf {
 /// Write a file with owner-only permissions (0o600) on Unix.
 /// The file is created with restricted permissions from the start so that
 /// sensitive state is never briefly world-readable.
-pub(crate) fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+pub fn write_private_file(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::fs::OpenOptions;
@@ -77,6 +76,14 @@ pub struct ApprovedProjectConfigEntry {
 pub enum SecretFetchApprovalMode {
     CurrentEnvHash,
     ProjectWide,
+}
+
+/// Information presented to an application when secret-fetch approval is needed.
+#[derive(Debug, Clone)]
+pub struct SecretFetchApprovalRequest {
+    pub project_path: PathBuf,
+    pub env_path: PathBuf,
+    pub previously_approved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -406,11 +413,19 @@ impl Config {
     }
 
     pub fn load_for_dir(dir: &Path) -> Result<Self> {
+        Self::load_for_dir_with_approval(dir, |_, _| Ok(false))
+    }
+
+    /// Load configuration and let the caller decide whether to apply an unapproved local override.
+    pub fn load_for_dir_with_approval<F>(dir: &Path, mut approve: F) -> Result<Self>
+    where
+        F: FnMut(&Path, bool) -> Result<bool>,
+    {
         let mut config = Self::load()?;
 
         if let Some((project_dir, override_path)) = Self::project_override_file(dir)
             && let Some(local_override) =
-                ProjectDirectoryOverride::load_if_approved(&override_path)?
+                ProjectDirectoryOverride::load_if_approved_with(&override_path, &mut approve)?
         {
             config.projects.push(ProjectOverride {
                 path: project_dir.to_string_lossy().into_owned(),
@@ -553,6 +568,14 @@ impl Config {
     }
 
     pub fn ensure_secret_fetch_approved(env_path: &Path) -> Result<()> {
+        Self::ensure_secret_fetch_approved_with(env_path, |_| Ok(None))
+    }
+
+    /// Ensure approval exists, asking the caller for a decision only when necessary.
+    pub fn ensure_secret_fetch_approved_with<F>(env_path: &Path, approve: F) -> Result<()>
+    where
+        F: FnOnce(&SecretFetchApprovalRequest) -> Result<Option<SecretFetchApprovalMode>>,
+    {
         let (project_path, env_path) = resolve_secret_fetch_target(env_path)?;
         let env_hash = hash_file(&env_path)?;
         let mut approvals = ApprovedSecretFetches::load()?;
@@ -565,56 +588,23 @@ impl Config {
             return Ok(());
         }
 
-        let previously_approved_hashes = approvals.approved_hashes(&project_path);
-        if !stdin_is_terminal() {
-            let state = if previously_approved_hashes.is_empty() {
-                "has not been approved yet"
-            } else {
-                "changed since its last approved .env contents"
-            };
-            anyhow::bail!(
-                "pw-env: credential fetching for project {} with {} {}. Re-run in an interactive session to approve this .env hash or allow the whole project.",
-                project_path.display(),
-                env_path.display(),
-                state,
-            );
-        }
+        let request = SecretFetchApprovalRequest {
+            project_path: project_path.clone(),
+            env_path: env_path.clone(),
+            previously_approved: !approvals.approved_hashes(&project_path).is_empty(),
+        };
 
-        eprintln!(
-            "Credential fetch approval required for project {}",
-            project_path.display()
-        );
-        eprintln!(".env file: {}", env_path.display());
-        if previously_approved_hashes.is_empty() {
-            eprintln!(
-                "This .env file can trigger secret lookups from your configured password backend."
-            );
-        } else {
-            eprintln!("This .env file changed since the last approved version.");
-        }
-        eprintln!(
-            "Approve the current .env hash only, or allow any future .env changes in this project."
-        );
-        eprint!("Approve secret fetching? [y] current hash / [a]ll project changes / [N] no ");
-        io::stderr().flush()?;
-
-        let mut input = String::new();
-        read_stdin_line(&mut input)?;
-        let answer = input.trim().to_ascii_lowercase();
-
-        match answer.as_str() {
-            "y" | "yes" => {
+        match approve(&request)? {
+            Some(SecretFetchApprovalMode::CurrentEnvHash) => {
                 approvals.approve_hash(&project_path, env_hash);
-                approvals.save()?;
-                Ok(())
+                approvals.save()
             }
-            "a" | "all" | "always" => {
+            Some(SecretFetchApprovalMode::ProjectWide) => {
                 approvals.allow_project_wide(&project_path);
-                approvals.save()?;
-                Ok(())
+                approvals.save()
             }
-            _ => anyhow::bail!(
-                "Credential fetching was not approved for project {}",
+            None => anyhow::bail!(
+                "pw-env: credential fetching was not approved for project {}. Re-run in an interactive session to approve it.",
                 project_path.display()
             ),
         }
@@ -789,13 +779,16 @@ impl Config {
 }
 
 impl ProjectDirectoryOverride {
+    #[cfg(test)]
     fn load_if_approved(path: &Path) -> Result<Option<Self>> {
+        Self::load_if_approved_with(path, &mut |_, _| Ok(false))
+    }
+
+    fn load_if_approved_with<F>(path: &Path, approve: &mut F) -> Result<Option<Self>>
+    where
+        F: FnMut(&Path, bool) -> Result<bool>,
+    {
         if path.is_symlink() {
-            eprintln!(
-                "pw-env: refusing to follow {} symlink at {}. Use a regular file.",
-                PROJECT_OVERRIDE_FILE_NAME,
-                path.display()
-            );
             return Ok(None);
         }
         let contents = std::fs::read_to_string(path)
@@ -812,34 +805,7 @@ impl ProjectDirectoryOverride {
             return Ok(Some(local_override));
         }
 
-        if !stdin_is_terminal() {
-            let state = if previously_approved.is_some() {
-                "changed since its last approval"
-            } else {
-                "has not been approved yet"
-            };
-            eprintln!(
-                "pw-env: project override {} {}. Skipping it until you approve the current file contents in an interactive session.",
-                path.display(),
-                state
-            );
-            return Ok(None);
-        }
-
-        eprintln!("Project override found: {}", path.display());
-        if previously_approved.is_some() {
-            eprintln!("This file changed since the last approved version.");
-        } else {
-            eprintln!("This file can override pw-env settings for the current project.");
-        }
-        eprint!("Approve loading this file? [y/N] ");
-        io::stderr().flush()?;
-
-        let mut input = String::new();
-        read_stdin_line(&mut input)?;
-        let answer = input.trim().to_ascii_lowercase();
-        if answer != "y" && answer != "yes" {
-            eprintln!("Skipping project override: {}", path.display());
+        if !approve(path, previously_approved.is_some())? {
             return Ok(None);
         }
 
@@ -1157,7 +1123,7 @@ impl ReviewedMigrations {
     }
 
     fn path() -> Option<PathBuf> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(p) = TEST_REVIEWED_MIGRATIONS_PATH.with(|v| v.borrow().clone()) {
             return Some(p);
         }
@@ -1165,8 +1131,8 @@ impl ReviewedMigrations {
     }
 }
 
-#[cfg(all(test, unix))]
-pub(crate) fn set_test_reviewed_migrations_path(path: Option<PathBuf>) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_reviewed_migrations_path(path: Option<PathBuf>) {
     TEST_REVIEWED_MIGRATIONS_PATH.with(|v| *v.borrow_mut() = path);
 }
 
@@ -1221,31 +1187,11 @@ fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to resolve {}", candidate.display()))
 }
 
-fn stdin_is_terminal() -> bool {
-    #[cfg(test)]
-    {
-        return MOCK_IS_TERMINAL.with(|v| v.get());
-    }
-    #[allow(unreachable_code)]
-    std::io::stdin().is_terminal()
-}
+#[cfg(any(test, feature = "test-support"))]
+use std::cell::RefCell;
 
-fn read_stdin_line(buf: &mut String) -> io::Result<usize> {
-    #[cfg(test)]
-    if let Some(line) = MOCK_STDIN_LINE.with(|m| m.borrow_mut().take()) {
-        *buf = line;
-        return Ok(buf.len());
-    }
-    io::stdin().read_line(buf)
-}
-
-#[cfg(test)]
-use std::cell::{Cell, RefCell};
-
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    static MOCK_IS_TERMINAL: Cell<bool> = const { Cell::new(false) };
-    static MOCK_STDIN_LINE: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Per-test override for the `ApprovedProjectConfigs` store path.
     static TEST_APPROVAL_STORE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     /// Per-test override for the `ApprovedSecretFetches` store path.
@@ -2360,6 +2306,56 @@ backend = "op"
     }
 
     #[test]
+    fn config_load_for_dir_reads_global_config_values() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let test_dir = unique_test_dir("load-for-dir-config");
+        let config_dir = test_dir.join("config");
+        fs::create_dir_all(config_dir.join("pw-env")).unwrap();
+        fs::write(
+            config_dir.join("pw-env").join("config.toml"),
+            "[defaults]\nbackend = \"gpg\"\n",
+        )
+        .unwrap();
+
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_dir) };
+        let result = Config::load_for_dir(&test_dir);
+        match old_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert_eq!(result.unwrap().defaults.backend, "gpg");
+    }
+
+    #[test]
+    fn config_load_for_dir_with_approval_applies_local_override() {
+        let test_dir = unique_test_dir("load-for-dir-approved");
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(
+            test_dir.join(PROJECT_OVERRIDE_FILE_NAME),
+            "backend = \"gpg\"\n",
+        )
+        .unwrap();
+
+        let mut callback_calls = 0;
+        let result = Config::load_for_dir_with_approval(&test_dir, |path, changed| {
+            callback_calls += 1;
+            assert_eq!(path, &test_dir.join(PROJECT_OVERRIDE_FILE_NAME));
+            assert_eq!(changed, false);
+            Ok(true)
+        });
+        let _ = fs::remove_dir_all(&test_dir);
+
+        let config = result.unwrap();
+        assert_eq!(callback_calls, 1);
+        assert_eq!(config.effective_backend(&test_dir), "gpg");
+    }
+
+    #[test]
     fn test_find_git_root_in_config_module() {
         let test_dir = unique_test_dir("find-git-root-config");
         let repo_dir = test_dir.join("repo");
@@ -2890,10 +2886,6 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
 
-        // Provide mock stdin "y" so that if we accidentally enter the interactive path
-        // (L431 delete-! mutant, or L987→true mutant) we get Ok(()) instead of Err,
-        // which makes the assertion fail and kills the mutant.
-        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
         let result = Config::ensure_secret_fetch_approved(&env_path);
         let _ = fs::remove_dir_all(&test_dir);
 
@@ -2913,9 +2905,10 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
 
-        MOCK_IS_TERMINAL.with(|v| v.set(true));
-        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
-        let result = Config::ensure_secret_fetch_approved(&env_path);
+        let result = Config::ensure_secret_fetch_approved_with(&env_path, |request| {
+            assert_eq!(request.previously_approved, false);
+            Ok(Some(SecretFetchApprovalMode::CurrentEnvHash))
+        });
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(
@@ -2932,9 +2925,9 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
 
-        MOCK_IS_TERMINAL.with(|v| v.set(true));
-        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("a\n".to_string()));
-        let result = Config::ensure_secret_fetch_approved(&env_path);
+        let result = Config::ensure_secret_fetch_approved_with(&env_path, |_| {
+            Ok(Some(SecretFetchApprovalMode::ProjectWide))
+        });
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(
@@ -2998,7 +2991,6 @@ backend = "op"
         let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
         fs::write(&override_path, "backend = \"op\"\n").unwrap();
 
-        // MOCK_IS_TERMINAL defaults to false; file not pre-approved
         let result = ProjectDirectoryOverride::load_if_approved(&override_path);
         let _ = fs::remove_dir_all(&test_dir);
 
@@ -3019,8 +3011,6 @@ backend = "op"
         let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
         fs::write(&override_path, "backend = \"op\"\n").unwrap();
 
-        // MOCK_IS_TERMINAL = false (default): non-interactive path should be taken
-        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
         let result = ProjectDirectoryOverride::load_if_approved(&override_path);
         let _ = fs::remove_dir_all(&test_dir);
 
@@ -3039,9 +3029,8 @@ backend = "op"
         let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
         fs::write(&override_path, "backend = \"bw\"\n").unwrap();
 
-        MOCK_IS_TERMINAL.with(|v| v.set(true));
-        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("y\n".to_string()));
-        let result = ProjectDirectoryOverride::load_if_approved(&override_path);
+        let mut approve = |_: &Path, _: bool| Ok(true);
+        let result = ProjectDirectoryOverride::load_if_approved_with(&override_path, &mut approve);
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result.is_ok());
@@ -3059,9 +3048,8 @@ backend = "op"
         let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
         fs::write(&override_path, "backend = \"bw\"\n").unwrap();
 
-        MOCK_IS_TERMINAL.with(|v| v.set(true));
-        MOCK_STDIN_LINE.with(|m| *m.borrow_mut() = Some("yes\n".to_string()));
-        let result = ProjectDirectoryOverride::load_if_approved(&override_path);
+        let mut approve = |_: &Path, _: bool| Ok(true);
+        let result = ProjectDirectoryOverride::load_if_approved_with(&override_path, &mut approve);
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result.is_ok());

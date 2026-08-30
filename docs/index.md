@@ -136,6 +136,10 @@ cargo build --release
     <strong>CLI reference</strong>
     <span>Browse the commands, usage forms, and the approvals subcommands in one place.</span>
   </a>
+  <a class="manual-card" href="./reference/library-api">
+    <strong>Library API</strong>
+    <span>Parse, resolve, approve, and replace environment values from a Rust application.</span>
+  </a>
 </div>
 
 ## What a project looks like

@@ -4,18 +4,30 @@ use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use crate::backend::{self, ResolveContext, StoreContext};
+use crate::backend::{self, ResolutionInteraction, ResolveContext, StoreContext};
 use crate::config::Config;
 use crate::env_file::{self, EntryKind};
 use crate::output;
 use crate::resolve;
 
+#[cfg(test)]
 pub fn add_entry(
     dir: &Path,
     config: &Config,
     key: &str,
     provided_value: Option<String>,
     backend_override: Option<&str>,
+) -> Result<()> {
+    add_entry_with_interaction(dir, config, key, provided_value, backend_override, None)
+}
+
+pub fn add_entry_with_interaction(
+    dir: &Path,
+    config: &Config,
+    key: &str,
+    provided_value: Option<String>,
+    backend_override: Option<&str>,
+    interaction: Option<&dyn ResolutionInteraction>,
 ) -> Result<()> {
     validate_key(key)?;
 
@@ -24,6 +36,11 @@ pub fn add_entry(
     let effective_config = config.with_backend_override_for_dir(dir, backend_override);
     let backend_name = effective_config.effective_backend(dir);
     let backend = backend::create_backend(backend_name)?;
+    if uses_bitwarden_backend(backend_name)
+        && let Some(interaction) = interaction
+    {
+        backend::bw::BwBackend::ensure_unlocked_with(interaction)?;
+    }
     let project = resolve::detect_project_name(dir);
     let repository = resolve::detect_repository_remote(dir);
     let store_ctx = StoreContext {
@@ -37,6 +54,7 @@ pub fn add_entry(
         config: &effective_config,
         project,
         repository,
+        interaction,
     };
 
     info!(key, backend = backend.name(), "Adding managed secret");
@@ -63,6 +81,10 @@ pub fn add_entry(
     eprintln!("{env_message}");
 
     Ok(())
+}
+
+fn uses_bitwarden_backend(backend_name: &str) -> bool {
+    backend_name == "bw"
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +279,12 @@ mod tests {
     #[cfg(unix)]
     use crate::config::{Defaults, GpgConfig, LogConfig, OpConfig, UpdateConfig};
     use tempfile::TempDir;
+
+    #[test]
+    fn bitwarden_unlock_is_selected_only_for_bitwarden_backend() {
+        assert_eq!(uses_bitwarden_backend("bw"), true);
+        assert_eq!(uses_bitwarden_backend("op"), false);
+    }
 
     #[test]
     fn trim_single_trailing_newline_removes_lf() {

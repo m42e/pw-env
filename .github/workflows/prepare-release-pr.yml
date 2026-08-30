@@ -57,8 +57,11 @@ jobs:
 
       - name: Update version in Cargo.toml
         run: |
-          sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
-          cargo check --quiet 2>/dev/null || cargo update -p pw-env
+          version="${{ inputs.version }}"
+          library_requirement=$(printf '%s' "$version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+          sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml pw-env-lib/Cargo.toml
+          sed -i -E "s|pw-env-lib = \{ version = \"[0-9]+\.[0-9]+\"|pw-env-lib = { version = \"${library_requirement}\"|" Cargo.toml
+          cargo check --quiet 2>/dev/null || cargo update
 
       - name: Create release notes directory
         run: mkdir -p release-notes
@@ -91,7 +94,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
-          git add Cargo.toml Cargo.lock docs/pw-env-config-init-migrate-auto-load.gif release-notes/
+          git add Cargo.toml pw-env-lib/Cargo.toml Cargo.lock docs/pw-env-config-init-migrate-auto-load.gif release-notes/
           git commit -m "chore: prepare release v${{ inputs.version }}"
           git push origin "$branch" --force
           gh pr create \

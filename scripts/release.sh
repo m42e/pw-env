@@ -30,8 +30,10 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
 fi
 
 # Update version in Cargo.toml
-sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
-cargo check --quiet 2>/dev/null || cargo update -p pw-env
+library_requirement=$(printf '%s' "$VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml pw-env-lib/Cargo.toml
+sed -i '' -E "s|pw-env-lib = \{ version = \"[0-9]+\.[0-9]+\"|pw-env-lib = { version = \"$library_requirement\"|" Cargo.toml
+cargo check --quiet 2>/dev/null || cargo update
 
 # Generate release notes
 mkdir -p release-notes
@@ -44,7 +46,7 @@ else
 fi
 
 # Commit and tag
-git add Cargo.toml Cargo.lock release-notes/
+git add Cargo.toml pw-env-lib/Cargo.toml Cargo.lock release-notes/
 git commit -m "chore: prepare release $TAG"
 git tag -a "$TAG" -m "Release $TAG"
 
