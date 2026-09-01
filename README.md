@@ -21,7 +21,8 @@ The interactive manual is published with GitHub Pages at [m42e.de/pw-env](https:
 - Migrates plaintext values out of `.env` into the configured backend
 - Supports per-project backend overrides via config
 - Supports trusted project-local overrides via `.pw-env.toml`
-- Requires approval before a project `.env` can trigger secret fetches, keyed by project and `.env` hash
+- Requires approval before a project `.env` or configured `.env.example` can trigger secret fetches, keyed by
+  project and environment-file hash
 - Automatically checks GitHub releases for newer `pw-env` versions
 
 ## Install
@@ -433,10 +434,10 @@ Main subcommands:
   validating the file
 - `pw-env approvals show [path]` shows the current and approved hash for a `.pw-env.toml` file or project directory
 - `pw-env approvals revoke <path>` removes a stored approval for a `.pw-env.toml` file or project directory
-- `pw-env approvals list-fetch` lists approved secret-fetch projects and `.env` hashes
-- `pw-env approvals approve-fetch <path>` approves secret fetching for the current `.env` hash
-- `pw-env approvals approve-fetch <path> --project-wide` allows any future `.env` changes in that project
-- `pw-env approvals show-fetch [path]` shows secret-fetch approval status for a `.env` file or project directory
+- `pw-env approvals list-fetch` lists approved secret-fetch projects and environment-file hashes
+- `pw-env approvals approve-fetch <path>` approves secret fetching for the current `.env` or `.env.example` hash
+- `pw-env approvals approve-fetch <path> --project-wide` allows any future environment-file changes in that project
+- `pw-env approvals show-fetch [path]` shows secret-fetch approval status for an env file or project directory
 - `pw-env approvals revoke-fetch <path>` removes stored secret-fetch approvals for that project
 - `pw-env config-template` prints the default config template
 
