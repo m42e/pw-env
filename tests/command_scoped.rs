@@ -697,6 +697,144 @@ fn hook_respects_search_parent_env_false() {
     );
 }
 
+#[test]
+#[cfg_attr(windows, ignore)]
+fn status_lists_loaded_and_failed_keys_for_current_directory() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+    let xdg_state_home = workspace.path().join("state");
+    let bin_dir = workspace.path().join("bin");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        project_dir.join(".env"),
+        "API_KEY=op://vault/item/field\nMISSING_KEY=op://vault/missing-item/field\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bin_dir.join("op"),
+        "#!/bin/sh\ncase \"$*\" in\n  *missing-item*) exit 1 ;;\n  *) printf 'fakevalue\\n' ;;\nesac\n",
+    )
+    .unwrap();
+    set_executable(&bin_dir.join("op"));
+
+    let approval = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve-fetch")
+        .arg(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(approval.status.success(), "approve-fetch should succeed");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("status")
+        .current_dir(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let project_dir = project_dir.canonicalize().unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "Loaded keys for {} (1):\n  API_KEY\nFailed keys (1):\n  MISSING_KEY\n",
+            project_dir.display()
+        )
+    );
+    assert!(!stdout.contains("fakevalue"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn status_short_reports_loaded_and_failed_counts() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+    let xdg_state_home = workspace.path().join("state");
+    let bin_dir = workspace.path().join("bin");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        project_dir.join(".env"),
+        "API_KEY=op://vault/item/field\nMISSING_KEY=op://vault/missing-item/field\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bin_dir.join("op"),
+        "#!/bin/sh\ncase \"$*\" in\n  *missing-item*) exit 1 ;;\n  *) printf 'fakevalue\\n' ;;\nesac\n",
+    )
+    .unwrap();
+    set_executable(&bin_dir.join("op"));
+
+    let approval = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve-fetch")
+        .arg(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(approval.status.success(), "approve-fetch should succeed");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("status")
+        .arg("--short")
+        .current_dir(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1 loaded, 1 failed\n"
+    );
+}
+
+#[test]
+fn status_short_reports_zero_without_an_environment_file() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("status")
+        .arg("--short")
+        .current_dir(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "0 loaded, 0 failed\n"
+    );
+}
+
 // ── Load: entry classification (kills lines 338, 341, 324) ──
 
 #[test]

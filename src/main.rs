@@ -122,6 +122,12 @@ enum Commands {
         #[arg(long)]
         reveal: bool,
     },
+    /// Show resolved environment status for the current directory
+    Status {
+        /// Show only the number of loaded and failed environment entries
+        #[arg(long)]
+        short: bool,
+    },
     /// Store a secret in the configured backend and add an empty .env entry for it
     Add {
         /// Directory containing or receiving the .env file (defaults to current directory)
@@ -643,6 +649,12 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             Ok(())
         }
 
+        Commands::Status { short } => {
+            let dir = resolve_dir(None)?;
+            let config = load_config_for_dir(&dir)?;
+            handle_status(&dir, &config, short, Some(&interaction))
+        }
+
         Commands::Add {
             dir,
             backend,
@@ -768,6 +780,55 @@ fn emit_missing_entries_warning(
     );
 
     missing.len()
+}
+
+fn handle_status(
+    dir: &Path,
+    config: &config::Config,
+    short: bool,
+    interaction: Option<&dyn backend::ResolutionInteraction>,
+) -> Result<()> {
+    let env_path = match find_env_path(dir, config) {
+        Some(path) => path,
+        None => {
+            if short {
+                println!("{}", format_status_counts(0, 0));
+            } else {
+                println!("No .env file found in {}", dir.display());
+            }
+            return Ok(());
+        }
+    };
+
+    let env_file = env_file::EnvFile::parse(&env_path)?;
+    let resolvable_keys = env_file
+        .resolvable_entries()
+        .into_iter()
+        .map(|entry| entry.key.clone())
+        .collect::<Vec<_>>();
+    let resolved = resolve_environment(&env_file, config, dir, interaction)?;
+    let failed = missing_resolvable_keys(&resolvable_keys, &resolved);
+
+    if short {
+        println!("{}", format_status_counts(resolved.len(), failed.len()));
+        return Ok(());
+    }
+
+    println!("Loaded keys for {} ({}):", dir.display(), resolved.len());
+    for key in resolved.keys() {
+        println!("  {key}");
+    }
+
+    println!("Failed keys ({}):", failed.len());
+    for key in failed {
+        println!("  {key}");
+    }
+
+    Ok(())
+}
+
+fn format_status_counts(loaded_count: usize, failed_count: usize) -> String {
+    format!("{loaded_count} loaded, {failed_count} failed")
 }
 
 fn emit_plaintext_secret_warning(env_file: &env_file::EnvFile) -> Result<()> {
