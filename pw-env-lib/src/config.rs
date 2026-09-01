@@ -1209,9 +1209,12 @@ fn resolve_secret_fetch_target(path: &Path) -> Result<(PathBuf, PathBuf)> {
         path.to_path_buf()
     };
 
-    if env_path.file_name().and_then(|name| name.to_str()) != Some(".env") {
+    if !matches!(
+        env_path.file_name().and_then(|name| name.to_str()),
+        Some(".env") | Some(".env.example")
+    ) {
         anyhow::bail!(
-            "Expected a .env file or a directory containing one: {}",
+            "Expected a .env or .env.example file, or a directory containing a .env file: {}",
             path.display()
         );
     }
@@ -2378,8 +2381,42 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=value\n").unwrap();
 
-        let result = resolve_secret_fetch_target(&env_path);
-        assert!(result.is_ok());
+        let (project_path, resolved_env_path) = resolve_secret_fetch_target(&env_path).unwrap();
+        assert_eq!(project_path, test_dir.canonicalize().unwrap());
+        assert_eq!(resolved_env_path, env_path.canonicalize().unwrap());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_secret_fetch_target_accepts_direct_example_file() {
+        let test_dir = unique_test_dir("sf-target-example");
+        fs::create_dir_all(&test_dir).unwrap();
+        let example_path = test_dir.join(".env.example");
+        fs::write(&example_path, "KEY=\n").unwrap();
+
+        let (project_path, resolved_env_path) = resolve_secret_fetch_target(&example_path).unwrap();
+        assert_eq!(project_path, test_dir.canonicalize().unwrap());
+        assert_eq!(resolved_env_path, example_path.canonicalize().unwrap());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_secret_fetch_target_rejects_other_file_names() {
+        let test_dir = unique_test_dir("sf-target-invalid");
+        fs::create_dir_all(&test_dir).unwrap();
+        let other_path = test_dir.join("config.env");
+        fs::write(&other_path, "KEY=\n").unwrap();
+
+        let error = resolve_secret_fetch_target(&other_path).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Expected a .env or .env.example file, or a directory containing a .env file: {}",
+                other_path.display()
+            )
+        );
 
         let _ = fs::remove_dir_all(&test_dir);
     }

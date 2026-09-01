@@ -147,7 +147,8 @@ skips secret-value caching for that run.
 When `fallback_example_env` is `true` and no `.env` file is found in the project directory (or its
 parents when `search_parent_env` is enabled), pw-env falls back to `.env.example` instead.
 This is useful for repositories that check in a `.env.example` as a template with empty or
-placeholder values. The default is `false`.
+placeholder values. Entries resolved from the fallback file still require secret-fetch approval. The default is
+`false`.
 
 ## Command-scoped shell integration
 

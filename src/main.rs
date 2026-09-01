@@ -75,7 +75,7 @@ impl backend::ResolutionInteraction for CliResolutionInteraction {
     name = "pw-env",
     version,
     about = "Securely load environment variables from password managers",
-    long_about = "pw-env resolves .env file entries from 1Password, Bitwarden, or GPG-encrypted files.\n\
+    long_about = "pw-env resolves .env entries (or .env.example when fallback is enabled) from 1Password, Bitwarden, or GPG-encrypted files.\n\
                   Resolved values stay out of project files, and pw-env can cache them in the OS keyring when available.",
     arg_required_else_help = true
 )]
@@ -86,17 +86,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate shell hook code for automatic .env loading on cd
+    /// Generate shell hook code for automatic environment loading on cd
     Init {
         /// Shell to generate hook for: bash, zsh, fish, or powershell
         shell: String,
     },
     /// Execute a command with resolved environment variables only in the child process
     Exec {
-        /// Directory to look for .env file in (defaults to current directory)
+        /// Directory to look for .env, or .env.example when enabled (defaults to current directory)
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Print a warning to stderr for each .env entry that could not be resolved
+        /// Print a warning to stderr for each environment-file entry that could not be resolved
         #[arg(long)]
         warn_missing: bool,
         /// Command to execute with transient environment variables
@@ -105,18 +105,18 @@ enum Commands {
     },
     /// Export resolved environment variables (for shell eval)
     Export {
-        /// Directory to look for .env file in (defaults to current directory)
+        /// Directory to look for .env, or .env.example when enabled (defaults to current directory)
         dir: Option<PathBuf>,
         /// Shell syntax to use: bash, zsh, fish, or powershell
         #[arg(long, default_value = "bash")]
         shell: String,
-        /// Print a warning to stderr for each .env entry that could not be resolved
+        /// Print a warning to stderr for each environment-file entry that could not be resolved
         #[arg(long)]
         warn_missing: bool,
     },
     /// Load and display resolved environment variables (human-readable)
     Load {
-        /// Directory to look for .env file in (defaults to current directory)
+        /// Directory to look for .env, or .env.example when enabled (defaults to current directory)
         dir: Option<PathBuf>,
         /// Show full resolved values instead of masked previews
         #[arg(long)]
@@ -205,24 +205,24 @@ enum ApprovalCommands {
         /// Path to a .pw-env.toml file or a directory containing one
         path: PathBuf,
     },
-    /// List approved secret-fetch projects and .env hashes
+    /// List approved secret-fetch projects and environment-file hashes
     ListFetch,
-    /// Approve credential fetching for a .env file or project directory
+    /// Approve credential fetching for a .env or .env.example file, or a project directory containing .env
     ApproveFetch {
-        /// Path to a .env file or a directory containing one
+        /// Path to a .env or .env.example file, or a directory containing .env
         path: PathBuf,
-        /// Allow any future .env changes in this project without prompting again
+        /// Allow any future environment-file changes in this project without prompting again
         #[arg(long)]
         project_wide: bool,
     },
-    /// Show secret-fetch approval status for a .env file or project directory
+    /// Show secret-fetch approval status for a .env or .env.example file, or a project directory
     ShowFetch {
-        /// Path to a .env file or a directory containing one
+        /// Path to a .env or .env.example file, or a directory containing .env
         path: Option<PathBuf>,
     },
-    /// Revoke secret-fetch approvals for a .env file or project directory's project
+    /// Revoke secret-fetch approvals for a .env or .env.example file or its project directory
     RevokeFetch {
-        /// Path to a .env file or a directory containing one
+        /// Path to a .env or .env.example file, or a directory containing .env
         path: PathBuf,
     },
 }
@@ -337,7 +337,7 @@ fn prompt_secret_fetch(
             "has not been approved yet"
         };
         anyhow::bail!(
-            "pw-env: credential fetching for project {} with {} {}. Re-run in an interactive session to approve this .env hash or allow the whole project.",
+            "pw-env: credential fetching for project {} with {} {}. Re-run in an interactive session to approve this environment-file hash or allow the whole project.",
             request.project_path.display(),
             request.env_path.display(),
             state,
@@ -348,16 +348,16 @@ fn prompt_secret_fetch(
         "Credential fetch approval required for project {}",
         request.project_path.display()
     );
-    eprintln!(".env file: {}", request.env_path.display());
+    eprintln!("Environment file: {}", request.env_path.display());
     if request.previously_approved {
-        eprintln!("This .env file changed since the last approved version.");
+        eprintln!("This environment file changed since the last approved version.");
     } else {
         eprintln!(
-            "This .env file can trigger secret lookups from your configured password backend."
+            "This environment file can trigger secret lookups from your configured password backend."
         );
     }
     eprintln!(
-        "Approve the current .env hash only, or allow any future .env changes in this project."
+        "Approve the current environment-file hash only, or allow any future environment-file changes in this project."
     );
     eprint!("Approve secret fetching? [y] current hash / [a]ll project changes / [N] no ");
     io::stderr().flush()?;
@@ -1181,7 +1181,7 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             let approval = config::Config::approve_secret_fetch(&path, mode)?;
             if approval.project_wide {
                 eprintln!(
-                    "Approved secret fetching for any .env changes in project {}",
+                    "Approved secret fetching for any environment-file changes in project {}",
                     approval.project_path.display()
                 );
             } else {
@@ -1190,7 +1190,7 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
                     approval.project_path.display()
                 );
                 if let Some(hash) = approval.env_hash {
-                    eprintln!("Stored .env hash: {hash}");
+                    eprintln!("Stored environment-file hash: {hash}");
                 }
             }
             Ok(())
@@ -1203,10 +1203,10 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             let status = config::Config::secret_fetch_approval_status(&target)?;
 
             eprintln!("Project: {}", status.project_path.display());
-            eprintln!(".env file: {}", status.env_path.display());
+            eprintln!("Environment file: {}", status.env_path.display());
             match status.current_env_hash.as_deref() {
-                Some(hash) => eprintln!("Current .env hash: {hash}"),
-                None => eprintln!("Current .env hash: unavailable"),
+                Some(hash) => eprintln!("Current environment-file hash: {hash}"),
+                None => eprintln!("Current environment-file hash: unavailable"),
             }
             eprintln!("Project-wide approval: {}", status.project_wide);
             if status.approved_env_hashes.is_empty() {
