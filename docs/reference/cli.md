@@ -10,6 +10,7 @@
 | `exec` | Run a command with resolved secrets only in the child process |
 | `export` | Print shell exports for the current project |
 | `load` | Show a human-readable view of the current resolution state |
+| `status` | Show loaded and failed environment keys for the current directory |
 | `add` | Store a secret in the effective backend, or a backend chosen by flag, and ensure `.env` contains `KEY=` |
 | `migrate` | Move plaintext values into the effective backend, or a backend chosen by flag |
 | `check` | Verify backend binaries and config discovery |
@@ -67,6 +68,16 @@ pw-env load [--reveal] [DIR]
 Print a human-readable summary of how each `.env` entry was classified, then print masked export output that shows only
 a short prefix of each resolved value. Pass `--reveal` when you intentionally need the full resolved content. Use this
 when you need to debug what pw-env would do without wiring it into a shell.
+
+## `status`
+
+```console
+pw-env status [--short]
+```
+
+Resolve the active `.env` file for the current directory and list the keys that loaded successfully and the keys that
+could not be resolved. Values are never printed. Pass `--short` to print only the counts, for example
+`1 loaded, 2 failed`.
 
 ## `add`
 

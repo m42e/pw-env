@@ -422,6 +422,7 @@ Main subcommands:
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
 - `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show
   full values
+- `pw-env status [--short]` lists loaded and failed keys for the current directory, or only their counts with `--short`
 - `pw-env add [--dir <dir>] [--backend <op|bw|gpg>] <KEY> [VALUE]` stores a secret in the configured backend, or a
   backend chosen for that invocation, and ensures `.env` contains
   `KEY=` for runtime resolution; omit `VALUE` to prompt or read it from stdin
