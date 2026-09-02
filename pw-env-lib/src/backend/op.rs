@@ -883,6 +883,56 @@ mod tests {
         });
     }
 
+    #[test]
+    fn resolve_batch_rejects_multiple_items_without_metadata() {
+        let script = "#!/bin/sh\nif [ \"$2\" = \"list\" ]; then\n  echo '[{\"id\":\"item-a\",\"title\":\"MY_KEY\"},{\"id\":\"item-b\",\"title\":\"MY_KEY\"}]'\n  exit 0\nfi\necho 'unexpected item fetch' >&2\nexit 1\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = super::super::ResolveContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: None,
+                interaction: None,
+            };
+            let mut results = OpBackend::resolve_batch(&["MY_KEY"], &ctx);
+            let result = results.remove("MY_KEY").expect("batch result should exist");
+            let error = result.expect_err("duplicate items without metadata should fail");
+            assert_eq!(
+                error.to_string(),
+                "Multiple 1Password items found for 'MY_KEY' but repository/project metadata did not disambiguate them"
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_batch_disambiguates_with_repository_only() {
+        let script = "#!/bin/sh\nif [ \"$2\" = \"list\" ]; then\n  echo '[{\"id\":\"other-item\",\"title\":\"MY_KEY\"},{\"id\":\"repo-item\",\"title\":\"MY_KEY\"}]'\n  exit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$4\" = \"--format=json\" ]; then\n  case \"$3\" in\n    other-item) echo '{\"id\":\"other-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"other-repo\"}]}' ;;\n    repo-item) echo '{\"id\":\"repo-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"test-repo\"}]}' ;;\n    *) exit 1 ;;\n  esac\n  exit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$4\" = \"--fields\" ] && [ \"$3\" = \"repo-item\" ]; then\n  echo 'repository-password'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = super::super::ResolveContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: Some("test-repo".to_string()),
+                interaction: None,
+            };
+            let mut results = OpBackend::resolve_batch(&["MY_KEY"], &ctx);
+            let result = results.remove("MY_KEY").expect("batch result should exist");
+            assert_eq!(result.unwrap(), "repository-password");
+        });
+    }
+
     // Kills mutants: 147 (== → !=), 168 (delete !), 171 (== → !=) in resolve_by_metadata.
     //
     // 3 items share the title "MY_KEY":
