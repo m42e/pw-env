@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "pw-env"
-version = "0.3.12"
+version = "0.3.14"
 edition = "2024"
 description = "CLI for resolving .env secrets from password managers without storing plaintext secrets"
 license = "MIT"
