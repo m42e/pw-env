@@ -372,6 +372,7 @@ pub fn resolve_env_file_with_interaction(
     }
 
     let use_bitwarden_batch_for_defaults = default_backend_name == "bw";
+    let use_one_password_batch_for_defaults = default_backend_name == "op";
     if use_bitwarden_batch_for_defaults {
         bw_entries.extend(default_entries.iter().copied());
     }
@@ -459,8 +460,61 @@ pub fn resolve_env_file_with_interaction(
         }
     }
 
+    if use_one_password_batch_for_defaults {
+        let mut uncached_op_entries: Vec<&EnvEntry> = Vec::new();
+        let mut op_cache_keys: BTreeMap<String, SecretCacheKey> = BTreeMap::new();
+
+        for entry in &default_entries {
+            let cache_key = build_secret_cache_key(&env_file.path, entry, "op", &ctx);
+            if let Some(value) = secret_cache.get(&cache_key) {
+                debug!("Resolved {} via cached 1Password value", entry.key);
+                resolved.insert(entry.key.clone(), value);
+                continue;
+            }
+
+            op_cache_keys.insert(entry.key.clone(), cache_key);
+            uncached_op_entries.push(entry);
+        }
+
+        if !uncached_op_entries.is_empty() {
+            let batch_keys: Vec<&str> = uncached_op_entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect();
+            let batch_results = crate::backend::op::OpBackend::resolve_batch(&batch_keys, &ctx);
+
+            for entry in &uncached_op_entries {
+                match batch_results.get(&entry.key) {
+                    Some(Ok(value)) => {
+                        info!("Resolved {} via 1Password", entry.key);
+                        if let Some(cache_key) = op_cache_keys.get(&entry.key) {
+                            secret_cache.set(cache_key, value);
+                        }
+                        log_credential_fetch_audit(
+                            &env_file.path,
+                            dir,
+                            project.as_deref(),
+                            "1Password",
+                            &entry.key,
+                        );
+                        resolved.insert(entry.key.clone(), value.clone());
+                    }
+                    Some(Err(error)) => {
+                        warn!("Failed to resolve {} via 1Password: {error}", entry.key);
+                    }
+                    None => {
+                        warn!("No result for {} from 1Password batch resolve", entry.key);
+                    }
+                }
+            }
+        }
+    }
+
     // Resolve empty entries via the default backend
-    if !default_entries.is_empty() && !use_bitwarden_batch_for_defaults {
+    if !default_entries.is_empty()
+        && !use_bitwarden_batch_for_defaults
+        && !use_one_password_batch_for_defaults
+    {
         // For GPG backend, resolve all at once since it decrypts the whole file
         if default_backend_name == "gpg" {
             let mut uncached_gpg_entries: Vec<&EnvEntry> = Vec::new();
@@ -1457,8 +1511,7 @@ branch "broken"]
         fs::create_dir_all(&temp).unwrap();
         fs::write(&env_path, "DEFAULT_KEY=\n").unwrap();
 
-        // Any op invocation returns "default-op-secret".
-        let op_script = "#!/bin/sh\necho 'default-op-secret'\n";
+        let op_script = "#!/bin/sh\nif [ \"$1\" = 'item' ] && [ \"$2\" = 'list' ]; then\n  echo '[{\"id\":\"default-item\",\"title\":\"DEFAULT_KEY\"}]'\nelse\n  echo 'default-op-secret'\nfi\n";
 
         let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
         let config = Config {
@@ -1478,6 +1531,112 @@ branch "broken"]
             resolved.get("DEFAULT_KEY").map(String::as_str),
             Some("default-op-secret"),
             "empty-value entries should be resolved via the configured non-gpg backend"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_batches_default_onepassword_item_fields() {
+        let temp = unique_subdir("resolve-default-op-batch");
+        let env_path = temp.join(".env");
+        let call_log = temp.join("op-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=\nDB_PASS=\nUNASSIGNED=\n").unwrap();
+
+        let item_json = r#"{"fields":[{"label":"API_KEY","value":"api-secret"},{"label":"DB_PASS","value":"db-secret"}]}"#;
+        let op_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'item' ] && [ \"$2\" = 'get' ] && [ \"$3\" = 'project-env' ] && [ \"$4\" = '--format=json' ]; then\n  echo '{}'\n  exit 0\nfi\nexit 1\n",
+            call_log.display(),
+            item_json
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                op: crate::config::OpConfig {
+                    vault: Some("Development".to_string()),
+                    item: Some("project-env".to_string()),
+                    ..crate::config::OpConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let resolved =
+            with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+            });
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+        assert_eq!(
+            resolved.get("API_KEY").map(String::as_str),
+            Some("api-secret")
+        );
+        assert_eq!(
+            resolved.get("DB_PASS").map(String::as_str),
+            Some("db-secret")
+        );
+        assert_eq!(resolved.get("UNASSIGNED"), None);
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            vec!["item get project-env --format=json --reveal --vault=Development"],
+            "expected one shared-item fetch and no per-key lookups"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_lists_onepassword_items_before_missing_key_lookups() {
+        let temp = unique_subdir("resolve-default-op-list");
+        let env_path = temp.join(".env");
+        let call_log = temp.join("op-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=\nUNASSIGNED=\n").unwrap();
+
+        let items_json = r#"[{"id":"api-item","title":"API_KEY"}]"#;
+        let op_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'item' ] && [ \"$2\" = 'list' ]; then\n  echo '{}'\n  exit 0\nfi\nif [ \"$1\" = 'item' ] && [ \"$2\" = 'get' ] && [ \"$3\" = 'api-item' ] && [ \"$4\" = '--fields' ]; then\n  echo 'api-secret'\n  exit 0\nfi\nexit 1\n",
+            call_log.display(),
+            items_json
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                op: crate::config::OpConfig {
+                    vault: Some("Development".to_string()),
+                    ..crate::config::OpConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let resolved =
+            with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+            });
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+        assert_eq!(
+            resolved.get("API_KEY").map(String::as_str),
+            Some("api-secret")
+        );
+        assert_eq!(resolved.get("UNASSIGNED"), None);
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            vec![
+                "item list --format=json --vault=Development",
+                "item get api-item --fields label=password --reveal --vault=Development"
+            ],
+            "expected one list and one fetch for the assigned item"
         );
     }
 

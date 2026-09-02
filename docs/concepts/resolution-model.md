@@ -44,7 +44,10 @@ secrets directly from the backend.
 
 ### 1Password and Bitwarden
 
-These backends resolve entries one key at a time. Explicit references bypass the default backend selection.
+Explicit references bypass the default backend selection. For empty values, 1Password fetches a configured shared
+item once and extracts all requested fields locally. When keys map to individual 1Password items, pw-env lists items
+once so missing keys can be skipped without a failed lookup for each one. Bitwarden uses equivalent batch paths for
+shared items and item-per-key lookups.
 
 ### GPG
 
