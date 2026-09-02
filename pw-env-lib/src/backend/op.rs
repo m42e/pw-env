@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
@@ -67,6 +68,45 @@ impl OpBackend {
         Self::run_op(&args, account)
     }
 
+    fn get_item_json(
+        item: &str,
+        vault: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut args = vec!["item", "get", item, "--format=json", "--reveal"];
+        let vault_arg;
+        if let Some(v) = vault {
+            vault_arg = format!("--vault={v}");
+            args.push(&vault_arg);
+        }
+        let item_json = Self::run_op(&args, account)?;
+        serde_json::from_str(&item_json).context("Failed to parse 1Password item JSON")
+    }
+
+    fn extract_field_from_value(item: &serde_json::Value, field_name: &str) -> Result<String> {
+        item.get("fields")
+            .and_then(|fields| fields.as_array())
+            .and_then(|fields| {
+                fields.iter().find(|field| {
+                    field.get("label").and_then(|label| label.as_str()) == Some(field_name)
+                })
+            })
+            .and_then(|field| field.get("value").and_then(|value| value.as_str()))
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("Field '{field_name}' not found in 1Password item"))
+    }
+
+    fn list_items(vault: Option<&str>, account: Option<&str>) -> Result<Vec<serde_json::Value>> {
+        let mut args = vec!["item", "list", "--format=json"];
+        let vault_arg;
+        if let Some(v) = vault {
+            vault_arg = format!("--vault={v}");
+            args.push(&vault_arg);
+        }
+        let list_json = Self::run_op(&args, account)?;
+        serde_json::from_str(&list_json).context("Failed to parse 1Password item list JSON")
+    }
+
     fn item_matches_text_field(item: &serde_json::Value, field_name: &str, expected: &str) -> bool {
         item.get("fields")
             .and_then(|fields| fields.as_array())
@@ -88,17 +128,18 @@ impl OpBackend {
         vault: Option<&str>,
         account: Option<&str>,
     ) -> Result<String> {
-        // List all items (optionally filtered by vault) as JSON
-        let mut args = vec!["item", "list", "--format=json"];
-        let vault_arg;
-        if let Some(v) = vault {
-            vault_arg = format!("--vault={v}");
-            args.push(&vault_arg);
-        }
-        let list_json = Self::run_op(&args, account)?;
-        let items: Vec<serde_json::Value> =
-            serde_json::from_str(&list_json).context("Failed to parse op item list JSON")?;
+        let items = Self::list_items(vault, account)?;
+        Self::resolve_by_metadata_from_list(key, &items, repository, project, vault, account)
+    }
 
+    fn resolve_by_metadata_from_list(
+        key: &str,
+        items: &[serde_json::Value],
+        repository: Option<&str>,
+        project: Option<&str>,
+        vault: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<String> {
         // Filter by items whose title matches the key
         let matching: Vec<&serde_json::Value> = items
             .iter()
@@ -180,6 +221,96 @@ impl OpBackend {
         bail!(
             "Multiple 1Password items found for '{key}' but repository/project metadata did not disambiguate them"
         );
+    }
+
+    /// Resolve multiple key-only lookups while reusing the item data that can be shared.
+    ///
+    /// A configured item is fetched once and all requested fields are extracted locally. When
+    /// keys map to individual items, one list call identifies missing keys before the remaining
+    /// matching items are fetched.
+    pub fn resolve_batch(keys: &[&str], ctx: &ResolveContext) -> BTreeMap<String, Result<String>> {
+        let op_config = ctx.config.effective_op(ctx.dir);
+        let vault = op_config.vault.as_deref();
+        let account = op_config.account.as_deref();
+        let mut results = BTreeMap::new();
+
+        if let Some(item) = ctx.config.effective_item(ctx.dir) {
+            match Self::get_item_json(item, vault, account) {
+                Ok(item_json) => {
+                    for key in keys {
+                        results.insert(
+                            (*key).to_string(),
+                            Self::extract_field_from_value(&item_json, key),
+                        );
+                    }
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    for key in keys {
+                        results.insert(
+                            (*key).to_string(),
+                            Err(anyhow::anyhow!(
+                                "Failed to fetch 1Password item '{item}': {error}"
+                            )),
+                        );
+                    }
+                }
+            }
+            return results;
+        }
+
+        let items = match Self::list_items(vault, account) {
+            Ok(items) => items,
+            Err(error) => {
+                let error = error.to_string();
+                for key in keys {
+                    results.insert(
+                        (*key).to_string(),
+                        Err(anyhow::anyhow!("Failed to list 1Password items: {error}")),
+                    );
+                }
+                return results;
+            }
+        };
+
+        for key in keys {
+            let matching: Vec<&serde_json::Value> = items
+                .iter()
+                .filter(|item| item.get("title").and_then(|title| title.as_str()) == Some(key))
+                .collect();
+
+            let result = if matching.is_empty() {
+                Err(anyhow::anyhow!(
+                    "No 1Password items found with title '{key}'"
+                ))
+            } else if matching.len() == 1 {
+                let item_id = matching[0]
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("1Password item missing id"));
+                match item_id {
+                    Ok(item_id) => Self::get_item_field(item_id, "label=password", vault, account),
+                    Err(error) => Err(error),
+                }
+            } else if ctx.repository.is_some() || ctx.project.is_some() {
+                Self::resolve_by_metadata_from_list(
+                    key,
+                    &items,
+                    ctx.repository.as_deref(),
+                    ctx.project.as_deref(),
+                    vault,
+                    account,
+                )
+            } else {
+                Err(anyhow::anyhow!(
+                    "Multiple 1Password items found for '{key}' but repository/project metadata did not disambiguate them"
+                ))
+            };
+
+            results.insert((*key).to_string(), result);
+        }
+
+        results
     }
 }
 
@@ -749,6 +880,56 @@ mod tests {
         with_mock_op("#!/bin/sh\necho 'field-value'\n", || {
             let result = OpBackend::get_item_field("my-item", "label=password", None, None);
             assert_eq!(result.unwrap(), "field-value");
+        });
+    }
+
+    #[test]
+    fn resolve_batch_rejects_multiple_items_without_metadata() {
+        let script = "#!/bin/sh\nif [ \"$2\" = \"list\" ]; then\n  echo '[{\"id\":\"item-a\",\"title\":\"MY_KEY\"},{\"id\":\"item-b\",\"title\":\"MY_KEY\"}]'\n  exit 0\nfi\necho 'unexpected item fetch' >&2\nexit 1\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = super::super::ResolveContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: None,
+                interaction: None,
+            };
+            let mut results = OpBackend::resolve_batch(&["MY_KEY"], &ctx);
+            let result = results.remove("MY_KEY").expect("batch result should exist");
+            let error = result.expect_err("duplicate items without metadata should fail");
+            assert_eq!(
+                error.to_string(),
+                "Multiple 1Password items found for 'MY_KEY' but repository/project metadata did not disambiguate them"
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_batch_disambiguates_with_repository_only() {
+        let script = "#!/bin/sh\nif [ \"$2\" = \"list\" ]; then\n  echo '[{\"id\":\"other-item\",\"title\":\"MY_KEY\"},{\"id\":\"repo-item\",\"title\":\"MY_KEY\"}]'\n  exit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$4\" = \"--format=json\" ]; then\n  case \"$3\" in\n    other-item) echo '{\"id\":\"other-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"other-repo\"}]}' ;;\n    repo-item) echo '{\"id\":\"repo-item\",\"fields\":[{\"label\":\"repository\",\"value\":\"test-repo\"}]}' ;;\n    *) exit 1 ;;\n  esac\n  exit 0\nfi\nif [ \"$2\" = \"get\" ] && [ \"$4\" = \"--fields\" ] && [ \"$3\" = \"repo-item\" ]; then\n  echo 'repository-password'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n";
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = super::super::ResolveContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: Some("test-repo".to_string()),
+                interaction: None,
+            };
+            let mut results = OpBackend::resolve_batch(&["MY_KEY"], &ctx);
+            let result = results.remove("MY_KEY").expect("batch result should exist");
+            assert_eq!(result.unwrap(), "repository-password");
         });
     }
 
