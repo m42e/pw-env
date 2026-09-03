@@ -1889,6 +1889,69 @@ branch "broken"]
 
     #[cfg(unix)]
     #[test]
+    fn resolve_env_file_batches_default_gpg_entries() {
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
+        let temp = unique_subdir("resolve-gpg-batch");
+        let env_path = temp.join(".env");
+        let encrypted_path = temp.join(".env.gpg");
+        let call_log = temp.join("gpg-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "FIRST_KEY=\nSECOND_KEY=\n").unwrap();
+        fs::write(&encrypted_path, "placeholder").unwrap();
+
+        let gpg_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = '--decrypt' ]; then\n  printf 'FIRST_KEY=first-secret\\nSECOND_KEY=second-secret\\n'\n  exit 0\nfi\nexit 1\n",
+            call_log.display()
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                backend: "gpg".to_string(),
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        crate::cache::set_test_secret_cache_index_path(Some(
+            temp.join("pw-env").join("resolved-secret-cache.json"),
+        ));
+        crate::cache::set_test_keyring_available(true);
+
+        let resolved =
+            with_approval_and_mock_binaries(None, None, Some(&gpg_script), &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).unwrap()
+            });
+
+        crate::cache::reset_test_keyring();
+        crate::cache::set_test_secret_cache_index_path(None);
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(
+            resolved.get("FIRST_KEY").map(String::as_str),
+            Some("first-secret")
+        );
+        assert_eq!(
+            resolved.get("SECOND_KEY").map(String::as_str),
+            Some("second-secret")
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("--decrypt"))
+                .count(),
+            1,
+            "expected default GPG entries to be decrypted in one batch"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn resolve_env_file_falls_back_when_keyring_is_unavailable() {
         let _lock = crate::cache::keyring_test_lock()
             .lock()
