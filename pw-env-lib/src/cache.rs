@@ -481,6 +481,21 @@ mod tests {
     }
 
     #[test]
+    fn reset_test_keyring_clears_state_and_reenables_keyring() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
+        set_test_keyring_available(true);
+        set_secret("fingerprint", "secret-value").unwrap();
+        KEYRING_DISABLED.store(true, Ordering::Relaxed);
+
+        reset_test_keyring();
+
+        assert!(test_keyring_get("fingerprint").is_none());
+        assert_eq!(KEYRING_DISABLED.load(Ordering::Relaxed), false);
+    }
+
+    #[test]
     fn clear_secret_cache_removes_index_and_keyring_entries() {
         let _lock = keyring_test_lock()
             .lock()

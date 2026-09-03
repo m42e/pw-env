@@ -756,6 +756,21 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_with_key_value_updates_only_matching_entry() {
+        let path = write_test_env("KEEP_ME=original # note\nCHANGE_ME=old\n");
+        let env_file = EnvFile::parse(&path).expect("parse should succeed");
+
+        env_file
+            .rewrite_with_key_value("CHANGE_ME", "new")
+            .expect("rewrite should succeed");
+
+        let rewritten = std::fs::read_to_string(&path).expect("rewritten file should be readable");
+        std::fs::remove_file(&path).expect("temp file should be removable");
+
+        assert_eq!(rewritten, "KEEP_ME=original # note\nCHANGE_ME=new\n");
+    }
+
+    #[test]
     fn split_value_and_comment_keeps_hash_inside_single_quotes() {
         let (value, comment) = split_value_and_comment("'secret#value'");
         assert_eq!(value, "'secret#value'");
