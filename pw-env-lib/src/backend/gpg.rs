@@ -586,7 +586,7 @@ PLAIN=value
         let script_path = dir.path().join("gpg");
         // Script echoes the preset decrypt output when --decrypt is given; exits 0 for anything else
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\nprintf '%s' '{}'\nelse\ncat >/dev/null\nfi\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\nprintf '%s' '{}'\nelse\noutput=\"\"\nwhile [ \"$#\" -gt 0 ]; do\nif [ \"$1\" = \"--output\" ]; then\nshift\noutput=\"$1\"\nfi\nshift\ndone\ncat >\"$output\"\nfi\nexit 0\n",
             decrypt_output.replace('\'', "'\\''")
         );
         std::fs::write(&script_path, &script).unwrap();
@@ -727,6 +727,18 @@ PLAIN=value
     #[test]
     fn backend_name_is_gpg() {
         assert_eq!(GpgBackend.name(), "GPG");
+    }
+
+    #[test]
+    fn encrypt_to_file_writes_content_with_mock_gpg() {
+        with_mock_gpg("", || {
+            let temp_dir = tempfile::TempDir::new().unwrap();
+            let path = temp_dir.path().join(".env.gpg");
+
+            GpgBackend::encrypt_to_file("KEY=value\n", &path, "test@example.com").unwrap();
+
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "KEY=value\n");
+        });
     }
 
     #[test]

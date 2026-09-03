@@ -1284,6 +1284,7 @@ mod tests {
             projects: vec![],
         };
         assert_eq!(config.defaults.backend, "op");
+        assert_eq!(config.defaults.search_parent_env, true);
     }
 
     #[test]
@@ -1438,6 +1439,29 @@ recipient = "you@example.com"
     }
 
     #[test]
+    fn test_backend_override_changes_matching_project_and_default() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work".to_string(),
+                backend: Some("bw".to_string()),
+                ..ProjectOverride::default()
+            }],
+        };
+        let project_dir = Path::new("/home/user/work/service");
+        let other_dir = Path::new("/home/user/other");
+
+        let project_override = config.with_backend_override_for_dir(project_dir, Some("gpg"));
+        assert_eq!(project_override.effective_backend(project_dir), "gpg");
+        assert_eq!(config.effective_backend(project_dir), "bw");
+
+        let default_override = config.with_backend_override_for_dir(other_dir, Some("gpg"));
+        assert_eq!(default_override.effective_backend(other_dir), "gpg");
+    }
+
+    #[test]
     fn test_parse_project_directory_override() {
         let toml_str = r#"
 backend = "op"
@@ -1508,6 +1532,32 @@ vault = "Work"
         assert!(config.effective_warn_missing(Path::new("/home/user/work/true/app")));
         assert!(!config.effective_warn_missing(Path::new("/home/user/work/false/app")));
         assert!(!config.effective_warn_missing(Path::new("/home/user/other")));
+    }
+
+    #[test]
+    fn test_effective_search_parent_env_uses_project_override_and_default() {
+        let config = Config {
+            defaults: Defaults {
+                search_parent_env: true,
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![ProjectOverride {
+                path: "/home/user/work".to_string(),
+                search_parent_env: Some(false),
+                ..ProjectOverride::default()
+            }],
+        };
+
+        assert_eq!(
+            config.effective_search_parent_env(Path::new("/home/user/work/service")),
+            false
+        );
+        assert_eq!(
+            config.effective_search_parent_env(Path::new("/home/user/other")),
+            true
+        );
     }
 
     #[test]
