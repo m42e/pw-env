@@ -587,6 +587,7 @@ impl BwBackend {
     }
 
     /// Resolve a Bitwarden folder name to its UUID, using an in-process cache.
+    #[cfg(test)]
     fn resolve_folder_id(folder_name: &str) -> Result<Option<String>> {
         Self::resolve_folder_id_with(folder_name, None)
     }
@@ -862,11 +863,34 @@ impl BwBackend {
         configured_folder: Option<&str>,
         interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<Option<String>> {
-        reference_folder
-            .or(configured_folder)
-            .map(|folder| Self::resolve_folder_id_with(folder, interaction))
-            .transpose()
-            .map(|folder_id| folder_id.flatten())
+        let Some(folder) = reference_folder.or(configured_folder) else {
+            return Ok(None);
+        };
+        Ok(Some(Self::resolve_required_folder_id_with(
+            folder,
+            interaction,
+        )?))
+    }
+
+    fn resolve_required_folder_id_with(
+        folder_name: &str,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<String> {
+        Self::resolve_folder_id_with(folder_name, interaction)?
+            .ok_or_else(|| anyhow::anyhow!("Requested Bitwarden folder not found: {folder_name}"))
+    }
+
+    fn ensure_item_in_folder(
+        item: &serde_json::Value,
+        item_name: &str,
+        folder_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(folder_id) = folder_id
+            && item.get("folderId").and_then(|value| value.as_str()) != Some(folder_id)
+        {
+            bail!("Bitwarden item '{item_name}' is not in the requested folder");
+        }
+        Ok(())
     }
 
     fn select_item_from_list<'a>(
@@ -888,7 +912,11 @@ impl BwBackend {
             .iter()
             .filter(|item| {
                 let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                name == key || name == format!("export {key}")
+                let name_matches = name == key || name == format!("export {key}");
+                let folder_matches = folder_id.is_none_or(|folder| {
+                    item.get("folderId").and_then(|value| value.as_str()) == Some(folder)
+                });
+                name_matches && folder_matches
             })
             .collect();
 
@@ -925,26 +953,6 @@ impl BwBackend {
             }
             if matching.len() == 1 {
                 debug!("Disambiguated Bitwarden item by repository field '{repository}'");
-                return Ok(Some(matching[0]));
-            }
-        }
-
-        // Multiple matches — try narrowing by folder
-        if let Some(fid) = folder_id {
-            info!(
-                "Found {} items named '{key}', narrowing by folder",
-                matching.len()
-            );
-            let folder_filtered: Vec<&serde_json::Value> = matching
-                .iter()
-                .filter(|item| item.get("folderId").and_then(|f| f.as_str()) == Some(fid))
-                .copied()
-                .collect();
-            if !folder_filtered.is_empty() {
-                matching = folder_filtered;
-            }
-            if matching.len() == 1 {
-                debug!("Disambiguated Bitwarden item by folder for '{key}'");
                 return Ok(Some(matching[0]));
             }
         }
@@ -1026,6 +1034,7 @@ impl BwBackend {
         let item_json = Self::run_bw_with(&["get", "item", item_identifier], interaction)?;
         let item: serde_json::Value =
             serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
+        Self::ensure_item_in_folder(&item, item_name, folder_id)?;
         Ok(Some(item))
     }
 
@@ -1179,17 +1188,49 @@ impl BwBackend {
                     "Batch resolving {} keys as fields on Bitwarden item '{item_name}'",
                     key_entries.len()
                 );
+                let folder_id = match bw_config.folder.as_deref() {
+                    Some(folder) => {
+                        match Self::resolve_required_folder_id_with(folder, ctx.interaction) {
+                            Ok(folder_id) => Some(folder_id),
+                            Err(error) => {
+                                let message = error.to_string();
+                                for key in &key_entries {
+                                    results.insert(
+                                        key.to_string(),
+                                        Err(anyhow::anyhow!(message.clone())),
+                                    );
+                                }
+                                return results;
+                            }
+                        }
+                    }
+                    None => None,
+                };
                 match Self::run_bw_with(&["get", "item", item_name], ctx.interaction) {
                     Ok(item_json) => {
                         let item: std::result::Result<serde_json::Value, _> =
                             serde_json::from_str(&item_json);
                         match item {
                             Ok(item_val) => {
-                                for key in &key_entries {
-                                    results.insert(
-                                        key.to_string(),
-                                        Self::extract_field_from_value(&item_val, key),
-                                    );
+                                if let Err(error) = Self::ensure_item_in_folder(
+                                    &item_val,
+                                    item_name,
+                                    folder_id.as_deref(),
+                                ) {
+                                    let message = error.to_string();
+                                    for key in &key_entries {
+                                        results.insert(
+                                            key.to_string(),
+                                            Err(anyhow::anyhow!(message.clone())),
+                                        );
+                                    }
+                                } else {
+                                    for key in &key_entries {
+                                        results.insert(
+                                            key.to_string(),
+                                            Self::extract_field_from_value(&item_val, key),
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -1221,14 +1262,24 @@ impl BwBackend {
                     "Batch resolving {} keys via Bitwarden item list",
                     key_entries.len()
                 );
-                let folder_id: Option<String> = bw_config
-                    .folder
-                    .as_deref()
-                    .map(|folder| Self::resolve_folder_id_with(folder, ctx.interaction))
-                    .transpose()
-                    .ok()
-                    .flatten()
-                    .flatten();
+                let folder_id: Option<String> = match bw_config.folder.as_deref() {
+                    Some(folder) => {
+                        match Self::resolve_required_folder_id_with(folder, ctx.interaction) {
+                            Ok(folder_id) => Some(folder_id),
+                            Err(error) => {
+                                let message = error.to_string();
+                                for key in &key_entries {
+                                    results.insert(
+                                        key.to_string(),
+                                        Err(anyhow::anyhow!(message.clone())),
+                                    );
+                                }
+                                return results;
+                            }
+                        }
+                    }
+                    None => None,
+                };
 
                 match Self::run_bw_with(&["list", "items"], ctx.interaction) {
                     Ok(items_json) => {
@@ -1296,7 +1347,15 @@ impl BwBackend {
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             // Look up key as a custom field on the configured item
             debug!("Resolving key '{key}' as field on Bitwarden item '{item}'");
+            let folder_id = bw_config
+                .folder
+                .as_deref()
+                .map(|folder| Self::resolve_required_folder_id_with(folder, ctx.interaction))
+                .transpose()?;
             let item_json = Self::run_bw_with(&["get", "item", item], ctx.interaction)?;
+            let item_value: serde_json::Value =
+                serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
+            Self::ensure_item_in_folder(&item_value, item, folder_id.as_deref())?;
             Self::extract_field_from_item(&item_json, key)
         } else {
             // Look up the key as a password item using list + exact-name filter
@@ -1306,9 +1365,8 @@ impl BwBackend {
             let folder_id: Option<String> = bw_config
                 .folder
                 .as_deref()
-                .map(|folder| Self::resolve_folder_id_with(folder, ctx.interaction))
-                .transpose()?
-                .flatten();
+                .map(|folder| Self::resolve_required_folder_id_with(folder, ctx.interaction))
+                .transpose()?;
             Self::disambiguate_items_with(
                 key,
                 ctx.repository.as_deref(),
@@ -1400,9 +1458,8 @@ impl Backend for BwBackend {
         let folder_id: Option<String> = bw_config
             .folder
             .as_deref()
-            .map(Self::resolve_folder_id)
-            .transpose()?
-            .flatten();
+            .map(|folder| Self::resolve_required_folder_id_with(folder, None))
+            .transpose()?;
         let item_template = serde_json::json!({
             "type": 1,
             "name": key,
@@ -2132,10 +2189,37 @@ exit 1
     }
 
     #[test]
+    fn resolve_reference_folder_id_rejects_missing_requested_folder() {
+        with_mock_bw("#!/bin/sh\necho '[]'\n", || {
+            let error = BwBackend::resolve_reference_folder_id(Some("Missing"), None)
+                .expect_err("a missing requested folder must fail");
+            assert_eq!(
+                error.to_string(),
+                "Requested Bitwarden folder not found: Missing"
+            );
+        });
+    }
+
+    #[test]
     fn select_item_from_list_errors_when_no_exact_name() {
         let items = vec![serde_json::json!({"name":"OTHER_KEY"})];
         let result = BwBackend::select_item_from_list("MY_KEY", &items, None, None, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_item_from_list_rejects_sole_match_outside_requested_folder() {
+        let items = vec![serde_json::json!({
+            "name": "MY_KEY",
+            "folderId": "production"
+        })];
+        let error =
+            BwBackend::select_item_from_list("MY_KEY", &items, None, Some("development"), None)
+                .expect_err("an outside-folder sole match must not be selected");
+        assert_eq!(
+            error.to_string(),
+            "No Bitwarden items found with name 'MY_KEY'"
+        );
     }
 
     #[test]
@@ -2253,9 +2337,9 @@ exit 1
     }
 
     #[test]
-    fn backend_resolve_with_bw_reference_disambiguates_by_repository_before_folder_and_project() {
+    fn backend_resolve_with_bw_reference_filters_by_folder_before_metadata() {
         let selected_item = serde_json::json!({
-            "id": "item-1",
+            "id": "item-other",
             "name": "my-item",
             "folderId": "folder-other",
             "login": { "password": "repo-pw" },
@@ -2264,7 +2348,7 @@ exit 1
         let items_json = serde_json::json!([
             selected_item,
             {
-                "id": "item-2",
+                "id": "item-1",
                 "name": "my-item",
                 "folderId": "folder-abc",
                 "login": { "password": "folder-project-pw" },
@@ -2282,8 +2366,9 @@ exit 1
         let selected_item_json = serde_json::json!({
             "id": "item-1",
             "name": "my-item",
-            "login": { "password": "repo-pw" },
-            "fields": [{"name":"repository","value":"git@github.com:example/test-repo.git","type":0}]
+            "folderId": "folder-abc",
+            "login": { "password": "folder-project-pw" },
+            "fields": [{"name":"project","value":"test-project","type":0}]
         })
         .to_string();
         let script = format!(
@@ -2307,7 +2392,7 @@ exit 1
             let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
             let backend = BwBackend;
             let result = backend.resolve("API_KEY", Some("bw://my-item/password"), &ctx);
-            assert_eq!(result.unwrap(), "repo-pw");
+            assert_eq!(result.unwrap(), "folder-project-pw");
         });
     }
 
@@ -2333,6 +2418,7 @@ exit 1
         let selected_item_json = serde_json::json!({
             "id": "item-1",
             "name": "my-item",
+            "folderId": "folder-abc",
             "login": { "password": "proj-pw" },
             "fields": [{"name":"project","value":"test-project","type":0}]
         })
@@ -2378,6 +2464,7 @@ exit 1
         let item_json = serde_json::json!({
             "id": "item-1",
             "name": "my-item",
+            "folderId": "folder-abc",
             "login": {
                 "username": "service-user",
                 "password": "service-pass"
@@ -2442,7 +2529,7 @@ exit 1
     }
 
     #[test]
-    fn resolve_batch_key_lookup_disambiguates_by_repository_before_folder_and_project() {
+    fn resolve_batch_key_lookup_filters_by_folder_before_metadata() {
         let items_json = serde_json::json!([
             {
                 "name": "API_KEY",
@@ -2478,7 +2565,53 @@ exit 1
             };
             let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
             let results = BwBackend::resolve_batch(&[("API_KEY", None)], &ctx);
-            assert_eq!(results.get("API_KEY").unwrap().as_ref().unwrap(), "repo-pw");
+            assert_eq!(
+                results.get("API_KEY").unwrap().as_ref().unwrap(),
+                "folder-project-pw"
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_batch_propagates_missing_configured_folder_without_unrestricted_lookup() {
+        let state_dir = tempfile::TempDir::new().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[]'\n  exit 0\nfi\necho 'unexpected unrestricted lookup' >&2\nexit 1\n",
+            call_log.display()
+        );
+
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    bw: BwConfig {
+                        folder: Some("Missing".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let results =
+                BwBackend::resolve_batch(&[("API_KEY", None), ("DB_PASSWORD", None)], &ctx);
+
+            for key in ["API_KEY", "DB_PASSWORD"] {
+                let error = results
+                    .get(key)
+                    .expect("batch result should exist")
+                    .as_ref()
+                    .expect_err("missing configured folder must fail the key");
+                assert_eq!(
+                    error.to_string(),
+                    "Requested Bitwarden folder not found: Missing"
+                );
+            }
+
+            let log = std::fs::read_to_string(&call_log).unwrap();
+            assert!(!log.lines().any(|line| line == "list items"));
         });
     }
 
@@ -2639,6 +2772,39 @@ exit 1
     }
 
     #[test]
+    fn backend_resolve_with_configured_item_rejects_outside_folder() {
+        let item_json = r#"{"type":1,"name":"my-bw-item","folderId":"production","fields":[{"name":"MY_KEY","value":"production-value"}],"login":{"password":""}}"#;
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Development\",\"id\":\"development\"}}]'\n  exit 0\nfi\necho '{}'\n",
+            item_json
+        );
+        with_mock_bw(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    backend: "bw".to_string(),
+                    bw: BwConfig {
+                        item: Some("my-bw-item".to_string()),
+                        folder: Some("Development".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_resolve_context(&config, std::path::Path::new("/tmp"));
+            let error = BwBackend
+                .resolve("MY_KEY", None, &ctx)
+                .expect_err("configured item outside the folder must fail");
+            assert_eq!(
+                error.to_string(),
+                "Bitwarden item 'my-bw-item' is not in the requested folder"
+            );
+        });
+    }
+
+    #[test]
     fn backend_resolve_exact_name_match_from_list() {
         // bw list items --search returns items; only the exact name match is used
         let items_json = r#"[{"name":"MY_KEY","login":{"password":"exact-password"},"fields":[]},{"name":"MY_KEY_EXTRA","login":{"password":"wrong"},"fields":[]}]"#;
@@ -2689,7 +2855,7 @@ exit 1
     }
 
     #[test]
-    fn disambiguate_items_narrows_by_repository_before_folder() {
+    fn disambiguate_items_narrows_by_folder_before_repository() {
         let items_json = r#"[
             {"name":"DB_PASS","folderId":"folder-other","login":{"password":"repo-pw"},"fields":[{"name":"repository","value":"git@github.com:example/test-repo.git","type":0}]},
             {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"folder-pw"},"fields":[]}
@@ -2702,7 +2868,7 @@ exit 1
                 Some("folder-abc"),
                 None,
             );
-            assert_eq!(result.unwrap(), "repo-pw");
+            assert_eq!(result.unwrap(), "folder-pw");
         });
     }
 

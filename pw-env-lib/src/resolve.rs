@@ -10,6 +10,8 @@ use crate::cache::{SecretCacheKey, SecretValueCache};
 use crate::config::Config;
 use crate::env_file::{EntryKind, EnvEntry, EnvFile};
 
+const BITWARDEN_CACHE_KEY_VERSION: &str = "bw-cache-v2";
+
 /// Walk up from `dir` to find a `.git` directory, returning the containing folder.
 pub(crate) fn find_git_root(dir: &Path) -> Option<PathBuf> {
     let mut current = dir.to_path_buf();
@@ -233,7 +235,12 @@ fn cache_backend_config(config: &Config, dir: &Path, backend: &str) -> String {
         _ => Ok("{}".to_string()),
     };
 
-    serialized.unwrap_or_else(|_| "{}".to_string())
+    let serialized = serialized.unwrap_or_else(|_| "{}".to_string());
+    if backend == "bw" {
+        format!("{BITWARDEN_CACHE_KEY_VERSION}:{serialized}")
+    } else {
+        serialized
+    }
 }
 
 fn build_secret_cache_key(
@@ -300,7 +307,7 @@ pub fn resolve_env_file_with_interaction(
         return Ok(resolved);
     }
 
-    Config::ensure_secret_fetch_approved(&env_file.path)?;
+    Config::ensure_secret_fetch_approved(env_file)?;
 
     let project = detect_project_name(dir);
     let repository = detect_repository_remote(dir);
@@ -340,7 +347,7 @@ pub fn resolve_env_file_with_interaction(
     if !op_entries.is_empty() {
         let backend = backend::create_backend("op")?;
         for entry in &op_entries {
-            let cache_key = build_secret_cache_key(&env_file.path, entry, "op", &ctx);
+            let cache_key = build_secret_cache_key(env_file.path(), entry, "op", &ctx);
             if let Some(value) = secret_cache.get(&cache_key) {
                 debug!("Resolved {} via cached 1Password value", entry.key);
                 resolved.insert(entry.key.clone(), value);
@@ -356,7 +363,7 @@ pub fn resolve_env_file_with_interaction(
                     info!("Resolved {} via 1Password", entry.key);
                     secret_cache.set(&cache_key, &value);
                     log_credential_fetch_audit(
-                        &env_file.path,
+                        env_file.path(),
                         dir,
                         project.as_deref(),
                         backend.name(),
@@ -384,7 +391,7 @@ pub fn resolve_env_file_with_interaction(
         let mut bw_cache_keys: BTreeMap<String, SecretCacheKey> = BTreeMap::new();
 
         for entry in &bw_entries {
-            let cache_key = build_secret_cache_key(&env_file.path, entry, "bw", &ctx);
+            let cache_key = build_secret_cache_key(env_file.path(), entry, "bw", &ctx);
             if let Some(value) = secret_cache.get(&cache_key) {
                 debug!("Resolved {} via cached Bitwarden value", entry.key);
                 resolved.insert(entry.key.clone(), value);
@@ -430,7 +437,7 @@ pub fn resolve_env_file_with_interaction(
                             secret_cache.set(cache_key, value);
                         }
                         log_credential_fetch_audit(
-                            &env_file.path,
+                            env_file.path(),
                             dir,
                             project.as_deref(),
                             "Bitwarden",
@@ -465,7 +472,7 @@ pub fn resolve_env_file_with_interaction(
         let mut op_cache_keys: BTreeMap<String, SecretCacheKey> = BTreeMap::new();
 
         for entry in &default_entries {
-            let cache_key = build_secret_cache_key(&env_file.path, entry, "op", &ctx);
+            let cache_key = build_secret_cache_key(env_file.path(), entry, "op", &ctx);
             if let Some(value) = secret_cache.get(&cache_key) {
                 debug!("Resolved {} via cached 1Password value", entry.key);
                 resolved.insert(entry.key.clone(), value);
@@ -491,7 +498,7 @@ pub fn resolve_env_file_with_interaction(
                             secret_cache.set(cache_key, value);
                         }
                         log_credential_fetch_audit(
-                            &env_file.path,
+                            env_file.path(),
                             dir,
                             project.as_deref(),
                             "1Password",
@@ -521,7 +528,7 @@ pub fn resolve_env_file_with_interaction(
             let mut gpg_cache_keys: BTreeMap<String, SecretCacheKey> = BTreeMap::new();
 
             for entry in &default_entries {
-                let cache_key = build_secret_cache_key(&env_file.path, entry, "gpg", &ctx);
+                let cache_key = build_secret_cache_key(env_file.path(), entry, "gpg", &ctx);
                 if let Some(value) = secret_cache.get(&cache_key) {
                     debug!("Resolved {} via cached GPG value", entry.key);
                     resolved.insert(entry.key.clone(), value);
@@ -544,7 +551,7 @@ pub fn resolve_env_file_with_interaction(
                                     secret_cache.set(cache_key, value);
                                 }
                                 log_credential_fetch_audit(
-                                    &env_file.path,
+                                    env_file.path(),
                                     dir,
                                     project.as_deref(),
                                     "GPG",
@@ -567,7 +574,7 @@ pub fn resolve_env_file_with_interaction(
                 matches!(backend.name(), "Bitwarden").then(Instant::now);
             for entry in &default_entries {
                 let cache_key =
-                    build_secret_cache_key(&env_file.path, entry, default_backend_name, &ctx);
+                    build_secret_cache_key(env_file.path(), entry, default_backend_name, &ctx);
                 if let Some(value) = secret_cache.get(&cache_key) {
                     debug!("Resolved {} via cached {} value", entry.key, backend.name());
                     resolved.insert(entry.key.clone(), value);
@@ -579,7 +586,7 @@ pub fn resolve_env_file_with_interaction(
                         info!("Resolved {} via {}", entry.key, backend.name());
                         secret_cache.set(&cache_key, &value);
                         log_credential_fetch_audit(
-                            &env_file.path,
+                            env_file.path(),
                             dir,
                             project.as_deref(),
                             backend.name(),
@@ -1074,6 +1081,7 @@ branch "broken"]
         let unknown = cache_backend_config(&config, dir, "unknown");
 
         assert!(op.contains("op-item"));
+        assert!(bw.starts_with("bw-cache-v2:"));
         assert!(bw.contains("bw-item"));
         assert!(gpg.contains(".env.secrets.gpg"));
         assert_eq!(unknown, "{}");
@@ -1407,6 +1415,76 @@ branch "broken"]
             None => unsafe { std::env::remove_var("HOME") },
         }
         result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_retained_replacement_snapshot_before_backend_call() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home_dir = tempfile::TempDir::new().unwrap();
+        let bin_dir = tempfile::TempDir::new().unwrap();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let env_path = project_dir.path().join(".env");
+        let marker = project_dir.path().join("op-called");
+        let op_path = bin_dir.path().join("op");
+        fs::write(
+            &op_path,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&op_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&op_path, permissions).unwrap();
+
+        let old_home = std::env::var_os("HOME");
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(bin_dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("PATH", &new_path);
+        }
+
+        let approved_contents = "API_KEY=op://vault/item/approved\n";
+        let replacement_contents = "API_KEY=op://vault/item/replacement\n";
+        fs::write(&env_path, approved_contents).unwrap();
+        let approved_snapshot = EnvFile::parse(&env_path).unwrap();
+        Config::approve_secret_fetch(
+            &env_path,
+            crate::config::SecretFetchApprovalMode::CurrentEnvHash,
+        )
+        .unwrap();
+
+        fs::write(&env_path, replacement_contents).unwrap();
+        let replacement_snapshot = EnvFile::parse(&env_path).unwrap();
+        fs::write(&env_path, approved_contents).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let error = resolve_env_file(&replacement_snapshot, &config, project_dir.path())
+            .expect_err("a retained replacement snapshot must not be approved");
+        assert!(error.to_string().contains("was not approved"));
+        assert!(!marker.exists());
+        assert_ne!(
+            approved_snapshot.content_hash(),
+            replacement_snapshot.content_hash()
+        );
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        unsafe { std::env::set_var("PATH", old_path) };
     }
 
     /// The op:// reference in an entry must be forwarded to the backend's "read" command.

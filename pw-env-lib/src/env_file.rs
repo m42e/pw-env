@@ -39,8 +39,10 @@ pub enum EnvLine {
 
 /// Parsed .env file.
 pub struct EnvFile {
-    pub path: PathBuf,
-    pub lines: Vec<EnvLine>,
+    path: PathBuf,
+    project_path: PathBuf,
+    lines: Vec<EnvLine>,
+    content_hash: String,
 }
 
 impl EnvFile {
@@ -96,10 +98,16 @@ impl EnvFile {
                 path.display()
             );
         }
-        debug!("Parsing .env file: {}", path.display());
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("Failed to open .env file: {}", path.display()))?;
-        let reader = BufReader::new(file);
+        let canonical_path = path
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve .env file: {}", path.display()))?;
+        debug!("Parsing .env file: {}", canonical_path.display());
+        let contents = std::fs::read_to_string(&canonical_path)
+            .with_context(|| format!("Failed to read .env file: {}", path.display()))?;
+        let digest = Sha256::digest(contents.as_bytes());
+        let content_hash = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        let project_path = project_path_for_env_file(&canonical_path)?;
+        let reader = BufReader::new(contents.as_bytes());
         let mut lines = Vec::new();
         let mut pending_no_migrate = false;
 
@@ -145,9 +153,31 @@ impl EnvFile {
         }
 
         Ok(EnvFile {
-            path: path.to_path_buf(),
+            path: canonical_path,
+            project_path,
             lines,
+            content_hash,
         })
+    }
+
+    /// Return the canonical path captured when this snapshot was parsed.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Return the project identity captured when this snapshot was parsed.
+    pub fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
+    /// Return the SHA-256 hash of the exact contents used to parse this snapshot.
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    /// Return the preserved source lines without allowing callers to mutate them.
+    pub fn lines(&self) -> &[EnvLine] {
+        &self.lines
     }
 
     /// Get all entries (filtering out comments).
@@ -298,6 +328,28 @@ fn topmost_git_root(dir: &Path) -> Option<PathBuf> {
 
         if !current.pop() {
             return topmost;
+        }
+    }
+}
+
+fn project_path_for_env_file(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Failed to determine project for {}", path.display()))?;
+    let project_dir = find_git_root(parent).unwrap_or_else(|| parent.to_path_buf());
+    project_dir
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve project for {}", path.display()))
+}
+
+fn find_git_root(dir: &Path) -> Option<PathBuf> {
+    let mut current = dir.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
         }
     }
 }
@@ -629,6 +681,7 @@ mod tests {
     fn test_filters_likely_secret_entries() {
         let env_file = EnvFile {
             path: PathBuf::from(".env"),
+            project_path: PathBuf::from("."),
             lines: vec![
                 EnvLine::Entry(EnvEntry {
                     key: "API_KEY".to_string(),
@@ -645,6 +698,7 @@ mod tests {
                     kind: EntryKind::Plaintext("debug".to_string()),
                 }),
             ],
+            content_hash: String::new(),
         };
 
         let detected: Vec<&str> = env_file
@@ -660,6 +714,7 @@ mod tests {
     fn test_filters_reviewed_likely_secret_entries() {
         let env_file = EnvFile {
             path: PathBuf::from(".env"),
+            project_path: PathBuf::from("."),
             lines: vec![
                 EnvLine::Entry(EnvEntry {
                     key: "API_KEY".to_string(),
@@ -676,6 +731,7 @@ mod tests {
                     kind: EntryKind::Plaintext("Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string()),
                 }),
             ],
+            content_hash: String::new(),
         };
 
         let reviewed = std::collections::BTreeSet::from([match &env_file.lines[0] {
@@ -956,6 +1012,46 @@ mod tests {
 
         let found = EnvFile::find(temp_dir.path());
         assert_eq!(found, Some(env_path));
+    }
+
+    #[test]
+    fn parse_captures_canonical_identity_and_hash_for_original_contents() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "API_KEY=original\n").unwrap();
+
+        let snapshot = EnvFile::parse(&env_path).unwrap();
+        let original_hash = snapshot.content_hash().to_owned();
+        assert_eq!(snapshot.path(), env_path.canonicalize().unwrap());
+        assert_eq!(
+            snapshot.project_path(),
+            temp_dir.path().canonicalize().unwrap()
+        );
+        assert_eq!(snapshot.lines().len(), 1);
+        assert!(matches!(
+            &snapshot.lines()[0],
+            EnvLine::Entry(entry) if entry.key == "API_KEY" && entry.raw_value == "original"
+        ));
+        assert_eq!(snapshot.entries()[0].raw_value, "original");
+
+        std::fs::write(&env_path, "API_KEY=replacement\n").unwrap();
+        assert_eq!(snapshot.content_hash(), original_hash);
+        assert_eq!(snapshot.entries()[0].raw_value, "original");
+    }
+
+    #[test]
+    fn parse_uses_the_enclosing_git_root_as_project_identity() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let repository = temp_dir.path().join("repository");
+        let service = repository.join("services/api");
+        let env_path = service.join(".env");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir_all(&service).unwrap();
+        std::fs::write(&env_path, "API_KEY=original\n").unwrap();
+
+        let snapshot = EnvFile::parse(&env_path).unwrap();
+
+        assert_eq!(snapshot.project_path(), repository.canonicalize().unwrap());
     }
 
     #[cfg(unix)]

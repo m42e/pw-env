@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::env_file::EnvFile;
+
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 
 fn base_dir_from_env(
@@ -531,12 +533,14 @@ impl Config {
         path: &Path,
         mode: SecretFetchApprovalMode,
     ) -> Result<ApprovedSecretFetchEntry> {
-        let (project_path, env_path) = resolve_secret_fetch_target(path)?;
+        let (_, env_path) = resolve_secret_fetch_target(path)?;
+        let env_file = EnvFile::parse(&env_path)?;
+        let project_path = env_file.project_path().to_path_buf();
         let mut approvals = ApprovedSecretFetches::load()?;
 
         match mode {
             SecretFetchApprovalMode::CurrentEnvHash => {
-                let env_hash = hash_file(&env_path)?;
+                let env_hash = env_file.content_hash().to_owned();
                 approvals.approve_hash(&project_path, env_hash.clone());
                 approvals.save()?;
                 Ok(ApprovedSecretFetchEntry {
@@ -567,17 +571,19 @@ impl Config {
         Ok(removed)
     }
 
-    pub fn ensure_secret_fetch_approved(env_path: &Path) -> Result<()> {
-        Self::ensure_secret_fetch_approved_with(env_path, |_| Ok(None))
+    pub fn ensure_secret_fetch_approved(env_file: &EnvFile) -> Result<()> {
+        Self::ensure_secret_fetch_approved_with(env_file, |_| Ok(None))
     }
 
-    /// Ensure approval exists, asking the caller for a decision only when necessary.
-    pub fn ensure_secret_fetch_approved_with<F>(env_path: &Path, approve: F) -> Result<()>
+    /// Ensure approval exists for this exact parsed snapshot, asking the caller for a decision
+    /// only when necessary.
+    pub fn ensure_secret_fetch_approved_with<F>(env_file: &EnvFile, approve: F) -> Result<()>
     where
         F: FnOnce(&SecretFetchApprovalRequest) -> Result<Option<SecretFetchApprovalMode>>,
     {
-        let (project_path, env_path) = resolve_secret_fetch_target(env_path)?;
-        let env_hash = hash_file(&env_path)?;
+        let project_path = env_file.project_path().to_path_buf();
+        let env_path = env_file.path().to_path_buf();
+        let env_hash = env_file.content_hash().to_owned();
         let mut approvals = ApprovedSecretFetches::load()?;
 
         if approvals.is_approved(&project_path, &env_hash) {
@@ -1271,6 +1277,7 @@ fn find_git_root(dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
@@ -2312,7 +2319,8 @@ backend = "op"
         fs::write(&env_path, "API_KEY=op://vault/item/field\n").unwrap();
 
         // In tests, stdin is not a terminal, so this should bail
-        let result = Config::ensure_secret_fetch_approved(&env_path);
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let result = Config::ensure_secret_fetch_approved(&env_file);
         assert!(result.is_err());
 
         let _ = fs::remove_dir_all(&test_dir);
@@ -2973,7 +2981,8 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
 
-        let result = Config::ensure_secret_fetch_approved(&env_path);
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let result = Config::ensure_secret_fetch_approved(&env_file);
         let _ = fs::remove_dir_all(&test_dir);
 
         assert!(result.is_err());
@@ -2992,7 +3001,8 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
 
-        let result = Config::ensure_secret_fetch_approved_with(&env_path, |request| {
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let result = Config::ensure_secret_fetch_approved_with(&env_file, |request| {
             assert_eq!(request.previously_approved, false);
             Ok(Some(SecretFetchApprovalMode::CurrentEnvHash))
         });
@@ -3012,7 +3022,8 @@ backend = "op"
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "KEY=op://vault/item/key\n").unwrap();
 
-        let result = Config::ensure_secret_fetch_approved_with(&env_path, |_| {
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let result = Config::ensure_secret_fetch_approved_with(&env_file, |_| {
             Ok(Some(SecretFetchApprovalMode::ProjectWide))
         });
         let _ = fs::remove_dir_all(&test_dir);
@@ -3021,6 +3032,86 @@ backend = "op"
             result.is_ok(),
             "answer 'a' should approve project-wide and return Ok(())"
         );
+    }
+
+    #[test]
+    fn ensure_secret_fetch_approval_rejects_a_different_retained_snapshot() {
+        let test_dir = unique_test_dir("ensure-sf-snapshot");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        let approved_contents = "API_KEY=op://vault/item/approved\n";
+        let replacement_contents = "API_KEY=op://vault/item/replacement\n";
+        fs::write(&env_path, approved_contents).unwrap();
+
+        let approved_snapshot = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let approved_hash = approved_snapshot.content_hash().to_owned();
+        Config::ensure_secret_fetch_approved_with(&approved_snapshot, |_| {
+            Ok(Some(SecretFetchApprovalMode::CurrentEnvHash))
+        })
+        .unwrap();
+
+        fs::write(&env_path, replacement_contents).unwrap();
+        let replacement_snapshot = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        fs::write(&env_path, approved_contents).unwrap();
+
+        let error = Config::ensure_secret_fetch_approved(&replacement_snapshot)
+            .expect_err("approval must follow the retained parsed snapshot");
+        assert!(error.to_string().contains("was not approved"));
+        let approvals = ApprovedSecretFetches::load().unwrap();
+        assert!(
+            approvals
+                .approved_hashes(replacement_snapshot.project_path())
+                .contains(&approved_hash)
+        );
+        assert!(
+            !approvals
+                .approved_hashes(replacement_snapshot.project_path())
+                .contains(replacement_snapshot.content_hash())
+        );
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn ensure_secret_fetch_approval_binds_decision_to_original_snapshot() {
+        let test_dir = unique_test_dir("ensure-sf-callback-snapshot");
+        fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
+        let env_path = test_dir.join(".env");
+        let original_contents = "API_KEY=op://vault/item/original\n";
+        let replacement_contents = "API_KEY=op://vault/item/replacement\n";
+        fs::write(&env_path, original_contents).unwrap();
+        let original_snapshot = crate::env_file::EnvFile::parse(&env_path).unwrap();
+
+        Config::ensure_secret_fetch_approved_with(&original_snapshot, |_| {
+            fs::write(&env_path, replacement_contents).unwrap();
+            Ok(Some(SecretFetchApprovalMode::CurrentEnvHash))
+        })
+        .unwrap();
+
+        let replacement_snapshot = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let callback_called = Cell::new(false);
+        let error = Config::ensure_secret_fetch_approved_with(&replacement_snapshot, |_| {
+            callback_called.set(true);
+            Ok(None)
+        })
+        .expect_err("replacement snapshot must require a separate decision");
+        assert!(callback_called.get());
+        assert!(error.to_string().contains("was not approved"));
+        let approvals = ApprovedSecretFetches::load().unwrap();
+        assert!(
+            approvals
+                .approved_hashes(original_snapshot.project_path())
+                .contains(original_snapshot.content_hash())
+        );
+        assert!(
+            !approvals
+                .approved_hashes(original_snapshot.project_path())
+                .contains(replacement_snapshot.content_hash())
+        );
+
+        let _ = fs::remove_dir_all(&test_dir);
     }
 
     // ── Tests for project_override_file ancestor traversal (L582, L586) ────────

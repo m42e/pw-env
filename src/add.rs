@@ -645,7 +645,7 @@ mod tests {
         let op_path = bin_dir.path().join("op");
         let op_log_path = temp_dir.path().join("op-invocation.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\n' \"$*\" > '{}'\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"edit\" ] && [ \"$3\" = \"shared-item\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ] && [ \"$3\" = \"shared-item\" ] && [ \"$4\" = \"--fields\" ] && [ \"$5\" = \"label=API_KEY\" ] && [ \"$6\" = \"--reveal\" ]; then\n  printf 'super-secret'\n  exit 0\nfi\nprintf 'unexpected args: %s\n' \"$*\" >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%s\n' \"$*\" >> '{}'\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"edit\" ] && [ \"$3\" = \"shared-item\" ]; then\n  cat >/dev/null\n  exit 0\nfi\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ] && [ \"$3\" = \"shared-item\" ] && [ \"$4\" = \"--fields\" ] && [ \"$5\" = \"label=API_KEY\" ] && [ \"$6\" = \"--reveal\" ]; then\n  printf 'super-secret'\n  exit 0\nfi\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ] && [ \"$3\" = \"shared-item\" ] && [ \"$4\" = \"--format=json\" ]; then\n  printf '%s' '{{\"category\":\"LOGIN\",\"title\":\"shared-item\",\"fields\":[]}}'\n  exit 0\nfi\nprintf 'unexpected args: %s\n' \"$*\" >&2\nexit 1\n",
             op_log_path.display()
         );
 
@@ -695,8 +695,17 @@ mod tests {
         );
         let logged_args = std::fs::read_to_string(op_log_path).unwrap();
         assert!(
-            logged_args.starts_with("item get shared-item --fields label=API_KEY --reveal"),
+            logged_args
+                .lines()
+                .any(|line| line.starts_with("item edit shared-item")),
             "unexpected op args: {logged_args}"
         );
+        assert!(
+            logged_args
+                .lines()
+                .any(|line| line.starts_with("item get shared-item --fields label=API_KEY")),
+            "missing post-store verification: {logged_args}"
+        );
+        assert!(!logged_args.contains("super-secret"));
     }
 }

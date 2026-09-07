@@ -383,7 +383,7 @@ fn resolve_environment(
     interaction: Option<&dyn backend::ResolutionInteraction>,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     if !env_file.resolvable_entries().is_empty() {
-        config::Config::ensure_secret_fetch_approved_with(&env_file.path, prompt_secret_fetch)?;
+        config::Config::ensure_secret_fetch_approved_with(env_file, prompt_secret_fetch)?;
     }
     resolve::resolve_env_file_with_interaction(env_file, config, dir, interaction)
 }
@@ -499,7 +499,11 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             print!("{}", output::format_exports(&resolved, shell_syntax));
 
             // Output key tracking for the shell hook (to enable unloading on dir change)
-            let keys: Vec<String> = resolved.keys().cloned().collect();
+            let keys: Vec<String> = resolved
+                .keys()
+                .filter(|key| output::is_valid_env_key(key))
+                .cloned()
+                .collect();
             let tracking = output::format_key_tracking(&keys);
             match shell_syntax {
                 output::ShellSyntax::Posix => {
@@ -844,7 +848,7 @@ fn emit_plaintext_secret_warning(env_file: &env_file::EnvFile) -> Result<()> {
 }
 
 fn pending_migration_entries(env_file: &env_file::EnvFile) -> Result<Vec<&env_file::EnvEntry>> {
-    let reviewed = config::Config::reviewed_migration_entry_fingerprints(&env_file.path)?;
+    let reviewed = config::Config::reviewed_migration_entry_fingerprints(env_file.path())?;
     Ok(env_file.likely_secret_entries_unreviewed(&reviewed))
 }
 
@@ -915,7 +919,11 @@ fn build_hook_output_with_interaction(
     }
 
     let mut output_text = output::format_exports(&resolved, shell_syntax);
-    let keys: Vec<String> = resolved.keys().cloned().collect();
+    let keys: Vec<String> = resolved
+        .keys()
+        .filter(|key| output::is_valid_env_key(key))
+        .cloned()
+        .collect();
     let tracking = output::format_key_tracking(&keys);
     match shell_syntax {
         output::ShellSyntax::Posix => {
@@ -981,7 +989,7 @@ fn format_active_dir_tracking(active_dir: &Path, shell_syntax: output::ShellSynt
             format!("__pw_env_active_dir='{escaped}'")
         }
         output::ShellSyntax::Fish => {
-            let escaped = active_dir.replace('\'', "'\\''");
+            let escaped = output::fish_escape_single_quote(&active_dir);
             format!("set -g __pw_env_active_dir '{escaped}'")
         }
         output::ShellSyntax::PowerShell => {
@@ -2353,6 +2361,19 @@ mod tests {
         };
         let result = build_hook_output(&canonical, output::ShellSyntax::Fish, &config, None);
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn format_active_dir_tracking_fish_escapes_backslashes_and_apostrophes() {
+        let active_dir = Path::new(r"/tmp/project\'; printf FISH_PROBE; #");
+        let expected = format!(
+            "set -g __pw_env_active_dir '{}'",
+            output::fish_escape_single_quote(active_dir.to_str().unwrap())
+        );
+        assert_eq!(
+            format_active_dir_tracking(active_dir, output::ShellSyntax::Fish),
+            expected
+        );
     }
 
     #[test]

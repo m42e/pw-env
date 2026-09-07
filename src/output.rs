@@ -28,7 +28,7 @@ pub fn format_exports(vars: &BTreeMap<String, String>, shell: ShellSyntax) -> St
             }
             ShellSyntax::Fish => {
                 // set -gx KEY 'value'
-                let escaped = shell_escape_single_quote(value);
+                let escaped = fish_escape_single_quote(value);
                 output.push_str(&format!("set -gx {key} '{escaped}'\n"));
             }
             ShellSyntax::PowerShell => {
@@ -131,6 +131,10 @@ fn shell_escape_single_quote(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
+pub(crate) fn fish_escape_single_quote(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 /// Escape a value for safe embedding in PowerShell single quotes.
 /// In PowerShell, single quote escaping is done by doubling it.
 fn powershell_escape_single_quote(value: &str) -> String {
@@ -200,6 +204,16 @@ mod tests {
     }
 
     #[test]
+    fn test_fish_escape_single_quote_boundaries() {
+        assert_eq!(fish_escape_single_quote("plain text"), "plain text");
+        assert_eq!(fish_escape_single_quote("\\"), "\\\\");
+        assert_eq!(fish_escape_single_quote("'"), "\\'");
+        assert_eq!(fish_escape_single_quote("\\\\"), "\\\\\\\\");
+        assert_eq!(fish_escape_single_quote("trailing\\"), "trailing\\\\");
+        assert_eq!(fish_escape_single_quote("\\'"), "\\\\\\'");
+    }
+
+    #[test]
     fn test_format_exports_posix() {
         let mut vars = BTreeMap::new();
         vars.insert("DB_HOST".to_string(), "localhost".to_string());
@@ -215,6 +229,14 @@ mod tests {
         vars.insert("API_KEY".to_string(), "abc123".to_string());
         let output = format_exports(&vars, ShellSyntax::Fish);
         assert!(output.contains("set -gx API_KEY 'abc123'\n"));
+    }
+
+    #[test]
+    fn test_format_exports_fish_escapes_backslash_before_apostrophe() {
+        let mut vars = BTreeMap::new();
+        vars.insert("VALUE".to_string(), r"\'; printf FISH_PROBE; #".to_string());
+        let output = format_exports(&vars, ShellSyntax::Fish);
+        assert_eq!(output, "set -gx VALUE '\\\\\\\'; printf FISH_PROBE; #'\n");
     }
 
     #[test]
