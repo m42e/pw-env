@@ -1027,11 +1027,31 @@ mod tests {
             snapshot.project_path(),
             temp_dir.path().canonicalize().unwrap()
         );
+        assert_eq!(snapshot.lines().len(), 1);
+        assert!(matches!(
+            &snapshot.lines()[0],
+            EnvLine::Entry(entry) if entry.key == "API_KEY" && entry.raw_value == "original"
+        ));
         assert_eq!(snapshot.entries()[0].raw_value, "original");
 
         std::fs::write(&env_path, "API_KEY=replacement\n").unwrap();
         assert_eq!(snapshot.content_hash(), original_hash);
         assert_eq!(snapshot.entries()[0].raw_value, "original");
+    }
+
+    #[test]
+    fn parse_uses_the_enclosing_git_root_as_project_identity() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let repository = temp_dir.path().join("repository");
+        let service = repository.join("services/api");
+        let env_path = service.join(".env");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir_all(&service).unwrap();
+        std::fs::write(&env_path, "API_KEY=original\n").unwrap();
+
+        let snapshot = EnvFile::parse(&env_path).unwrap();
+
+        assert_eq!(snapshot.project_path(), repository.canonicalize().unwrap());
     }
 
     #[cfg(unix)]

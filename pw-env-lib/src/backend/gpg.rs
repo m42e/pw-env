@@ -637,6 +637,15 @@ PLAIN=value
     }
 
     #[test]
+    fn with_failing_mock_gpg_executes_callback() {
+        let called = Cell::new(false);
+        with_failing_mock_gpg("#!/bin/sh\nexit 1\n", || {
+            called.set(true);
+        });
+        assert!(called.get());
+    }
+
+    #[test]
     fn with_mock_gpg_executes_callback() {
         let called = Cell::new(false);
         with_mock_gpg("", || {

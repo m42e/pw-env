@@ -597,6 +597,66 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn migration_fields_include_required_metadata() {
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/work/project"),
+            config: &config,
+            project: Some("my-project".to_string()),
+            repository: Some("my-repository".to_string()),
+        };
+
+        let fields = OpBackend::migration_fields(&ctx);
+
+        assert_eq!(fields.len(), 4);
+        assert!(fields.iter().any(|field| {
+            field["label"] == MIGRATED_FROM_FIELD_NAME && field["value"] == "/work/project"
+        }));
+        assert!(fields.iter().any(|field| {
+            field["label"] == CREATED_WITH_FIELD_NAME
+                && field["value"] == format!("pw-env ({})", env!("CARGO_PKG_VERSION"))
+        }));
+        assert!(fields.iter().any(|field| {
+            field["label"] == PROJECT_FIELD_NAME && field["value"] == "my-project"
+        }));
+        assert!(fields.iter().any(|field| {
+            field["label"] == REPOSITORY_FIELD_NAME && field["value"] == "my-repository"
+        }));
+    }
+
+    #[test]
+    fn upsert_json_field_updates_a_field_matching_by_label_or_id() {
+        let mut item = serde_json::json!({
+            "fields": [
+                {"label": "label-only", "value": "old-label"},
+                {"id": "id-only", "value": "old-id"}
+            ]
+        });
+
+        OpBackend::upsert_json_field(&mut item, "label-only", "new-label", "STRING").unwrap();
+        OpBackend::upsert_json_field(&mut item, "id-only", "new-id", "STRING").unwrap();
+
+        assert_eq!(item["fields"].as_array().unwrap().len(), 2);
+        assert_eq!(item["fields"][0]["value"], "new-label");
+        assert_eq!(item["fields"][1]["value"], "new-id");
+    }
+
+    #[test]
+    fn contains_passkey_checks_array_and_string_values() {
+        assert!(OpBackend::contains_passkey(&serde_json::json!([
+            "not-a-passkey",
+            "PassKey"
+        ])));
+        assert!(OpBackend::contains_passkey(&serde_json::json!("passkey")));
+        assert!(!OpBackend::contains_passkey(&serde_json::json!("password")));
+    }
+
+    #[test]
     fn test_text_field_assignment_format() {
         let result = OpBackend::text_field_assignment("api_key", "myvalue");
         assert_eq!(result, "api_key[text]=myvalue");
