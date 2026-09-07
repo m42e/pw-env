@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
@@ -11,10 +12,12 @@ use super::{
 pub struct OpBackend;
 
 impl OpBackend {
+    #[cfg(test)]
     fn text_field_assignment(field_name: &str, value: &str) -> String {
         format!("{field_name}[text]={value}")
     }
 
+    #[cfg(test)]
     fn migration_field_assignments(ctx: &StoreContext) -> Vec<String> {
         let mut assignments = vec![
             Self::text_field_assignment(MIGRATED_FROM_FIELD_NAME, &ctx.migrated_from()),
@@ -30,6 +33,78 @@ impl OpBackend {
             ));
         }
         assignments
+    }
+
+    fn migration_fields(ctx: &StoreContext) -> Vec<serde_json::Value> {
+        let mut fields = vec![
+            serde_json::json!({
+                "type": "STRING",
+                "label": MIGRATED_FROM_FIELD_NAME,
+                "value": ctx.migrated_from()
+            }),
+            serde_json::json!({
+                "type": "STRING",
+                "label": CREATED_WITH_FIELD_NAME,
+                "value": ctx.created_with()
+            }),
+        ];
+        if let Some(project) = ctx.project.as_deref() {
+            fields.push(serde_json::json!({
+                "type": "STRING",
+                "label": PROJECT_FIELD_NAME,
+                "value": project
+            }));
+        }
+        if let Some(repository) = ctx.repository.as_deref() {
+            fields.push(serde_json::json!({
+                "type": "STRING",
+                "label": REPOSITORY_FIELD_NAME,
+                "value": repository
+            }));
+        }
+        fields
+    }
+
+    fn upsert_json_field(
+        item: &mut serde_json::Value,
+        label: &str,
+        value: &str,
+        field_type: &str,
+    ) -> Result<()> {
+        let object = item
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("1Password item JSON must be an object"))?;
+        let fields_value = object
+            .entry("fields")
+            .or_insert_with(|| serde_json::json!([]));
+        let fields = fields_value
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("1Password item fields must be an array"))?;
+
+        if let Some(field) = fields.iter_mut().find(|field| {
+            field.get("label").and_then(|value| value.as_str()) == Some(label)
+                || field.get("id").and_then(|value| value.as_str()) == Some(label)
+        }) {
+            field["value"] = serde_json::Value::String(value.to_string());
+        } else {
+            fields.push(serde_json::json!({
+                "type": field_type,
+                "label": label,
+                "value": value
+            }));
+        }
+        Ok(())
+    }
+
+    fn contains_passkey(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+                key.eq_ignore_ascii_case("passkey") || Self::contains_passkey(value)
+            }),
+            serde_json::Value::Array(values) => values.iter().any(Self::contains_passkey),
+            serde_json::Value::String(value) => value.eq_ignore_ascii_case("passkey"),
+            _ => false,
+        }
     }
 
     /// Run `op` with the given arguments, optionally scoped to an account.
@@ -51,6 +126,44 @@ impl OpBackend {
         }
         let stdout = String::from_utf8(output.stdout).context("op output was not valid UTF-8")?;
         Ok(stdout.trim().to_string())
+    }
+
+    fn run_op_write(
+        args: &[&str],
+        payload: &serde_json::Value,
+        account: Option<&str>,
+    ) -> Result<()> {
+        let mut cmd = Command::new("op");
+        cmd.args(args);
+        if let Some(account) = account {
+            cmd.arg("--account").arg(account);
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        debug!("Writing 1Password item JSON");
+        let mut child = cmd
+            .spawn()
+            .context("Failed to start 1Password item write")?;
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .context("Missing 1Password item write stdin")?;
+            serde_json::to_writer(&mut stdin, payload)
+                .context("Failed to send 1Password item JSON")?;
+            stdin
+                .flush()
+                .context("Failed to flush 1Password item JSON")?;
+        }
+        let output = child
+            .wait_with_output()
+            .context("Failed to wait for 1Password item write")?;
+        if !output.status.success() {
+            bail!("1Password item write failed");
+        }
+        Ok(())
     }
 
     fn get_item_field(
@@ -390,47 +503,68 @@ impl Backend for OpBackend {
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()> {
         let op_config = ctx.config.effective_op(ctx.dir);
         let account = op_config.account.as_deref();
-        let metadata_assignments = Self::migration_field_assignments(ctx);
-        let metadata_refs: Vec<&str> = metadata_assignments
-            .iter()
-            .map(|assignment| assignment.as_str())
-            .collect();
-        let vault_args: Vec<String> = op_config
+        let metadata_fields = Self::migration_fields(ctx);
+        let vault_arg = op_config
             .vault
             .as_ref()
-            .map(|v| vec![format!("--vault={v}")])
-            .unwrap_or_default();
-        let vault_refs: Vec<&str> = vault_args.iter().map(|s| s.as_str()).collect();
+            .map(|vault| format!("--vault={vault}"));
 
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
-            // Try to edit the existing item first, adding/updating the field
+            // Try to edit the existing item first, preserving its supported fields.
             debug!("Storing key '{key}' as field on item '{item}'");
-            let field_assignment = format!("{key}={value}");
-            let mut args = vec!["item", "edit", item, field_assignment.as_str()];
-            args.extend_from_slice(&metadata_refs);
-            args.extend_from_slice(&vault_refs);
-            let result = Self::run_op(&args, account);
-            if result.is_ok() {
-                return Ok(());
+            if let Ok(mut item_json) =
+                Self::get_item_json(item, op_config.vault.as_deref(), account)
+            {
+                if Self::contains_passkey(&item_json) {
+                    bail!(
+                        "Cannot update 1Password item '{item}' because JSON templates do not support passkeys"
+                    );
+                }
+
+                Self::upsert_json_field(&mut item_json, key, value, "CONCEALED")?;
+                for field in &metadata_fields {
+                    let label = field
+                        .get("label")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("1Password metadata field has no label"))?;
+                    let field_value = field
+                        .get("value")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("1Password metadata field has no value"))?;
+                    Self::upsert_json_field(&mut item_json, label, field_value, "STRING")?;
+                }
+
+                let mut args = vec!["item", "edit", item];
+                if let Some(vault_arg) = vault_arg.as_deref() {
+                    args.push(vault_arg);
+                }
+                if Self::run_op_write(&args, &item_json, account).is_ok() {
+                    return Ok(());
+                }
             }
             warn!("Failed to edit item '{item}', trying to create new item");
         }
 
-        // Create a new item with the key as the item name
-        let mut field_assignment = String::from("pass");
-        field_assignment.push_str("word=");
-        field_assignment.push_str(value);
-        let title_arg = String::from("--title=") + key;
-        let mut args = vec![
-            "item",
-            "create",
-            "--category=login",
-            title_arg.as_str(),
-            field_assignment.as_str(),
-        ];
-        args.extend_from_slice(&metadata_refs);
-        args.extend_from_slice(&vault_refs);
-        Self::run_op(&args, account)?;
+        // Create a new item with the key as the item name.
+        let mut fields = vec![serde_json::json!({
+            "id": "password",
+            "type": "CONCEALED",
+            "purpose": "PASSWORD",
+            "label": "password",
+            "value": value
+        })];
+        fields.extend(metadata_fields);
+        let payload = serde_json::json!({
+            "category": "LOGIN",
+            "title": key,
+            "fields": fields
+        });
+        let mut args = vec!["item", "create"];
+        if let Some(vault_arg) = vault_arg.as_deref() {
+            args.push(vault_arg);
+        }
+        args.push("-");
+        Self::run_op_write(&args, &payload, account)?;
         Ok(())
     }
 
@@ -586,7 +720,7 @@ mod tests {
     #[test]
     fn backend_store_creates_password_field_for_new_item() {
         with_mock_op(
-            "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"create\" ]; then\n  for arg in \"$@\"; do\n    case \"$arg\" in\n      pass*)\n        exit 0\n        ;;\n    esac\n  done\nfi\necho 'missing password field' >&2\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"create\" ]; then\n  payload=$(cat)\n  case \"$payload\" in\n    *CONCEALED*super-secret*) exit 0 ;;\n  esac\nfi\necho 'missing concealed password field' >&2\nexit 1\n",
             || {
                 let config = Config {
                     defaults: Defaults::default(),
@@ -605,6 +739,168 @@ mod tests {
                 assert!(backend.store("MY_KEY", "super-secret", &ctx).is_ok());
             },
         );
+    }
+
+    #[test]
+    fn backend_store_creation_sends_secret_only_in_json_stdin() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let argv_log = temp_dir.path().join("argv.log");
+        let stdin_log = temp_dir.path().join("stdin.json");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\nexit 0\n",
+            argv_log.display(),
+            stdin_log.display()
+        );
+        let secret = "line one 'quote' \\ path\nfield=value";
+
+        with_mock_op(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault: Some("WorkVault".to_string()),
+                        account: Some("work@example.com".to_string()),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp"),
+                config: &config,
+                project: None,
+                repository: None,
+            };
+            OpBackend.store("API_KEY", secret, &ctx).unwrap();
+        });
+
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert!(!argv.contains("line one"));
+        assert!(argv.lines().any(|line| line == "--vault=WorkVault"));
+        assert!(argv.lines().any(|line| line == "--account"));
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_log).unwrap()).unwrap();
+        let password_field = payload["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["label"] == "password")
+            .unwrap();
+        assert_eq!(password_field["type"], "CONCEALED");
+        assert_eq!(password_field["value"], secret);
+    }
+
+    #[test]
+    fn backend_store_edit_preserves_existing_fields_and_keeps_secret_out_of_argv() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let argv_log = temp_dir.path().join("argv.log");
+        let stdin_log = temp_dir.path().join("stdin.json");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ]; then\n  printf '%s\\n' '{{\"category\":\"LOGIN\",\"title\":\"Existing\",\"fields\":[{{\"id\":\"username\",\"type\":\"STRING\",\"label\":\"username\",\"value\":\"keep-me\"}}],\"sections\":[{{\"id\":\"custom\",\"title\":\"Keep me\",\"fields\":[]}}]}}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\nexit 0\n",
+            argv_log.display(),
+            stdin_log.display()
+        );
+        let secret = "edit secret with spaces = quotes ' and \\slashes\\";
+
+        let config = Config {
+            defaults: Defaults {
+                op: crate::config::OpConfig {
+                    item: Some("Existing".to_string()),
+                    vault: Some("WorkVault".to_string()),
+                    ..Default::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+        with_mock_op(&script, || {
+            OpBackend.store("API_KEY", secret, &ctx).unwrap();
+        });
+
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert!(!argv.contains("edit secret"));
+        assert!(argv.lines().any(|line| line == "item"));
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_log).unwrap()).unwrap();
+        assert_eq!(payload["sections"][0]["title"], "Keep me");
+        let api_field = payload["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["label"] == "API_KEY")
+            .unwrap();
+        assert_eq!(api_field["value"], secret);
+        assert_eq!(payload["fields"][0]["value"], "keep-me");
+    }
+
+    #[test]
+    fn backend_store_rejects_existing_passkey_items() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let marker = temp_dir.path().join("write-attempted");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ]; then\n  echo '{{\"category\":\"LOGIN\",\"passkey\":{{\"credentialId\":\"id\"}},\"fields\":[]}}'\n  exit 0\nfi\ntouch '{}'\nexit 0\n",
+            marker.display()
+        );
+        let config = Config {
+            defaults: Defaults {
+                op: crate::config::OpConfig {
+                    item: Some("Passkey item".to_string()),
+                    ..Default::default()
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+        with_mock_op(&script, || {
+            let error = OpBackend
+                .store("API_KEY", "secret", &ctx)
+                .expect_err("passkey item updates must be rejected");
+            assert!(error.to_string().contains("passkeys"));
+        });
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn backend_store_does_not_return_secret_from_write_stderr() {
+        let secret = "stderr synthetic secret";
+        let script = format!("#!/bin/sh\necho '{}' >&2\nexit 1\n", secret);
+        let config = Config {
+            defaults: Defaults::default(),
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+        with_mock_op(&script, || {
+            let error = OpBackend
+                .store("API_KEY", secret, &ctx)
+                .expect_err("a failed OP write must return an error");
+            assert!(!error.to_string().contains(secret));
+            assert_eq!(error.to_string(), "1Password item write failed");
+        });
     }
 
     #[test]
@@ -801,33 +1097,36 @@ mod tests {
 
     #[test]
     fn backend_store_with_item_configured_succeeds() {
-        with_mock_op("#!/bin/sh\necho 'edited'\n", || {
-            let config = Config {
-                defaults: Defaults {
-                    op: crate::config::OpConfig {
-                        item: Some("my-op-item".to_string()),
-                        ..Default::default()
+        with_mock_op(
+            "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ]; then\n  echo '{\"category\":\"LOGIN\",\"title\":\"my-op-item\",\"fields\":[]}'\n  exit 0\nfi\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"edit\" ]; then\n  cat >/dev/null\n  exit 0\nfi\nexit 1\n",
+            || {
+                let config = Config {
+                    defaults: Defaults {
+                        op: crate::config::OpConfig {
+                            item: Some("my-op-item".to_string()),
+                            ..Default::default()
+                        },
+                        ..Defaults::default()
                     },
-                    ..Defaults::default()
-                },
-                log: LogConfig::default(),
-                updates: UpdateConfig::default(),
-                projects: vec![],
-            };
-            let ctx = StoreContext {
-                dir: Path::new("/tmp"),
-                config: &config,
-                project: None,
-                repository: None,
-            };
-            let result = OpBackend.store("MY_KEY", "my-value", &ctx);
-            assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-        });
+                    log: LogConfig::default(),
+                    updates: UpdateConfig::default(),
+                    projects: vec![],
+                };
+                let ctx = StoreContext {
+                    dir: Path::new("/tmp"),
+                    config: &config,
+                    project: None,
+                    repository: None,
+                };
+                let result = OpBackend.store("MY_KEY", "my-value", &ctx);
+                assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+            },
+        );
     }
 
     #[test]
     fn backend_store_with_item_configured_includes_vault_arg() {
-        let script = "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"edit\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"--vault=WorkVault\" ]; then\n      echo 'edited'\n      exit 0\n    fi\n  done\n  echo 'missing vault arg' >&2\n  exit 1\nfi\necho 'unexpected command' >&2\nexit 1\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"get\" ]; then\n  echo '{\"category\":\"LOGIN\",\"title\":\"my-op-item\",\"fields\":[]}'\n  exit 0\nfi\nif [ \"$1\" = \"item\" ] && [ \"$2\" = \"edit\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"--vault=WorkVault\" ]; then\n      cat >/dev/null\n      exit 0\n    fi\n  done\n  echo 'missing vault arg' >&2\n  exit 1\nfi\necho 'unexpected command' >&2\nexit 1\n";
 
         with_mock_op(script, || {
             let config = Config {

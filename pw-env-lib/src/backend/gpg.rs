@@ -241,8 +241,12 @@ impl Backend for GpgBackend {
             repository: None,
             interaction: None,
         };
-        let mut existing = if path.exists() {
-            Self::load_all_stored_secrets(&resolve_ctx).unwrap_or_default()
+        let mut existing = if path
+            .try_exists()
+            .context("Failed to check the existing GPG secret store")?
+        {
+            Self::load_all_stored_secrets(&resolve_ctx)
+                .context("Refusing to overwrite an unreadable GPG secret store")?
         } else {
             BTreeMap::new()
         };
@@ -608,6 +612,30 @@ PLAIN=value
         unsafe { std::env::set_var("PATH", &old_path) };
     }
 
+    fn with_failing_mock_gpg<F: FnOnce()>(script: &str, f: F) {
+        let _guard = super::super::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let script_path = dir.path().join("gpg");
+        std::fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("PATH", &new_path) };
+        f();
+        unsafe { std::env::set_var("PATH", &old_path) };
+    }
+
     #[test]
     fn with_mock_gpg_executes_callback() {
         let called = Cell::new(false);
@@ -817,7 +845,51 @@ PLAIN=value
             // File exists → load_all_stored_secrets is called (decrypt), then encrypt
             let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
             assert!(result.is_ok(), "store failed: {:?}", result);
+            let encrypted = std::fs::read_to_string(&gpg_file).unwrap();
+            assert!(encrypted.contains("EXISTING_KEY=existing-value"));
+            assert!(encrypted.contains("NEW_KEY=new-value"));
         });
+    }
+
+    #[test]
+    fn store_refuses_to_replace_existing_file_when_decryption_fails() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let gpg_file = temp_dir.path().join(".env.gpg");
+        let original = b"existing ciphertext";
+        std::fs::write(&gpg_file, original).unwrap();
+        let encryption_marker = temp_dir.path().join("encryption-invoked");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\n  echo 'decrypt failed' >&2\n  exit 1\nfi\ntouch '{}'\nexit 0\n",
+            encryption_marker.display()
+        );
+
+        with_failing_mock_gpg(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    gpg: crate::config::GpgConfig {
+                        recipient: Some("test@example.com".to_string()),
+                        file_pattern: ".env.gpg".to_string(),
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = super::super::StoreContext {
+                dir: temp_dir.path(),
+                config: &config,
+                project: None,
+                repository: None,
+            };
+            let error = GpgBackend
+                .store("NEW_KEY", "new-value", &ctx)
+                .expect_err("decryption failure must abort the update");
+            assert!(error.to_string().contains("Refusing to overwrite"));
+        });
+
+        assert_eq!(std::fs::read(&gpg_file).unwrap(), original);
+        assert!(!encryption_marker.exists());
     }
 
     #[test]

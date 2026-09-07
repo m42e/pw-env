@@ -69,6 +69,101 @@ fn hook_outputs_powershell_wrappers_and_tracking() {
 }
 
 #[test]
+fn export_powershell_tracks_only_valid_keys_from_source_all() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::write(
+        project_dir.join(".env"),
+        "X'); Write-Output 'PWSH_PROBE'; #=harmless\nVALID_KEY=exact-value\n",
+    )
+    .unwrap();
+    write_config(&xdg_config_home, "[defaults]\nsource_all = true\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("export")
+        .arg(&project_dir)
+        .arg("--shell")
+        .arg("powershell")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("$env:VALID_KEY = 'exact-value'\n"));
+    assert!(stdout.contains("$global:__pw_env_previous_keys = @('VALID_KEY')\n"));
+    assert!(!stdout.contains("PWSH_PROBE"));
+    assert!(!stdout.contains("Write-Output"));
+}
+
+#[test]
+fn hook_powershell_tracks_only_valid_keys_from_source_all() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::write(
+        project_dir.join(".env"),
+        "X'); Write-Output 'PWSH_PROBE'; #=harmless\nVALID_KEY=exact-value\n",
+    )
+    .unwrap();
+    write_config(&xdg_config_home, "[defaults]\nsource_all = true\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("hook")
+        .arg(&project_dir)
+        .arg("--shell")
+        .arg("powershell")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("$env:VALID_KEY = 'exact-value'\n"));
+    assert!(stdout.contains("$global:__pw_env_previous_keys = @('VALID_KEY')\n"));
+    assert!(!stdout.contains("PWSH_PROBE"));
+    assert!(!stdout.contains("Write-Output"));
+}
+
+#[test]
+fn export_powershell_emits_empty_tracking_for_only_invalid_keys() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::write(
+        project_dir.join(".env"),
+        "X'); Write-Output 'PWSH_PROBE'; #=harmless\n",
+    )
+    .unwrap();
+    write_config(&xdg_config_home, "[defaults]\nsource_all = true\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("export")
+        .arg(&project_dir)
+        .arg("--shell")
+        .arg("powershell")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("$global:__pw_env_previous_keys = @()\n"));
+    assert!(!stdout.contains("PWSH_PROBE"));
+    assert!(!stdout.contains("Write-Output"));
+}
+
+#[test]
 #[cfg_attr(windows, ignore)]
 fn hook_expands_globbed_command_wrappers_from_path() {
     let workspace = TempDir::new().unwrap();

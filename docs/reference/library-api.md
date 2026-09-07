@@ -44,6 +44,10 @@ Useful entry selections are available through `entries`, `resolvable_entries`, `
 `likely_secret_entries`. `EnvFile::find`, `EnvFile::find_with_parents`, and `EnvFile::find_example` provide the same
 file discovery behavior used by the CLI.
 
+`EnvFile` is an immutable snapshot. Its `path()`, `project_path()`, and `content_hash()` accessors describe the
+canonical file identity and the exact contents used for parsing. Keep this snapshot and pass it unchanged to approval
+and resolution APIs; do not parse one version and approve or resolve a later reread of the same pathname.
+
 ## Resolve values
 
 `resolve_env_file` returns a `BTreeMap<String, String>` containing the entries that resolved successfully. It does not
@@ -109,10 +113,10 @@ let config = Config::load_for_dir_with_approval(dir, |path, changed| {
 })?;
 ```
 
-Secret-fetch approval can be handled the same way with `ensure_secret_fetch_approved_with`. Its callback receives a
-`SecretFetchApprovalRequest` and returns `Some(SecretFetchApprovalMode::CurrentEnvHash)`,
+Secret-fetch approval can be handled the same way with `ensure_secret_fetch_approved_with(&env_file, ...)`. Its
+callback receives a `SecretFetchApprovalRequest` and returns `Some(SecretFetchApprovalMode::CurrentEnvHash)`,
 `Some(SecretFetchApprovalMode::ProjectWide)`, or `None` to deny the request. An approval decision is persisted by the
-library; only the prompt and presentation belong to the host application.
+library against the supplied snapshot; only the prompt and presentation belong to the host application.
 
 ## Replace values in a file
 

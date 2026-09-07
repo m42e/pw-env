@@ -117,8 +117,8 @@ pw-env-lib = "0.3"
 
 Use `pw_env_lib::EnvFile` to parse and classify `.env` entries, and `pw_env_lib::resolve_env_file` to resolve them
 without terminal interaction. Applications that provide their own UI can use `Config::load_for_dir_with_approval`,
-`Config::ensure_secret_fetch_approved_with`, and `resolve_env_file_with_interaction` to supply approval, password, and
-progress callbacks.
+`Config::ensure_secret_fetch_approved_with(&env_file, ...)`, and `resolve_env_file_with_interaction` to supply approval,
+password, and progress callbacks. Parse once and pass the same `EnvFile` snapshot through approval and resolution.
 
 ## Mutation Testing
 
