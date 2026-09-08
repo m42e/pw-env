@@ -3529,6 +3529,20 @@ backend = "op"
     }
 
     #[test]
+    fn temporary_file_creation_propagates_non_collision_errors() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent_file = temp_dir.path().join("not-a-directory");
+        fs::write(&parent_file, b"blocking parent").unwrap();
+        let path = parent_file.join("state.json");
+
+        let error = create_temporary_file_with_nonce(&path, false, 12345)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Failed to create temporary file beside"));
+    }
+
+    #[test]
     fn approval_hashes_are_bounded_per_project() {
         let temp_dir = TempDir::new().unwrap();
         let store_path = temp_dir.path().join("secret-fetches.json");
