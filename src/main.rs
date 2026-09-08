@@ -1607,7 +1607,7 @@ mod tests {
             prompt_project_override(Path::new("/tmp/.pw-env.toml"), false)
         });
 
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[test]
@@ -1616,7 +1616,7 @@ mod tests {
             prompt_project_override(Path::new("/tmp/.pw-env.toml"), false)
         });
 
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -1625,7 +1625,7 @@ mod tests {
             prompt_project_override(Path::new("/tmp/.pw-env.toml"), true)
         });
 
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[test]

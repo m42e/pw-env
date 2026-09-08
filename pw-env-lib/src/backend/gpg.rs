@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::debug;
 
@@ -26,7 +26,7 @@ impl GpgBackend {
     }
 
     /// Decrypt a GPG file and return its contents entirely in memory.
-    fn decrypt_file(path: &PathBuf) -> Result<String> {
+    fn decrypt_file(path: &Path) -> Result<String> {
         debug!("Decrypting GPG file: {}", path.display());
         let mut command = Command::new("gpg");
         command
@@ -188,7 +188,7 @@ impl GpgBackend {
     }
 
     /// Encrypt content and write to the GPG file.
-    fn encrypt_to_file(content: &str, path: &PathBuf, recipient: &str) -> Result<()> {
+    fn encrypt_to_file(content: &str, path: &Path, recipient: &str) -> Result<()> {
         debug!("Encrypting content to GPG file: {}", path.display());
         let (temporary_file, temporary_path) = crate::config::create_private_temp_file(path)?;
         drop(temporary_file);
@@ -794,7 +794,7 @@ PLAIN=value
             };
             let ctx = make_gpg_resolve_context(&config, temp_dir.path());
             let backend = GpgBackend;
-            assert_eq!(backend.has("PRESENT_KEY", &ctx).unwrap(), true);
+            assert!(backend.has("PRESENT_KEY", &ctx).unwrap());
         });
     }
 
@@ -814,7 +814,7 @@ PLAIN=value
             };
             let ctx = make_gpg_resolve_context(&config, temp_dir.path());
             let backend = GpgBackend;
-            assert_eq!(backend.has("MISSING_KEY", &ctx).unwrap(), false);
+            assert!(!backend.has("MISSING_KEY", &ctx).unwrap());
         });
     }
 

@@ -2679,7 +2679,7 @@ exit 1
             let dir = std::path::Path::new("/tmp");
             let ctx = make_resolve_context(&config, dir);
             let backend = BwBackend;
-            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), true);
+            assert!(backend.has("MY_KEY", &ctx).unwrap());
         });
     }
 
@@ -2695,7 +2695,7 @@ exit 1
             let dir = std::path::Path::new("/tmp");
             let ctx = make_resolve_context(&config, dir);
             let backend = BwBackend;
-            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), false);
+            assert!(!backend.has("MY_KEY", &ctx).unwrap());
         });
     }
 

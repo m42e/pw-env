@@ -1008,7 +1008,7 @@ mod tests {
             let dir = Path::new("/tmp");
             let ctx = make_op_resolve_context(&config, dir);
             let backend = OpBackend;
-            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), true);
+            assert!(backend.has("MY_KEY", &ctx).unwrap());
         });
     }
 
@@ -1024,7 +1024,7 @@ mod tests {
             let dir = Path::new("/tmp");
             let ctx = make_op_resolve_context(&config, dir);
             let backend = OpBackend;
-            assert_eq!(backend.has("MY_KEY", &ctx).unwrap(), false);
+            assert!(!backend.has("MY_KEY", &ctx).unwrap());
         });
     }
 

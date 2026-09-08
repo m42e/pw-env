@@ -42,10 +42,10 @@ pub fn replace_file_atomically(temporary_path: &Path, destination: &Path) -> Res
     fs::rename(temporary_path, destination)
         .with_context(|| format!("Failed to atomically replace {}", destination.display()))?;
 
-    if let Some(parent) = destination.parent() {
-        if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
-        }
+    if let Some(parent) = destination.parent()
+        && let Ok(directory) = File::open(parent)
+    {
+        let _ = directory.sync_all();
     }
     Ok(())
 }
@@ -67,13 +67,7 @@ pub(crate) fn create_temporary_file_with_nonce(
     let _ = private;
     let parent = path
         .parent()
-        .and_then(|parent| {
-            if parent.as_os_str().is_empty() {
-                None
-            } else {
-                Some(parent)
-            }
-        })
+        .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()

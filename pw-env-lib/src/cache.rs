@@ -492,7 +492,7 @@ mod tests {
         reset_test_keyring();
 
         assert!(test_keyring_get("fingerprint").is_none());
-        assert_eq!(KEYRING_DISABLED.load(Ordering::Relaxed), false);
+        assert!(!KEYRING_DISABLED.load(Ordering::Relaxed));
     }
 
     #[test]

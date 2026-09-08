@@ -667,11 +667,10 @@ fn resolve_env_file_with_options(
         unresolved_count = entries.len().saturating_sub(resolved.len()),
         total_duration_ms,
         bitwarden_duration_ms,
-        bitwarden_share_percent = if total_duration_ms > 0 {
-            (bitwarden_duration_ms * 100 / total_duration_ms) as u64
-        } else {
-            0
-        },
+        bitwarden_share_percent = bitwarden_duration_ms
+            .checked_mul(100)
+            .and_then(|duration| duration.checked_div(total_duration_ms))
+            .unwrap_or_default() as u64,
         "Resolve env file finished"
     );
 

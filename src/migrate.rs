@@ -274,8 +274,8 @@ mod tests {
 
     #[test]
     fn bitwarden_unlock_is_selected_only_for_bitwarden_backend() {
-        assert_eq!(uses_bitwarden_backend("bw"), true);
-        assert_eq!(uses_bitwarden_backend("gpg"), false);
+        assert!(uses_bitwarden_backend("bw"));
+        assert!(!uses_bitwarden_backend("gpg"));
     }
 
     #[test]

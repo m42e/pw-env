@@ -1268,7 +1268,7 @@ mod tests {
             projects: vec![],
         };
         assert_eq!(config.defaults.backend, "op");
-        assert_eq!(config.defaults.search_parent_env, true);
+        assert!(config.defaults.search_parent_env);
     }
 
     #[test]
@@ -1534,14 +1534,8 @@ vault = "Work"
             }],
         };
 
-        assert_eq!(
-            config.effective_search_parent_env(Path::new("/home/user/work/service")),
-            false
-        );
-        assert_eq!(
-            config.effective_search_parent_env(Path::new("/home/user/other")),
-            true
-        );
+        assert!(!config.effective_search_parent_env(Path::new("/home/user/work/service")));
+        assert!(config.effective_search_parent_env(Path::new("/home/user/other")));
     }
 
     #[test]
@@ -1567,18 +1561,9 @@ vault = "Work"
             ],
         };
 
-        assert_eq!(
-            config.effective_fallback_example_env(Path::new("/home/user/work/true/app")),
-            true
-        );
-        assert_eq!(
-            config.effective_fallback_example_env(Path::new("/home/user/work/false/app")),
-            false
-        );
-        assert_eq!(
-            config.effective_fallback_example_env(Path::new("/home/user/other")),
-            false
-        );
+        assert!(config.effective_fallback_example_env(Path::new("/home/user/work/true/app")));
+        assert!(!config.effective_fallback_example_env(Path::new("/home/user/work/false/app")));
+        assert!(!config.effective_fallback_example_env(Path::new("/home/user/other")));
     }
 
     #[test]
@@ -2312,7 +2297,7 @@ backend = "op"
 
         let result = Config::revoke_project_override_approval(&override_path);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false); // nothing to revoke
+        assert!(!result.unwrap()); // nothing to revoke
 
         let _ = fs::remove_dir_all(&test_dir);
     }
@@ -2326,7 +2311,7 @@ backend = "op"
 
         let result = Config::revoke_secret_fetch_approval(&env_path);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
 
         let _ = fs::remove_dir_all(&test_dir);
     }
@@ -2383,7 +2368,7 @@ backend = "op"
         let result = Config::load_for_dir_with_approval(&test_dir, |path, changed| {
             callback_calls += 1;
             assert_eq!(path, &test_dir.join(PROJECT_OVERRIDE_FILE_NAME));
-            assert_eq!(changed, false);
+            assert!(!changed);
             Ok(true)
         });
         let _ = fs::remove_dir_all(&test_dir);
@@ -2980,7 +2965,7 @@ backend = "op"
 
         let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
         let result = Config::ensure_secret_fetch_approved_with(&env_file, |request| {
-            assert_eq!(request.previously_approved, false);
+            assert!(!request.previously_approved);
             Ok(Some(SecretFetchApprovalMode::CurrentEnvHash))
         });
         let _ = fs::remove_dir_all(&test_dir);
@@ -3396,10 +3381,8 @@ backend = "op"
         ));
         fs::write(&first_candidate, b"collision").unwrap();
 
-        let (file, temporary_path) = crate::file_io::create_temporary_file_with_nonce(
-            &path, false, nonce,
-        )
-        .unwrap();
+        let (file, temporary_path) =
+            crate::file_io::create_temporary_file_with_nonce(&path, false, nonce).unwrap();
         drop(file);
         assert_ne!(temporary_path, first_candidate);
         assert!(temporary_path.exists());
