@@ -274,7 +274,7 @@ pub fn resolve_env_file(
     config: &Config,
     dir: &Path,
 ) -> Result<BTreeMap<String, String>> {
-    resolve_env_file_with_interaction(env_file, config, dir, None)
+    resolve_env_file_with_options(env_file, config, dir, None, false)
 }
 
 /// Resolve all entries from an `.env` file with optional application-provided UI hooks.
@@ -283,6 +283,30 @@ pub fn resolve_env_file_with_interaction(
     config: &Config,
     dir: &Path,
     interaction: Option<&dyn ResolutionInteraction>,
+) -> Result<BTreeMap<String, String>> {
+    resolve_env_file_with_options(env_file, config, dir, interaction, false)
+}
+
+/// Resolve all entries while permitting unresolved managed keys.
+///
+/// This is intended for diagnostic commands that need to report partial
+/// results. Commands that export or execute with secrets should use the
+/// fail-closed defaults in [`resolve_env_file`] instead.
+pub fn resolve_env_file_allow_missing(
+    env_file: &EnvFile,
+    config: &Config,
+    dir: &Path,
+    interaction: Option<&dyn ResolutionInteraction>,
+) -> Result<BTreeMap<String, String>> {
+    resolve_env_file_with_options(env_file, config, dir, interaction, true)
+}
+
+fn resolve_env_file_with_options(
+    env_file: &EnvFile,
+    config: &Config,
+    dir: &Path,
+    interaction: Option<&dyn ResolutionInteraction>,
+    allow_missing: bool,
 ) -> Result<BTreeMap<String, String>> {
     let started_at = Instant::now();
     let mut resolved = BTreeMap::new();
@@ -619,6 +643,20 @@ pub fn resolve_env_file_with_interaction(
                     .entry(entry.key.clone())
                     .or_insert_with(|| value.clone());
             }
+        }
+    }
+
+    if !allow_missing {
+        let missing = entries
+            .iter()
+            .filter(|entry| !resolved.contains_key(&entry.key))
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "failed to resolve required environment entries: {}",
+                missing.join(", ")
+            );
         }
     }
 
@@ -1280,6 +1318,27 @@ branch "broken"]
     }
 
     #[test]
+    fn resolve_env_file_with_interaction_fails_closed_for_unresolved_entries() {
+        let temp = unique_subdir("resolve-interaction-strict");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        let env_file = EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let result = resolve_env_file_with_interaction(&env_file, &config, &temp, None);
+        let _ = fs::remove_dir_all(&temp);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn formats_audit_log_ignores_empty_project_string_and_uses_dir_name() {
         // When project is Some(""), the empty string must be filtered out
         // and the git root / dir name used instead.
@@ -1645,7 +1704,8 @@ branch "broken"]
 
         let resolved =
             with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
-                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+                resolve_env_file_allow_missing(&env_file, &config, &temp, None)
+                    .expect("should resolve env file")
             });
 
         let log = fs::read_to_string(&call_log).unwrap();
@@ -1698,7 +1758,8 @@ branch "broken"]
 
         let resolved =
             with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
-                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+                resolve_env_file_allow_missing(&env_file, &config, &temp, None)
+                    .expect("should resolve env file")
             });
 
         let log = fs::read_to_string(&call_log).unwrap();

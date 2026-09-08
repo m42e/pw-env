@@ -99,6 +99,9 @@ enum Commands {
         /// Print a warning to stderr for each environment-file entry that could not be resolved
         #[arg(long)]
         warn_missing: bool,
+        /// Permit the command to run when one or more managed entries cannot be resolved
+        #[arg(long)]
+        allow_missing: bool,
         /// Command to execute with transient environment variables
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -113,6 +116,9 @@ enum Commands {
         /// Print a warning to stderr for each environment-file entry that could not be resolved
         #[arg(long)]
         warn_missing: bool,
+        /// Permit exporting the entries that resolved when others are unavailable
+        #[arg(long)]
+        allow_missing: bool,
     },
     /// Load and display resolved environment variables (human-readable)
     Load {
@@ -381,11 +387,16 @@ fn resolve_environment(
     config: &config::Config,
     dir: &Path,
     interaction: Option<&dyn backend::ResolutionInteraction>,
+    allow_missing: bool,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     if !env_file.resolvable_entries().is_empty() {
         config::Config::ensure_secret_fetch_approved_with(env_file, prompt_secret_fetch)?;
     }
-    resolve::resolve_env_file_with_interaction(env_file, config, dir, interaction)
+    if allow_missing {
+        resolve::resolve_env_file_allow_missing(env_file, config, dir, interaction)
+    } else {
+        resolve::resolve_env_file_with_interaction(env_file, config, dir, interaction)
+    }
 }
 
 fn run(cli: Cli, config: config::Config) -> Result<()> {
@@ -401,6 +412,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             dir,
             command,
             warn_missing,
+            allow_missing,
         } => {
             let dir = resolve_dir(dir)?;
             let config = load_config_for_dir(&dir)?;
@@ -422,7 +434,13 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                     .into_iter()
                     .map(|entry| entry.key.clone())
                     .collect::<Vec<_>>();
-                let resolved = resolve_environment(&env_file, &config, &dir, Some(&interaction))?;
+                let resolved = resolve_environment(
+                    &env_file,
+                    &config,
+                    &dir,
+                    Some(&interaction),
+                    allow_missing,
+                )?;
 
                 if should_warn_missing(warn_missing, config.effective_warn_missing(&dir)) {
                     emit_missing_entries_warning(&managed_keys, &resolved);
@@ -459,6 +477,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             dir,
             shell,
             warn_missing,
+            allow_missing,
         } => {
             let dir = resolve_dir(dir)?;
             let config = load_config_for_dir(&dir)?;
@@ -484,7 +503,8 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                 .into_iter()
                 .map(|e| e.key.clone())
                 .collect();
-            let resolved = resolve_environment(&env_file, &config, &dir, Some(&interaction))?;
+            let resolved =
+                resolve_environment(&env_file, &config, &dir, Some(&interaction), allow_missing)?;
 
             if should_warn_missing(warn_missing, config.effective_warn_missing(&dir)) {
                 emit_missing_entries_warning(&resolvable_keys, &resolved);
@@ -611,7 +631,7 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                 .into_iter()
                 .map(|e| e.key.clone())
                 .collect();
-            let resolved = resolve_environment(&env_file, &config, &dir, Some(&interaction))?;
+            let resolved = resolve_environment(&env_file, &config, &dir, Some(&interaction), true)?;
             eprintln!(
                 "Resolved {}/{} entries:",
                 resolved.len(),
@@ -810,7 +830,7 @@ fn handle_status(
         .into_iter()
         .map(|entry| entry.key.clone())
         .collect::<Vec<_>>();
-    let resolved = resolve_environment(&env_file, config, dir, interaction)?;
+    let resolved = resolve_environment(&env_file, config, dir, interaction, true)?;
     let failed = missing_resolvable_keys(&resolvable_keys, &resolved);
 
     if short {
@@ -911,7 +931,7 @@ fn build_hook_output_with_interaction(
 
     let env_file = env_file::EnvFile::parse(&env_path)?;
     emit_plaintext_secret_warning(&env_file)?;
-    let resolved = resolve_environment(&env_file, config, dir, interaction)?;
+    let resolved = resolve_environment(&env_file, config, dir, interaction, false)?;
 
     if resolved.is_empty() {
         debug!("No variables resolved");

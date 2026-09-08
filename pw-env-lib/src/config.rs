@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 use crate::env_file::EnvFile;
@@ -45,27 +48,124 @@ pub fn state_dir() -> PathBuf {
 /// The file is created with restricted permissions from the start so that
 /// sensitive state is never briefly world-readable.
 pub fn write_private_file(path: &Path, contents: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("Failed to create {}", path.display()))?;
-        file.write_all(contents.as_bytes())
+    atomic_write_file(path, contents.as_bytes(), true)
+}
+
+/// Replace a file atomically, preserving the existing mode for ordinary files.
+///
+/// The temporary file lives beside the destination, which keeps the final
+/// rename on one filesystem. Data and the temporary file are synced before
+/// replacement so a crash cannot leave a truncated destination behind.
+pub fn atomic_write_file(path: &Path, contents: &[u8], private: bool) -> Result<()> {
+    let (mut file, temporary_path) = create_temporary_file(path, private)?;
+    let result = (|| {
+        file.write_all(contents)
             .with_context(|| format!("Failed to write {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to sync {}", path.display()))?;
+        drop(file);
+        replace_file_atomically(&temporary_path, path)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, contents)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+    result
+}
+
+/// Create a restricted sibling file for an external writer such as GPG.
+/// The caller must close and atomically replace it with [`replace_file_atomically`].
+pub fn create_private_temp_file(path: &Path) -> Result<(File, PathBuf)> {
+    create_temporary_file(path, true)
+}
+
+/// Atomically move a completed sibling file into place.
+pub fn replace_file_atomically(temporary_path: &Path, destination: &Path) -> Result<()> {
+    fs::rename(temporary_path, destination)
+        .with_context(|| format!("Failed to atomically replace {}", destination.display()))?;
+
+    if let Some(parent) = destination.parent() {
+        if let Ok(directory) = File::open(parent) {
+            let _ = directory.sync_all();
+        }
     }
     Ok(())
+}
+
+fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    create_temporary_file_with_nonce(path, private, nonce)
+}
+
+fn create_temporary_file_with_nonce(
+    path: &Path,
+    private: bool,
+    nonce: u128,
+) -> Result<(File, PathBuf)> {
+    #[cfg(not(unix))]
+    let _ = private;
+    let parent = path
+        .parent()
+        .and_then(|parent| {
+            if parent.as_os_str().is_empty() {
+                None
+            } else {
+                Some(parent)
+            }
+        })
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("pw-env-file"));
+    #[cfg(unix)]
+    let existing_mode = if !private {
+        fs::metadata(path).ok().map(file_mode)
+    } else {
+        None
+    };
+
+    for attempt in 0..100u32 {
+        let temporary_path = parent.join(format!(
+            ".{file_name}.pw-env-{}-{nonce}-{attempt}.tmp",
+            std::process::id()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(if private {
+                0o600
+            } else {
+                existing_mode.unwrap_or(0o666)
+            });
+        }
+
+        match options.open(&temporary_path) {
+            Ok(file) => return Ok((file, temporary_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to create temporary file beside {}", path.display())
+                });
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "Failed to choose a unique temporary file beside {}",
+        path.display()
+    )
+}
+
+#[cfg(unix)]
+fn file_mode(metadata: fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o7777
 }
 
 #[derive(Debug, Clone)]
@@ -3372,6 +3472,74 @@ backend = "op"
         write_private_file(&path, "{}").unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "state file should be owner-only (0o600)");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_writes_correct_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("existing-state.json");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private_file(&path, "new").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read_to_string(path).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_atomic_writes_preserve_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("ordinary-state.json");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        atomic_write_file(&path, b"new", false).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o640);
+        assert_eq!(fs::read_to_string(path).unwrap(), "new");
+    }
+
+    #[test]
+    fn temporary_file_creation_retries_after_a_name_collision() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("state.json");
+        let nonce = 12345;
+        let first_candidate = temp_dir.path().join(format!(
+            ".state.json.pw-env-{}-{nonce}-0.tmp",
+            std::process::id()
+        ));
+        fs::write(&first_candidate, b"collision").unwrap();
+
+        let (file, temporary_path) = create_temporary_file_with_nonce(&path, false, nonce).unwrap();
+        drop(file);
+        assert_ne!(temporary_path, first_candidate);
+        assert!(temporary_path.exists());
+
+        fs::remove_file(first_candidate).unwrap();
+        fs::remove_file(temporary_path).unwrap();
+    }
+
+    #[test]
+    fn temporary_file_creation_propagates_non_collision_errors() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent_file = temp_dir.path().join("not-a-directory");
+        fs::write(&parent_file, b"blocking parent").unwrap();
+        let path = parent_file.join("state.json");
+
+        let error = create_temporary_file_with_nonce(&path, false, 12345)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Failed to create temporary file beside"));
     }
 
     #[test]

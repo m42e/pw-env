@@ -117,9 +117,10 @@ impl OpBackend {
         // Ensure no interactive prompts corrupt our stdout
         cmd.stdin(std::process::Stdio::null());
         debug!("Running: op {}", args.join(" "));
-        let output = cmd
-            .output()
-            .context("Failed to execute `op` CLI. Is 1Password CLI installed?")?;
+        let output = super::run_command_with_timeout(
+            cmd,
+            "Failed to execute `op` CLI. Is 1Password CLI installed?",
+        )?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("op command failed: {stderr}");
@@ -152,14 +153,13 @@ impl OpBackend {
                 .take()
                 .context("Missing 1Password item write stdin")?;
             serde_json::to_writer(&mut stdin, payload)
-                .context("Failed to send 1Password item JSON")?;
+                .map_err(|_| anyhow::anyhow!("1Password item write failed"))?;
             stdin
                 .flush()
-                .context("Failed to flush 1Password item JSON")?;
+                .map_err(|_| anyhow::anyhow!("1Password item write failed"))?;
         }
-        let output = child
-            .wait_with_output()
-            .context("Failed to wait for 1Password item write")?;
+        let output =
+            super::wait_with_output_timeout(child, "Failed to wait for 1Password item write")?;
         if !output.status.success() {
             bail!("1Password item write failed");
         }
@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn backend_store_creates_new_item_when_no_item_config() {
-        with_mock_op("#!/bin/sh\necho 'created'\n", || {
+        with_mock_op("#!/bin/sh\ncat >/dev/null\necho 'created'\n", || {
             let config = Config {
                 defaults: Defaults::default(), // no item configured
                 log: LogConfig::default(),

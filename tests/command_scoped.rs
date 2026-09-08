@@ -232,6 +232,7 @@ fn exec_removes_managed_keys_from_child_environment() {
         .arg("exec")
         .arg("--dir")
         .arg(&project_dir)
+        .arg("--allow-missing")
         .arg("--")
         .arg("/usr/bin/env")
         .env("HELLO", "parent-value")

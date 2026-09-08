@@ -2,8 +2,11 @@ pub mod bw;
 pub mod gpg;
 pub mod op;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::io::Read;
 use std::path::Path;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 
@@ -92,6 +95,53 @@ pub trait Backend {
 
     /// Return the name of this backend (for logging).
     fn name(&self) -> &str;
+}
+
+const EXTERNAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run a password-manager subprocess with a hard upper bound on how long it
+/// may keep the resolver blocked. A hung CLI must not hang shell startup.
+pub(crate) fn run_command_with_timeout(mut command: Command, context: &str) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command
+        .spawn()
+        .map_err(anyhow::Error::from)
+        .with_context(|| context.to_string())?;
+    wait_with_output_timeout(child, context)
+}
+
+pub(crate) fn wait_with_output_timeout(mut child: Child, context: &str) -> Result<Output> {
+    let started_at = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().with_context(|| context.to_string())? {
+            let mut stdout = Vec::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_end(&mut stdout)
+                    .with_context(|| context.to_string())?;
+            }
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_end(&mut stderr)
+                    .with_context(|| context.to_string())?;
+            }
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+
+        if started_at.elapsed() >= EXTERNAL_COMMAND_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "{context} timed out after {} seconds",
+                EXTERNAL_COMMAND_TIMEOUT.as_secs()
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Create a backend instance by name.

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
 use std::path::PathBuf;
 use std::process::Command;
 use tracing::debug;
@@ -27,12 +28,15 @@ impl GpgBackend {
     /// Decrypt a GPG file and return its contents entirely in memory.
     fn decrypt_file(path: &PathBuf) -> Result<String> {
         debug!("Decrypting GPG file: {}", path.display());
-        let output = Command::new("gpg")
+        let mut command = Command::new("gpg");
+        command
             .args(["--decrypt", "--batch", "--quiet"])
             .arg(path)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .context("Failed to execute `gpg`. Is GnuPG installed?")?;
+            .stdin(std::process::Stdio::null());
+        let output = super::run_command_with_timeout(
+            command,
+            "Failed to execute `gpg`. Is GnuPG installed?",
+        )?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("gpg decrypt failed: {stderr}");
@@ -77,15 +81,13 @@ impl GpgBackend {
                 let key = key.trim();
                 let value = value.trim();
                 // Strip surrounding quotes
-                let value = if (value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\''))
-                {
-                    let mut chars = value.chars();
-                    chars.next();
-                    chars.next_back();
-                    chars.as_str()
+                let value = if value.starts_with('"') && value.ends_with('"') {
+                    serde_json::from_str::<String>(value)
+                        .unwrap_or_else(|_| value[1..value.len() - 1].to_string())
+                } else if value.starts_with('\'') && value.ends_with('\'') {
+                    value[1..value.len() - 1].to_string()
                 } else {
-                    value
+                    value.to_string()
                 };
                 if !key.is_empty() {
                     map.insert(
@@ -178,7 +180,9 @@ impl GpgBackend {
                 ));
                 content.push('\n');
             }
-            content.push_str(&format!("{key}={}\n", secret.value));
+            let encoded_value = serde_json::to_string(&secret.value)
+                .expect("serializing a string to JSON cannot fail");
+            content.push_str(&format!("{key}={encoded_value}\n"));
         }
         content
     }
@@ -186,6 +190,9 @@ impl GpgBackend {
     /// Encrypt content and write to the GPG file.
     fn encrypt_to_file(content: &str, path: &PathBuf, recipient: &str) -> Result<()> {
         debug!("Encrypting content to GPG file: {}", path.display());
+        let (temporary_file, temporary_path) = crate::config::create_private_temp_file(path)?;
+        drop(temporary_file);
+
         let mut cmd = Command::new("gpg");
         cmd.args([
             "--encrypt",
@@ -195,24 +202,40 @@ impl GpgBackend {
             recipient,
             "--output",
         ]);
-        cmd.arg(path);
+        cmd.arg(&temporary_path);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let mut child = cmd
-            .spawn()
-            .context("Failed to execute `gpg` for encryption")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin.write_all(content.as_bytes())?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary_path);
+                return Err(error).context("Failed to execute `gpg` for encryption");
+            }
+        };
+        let result = (|| {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                stdin.write_all(content.as_bytes())?;
+            }
+            let output =
+                super::wait_with_output_timeout(child, "Failed to wait for `gpg` encryption")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("gpg encrypt failed: {stderr}");
+            }
+            File::open(&temporary_path)
+                .with_context(|| format!("Failed to reopen {}", temporary_path.display()))?
+                .sync_all()
+                .with_context(|| format!("Failed to sync {}", temporary_path.display()))?;
+            crate::config::replace_file_atomically(&temporary_path, path)
+        })();
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
         }
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("gpg encrypt failed: {stderr}");
-        }
-        Ok(())
+        result
     }
 }
 
@@ -317,6 +340,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_stored_secrets_falls_back_for_invalid_json_quotes() {
+        let content = "KEY=\"bad\\q\"\n";
+        let stored = GpgBackend::parse_stored_secrets(content);
+        assert_eq!(stored.get("KEY").unwrap().value, "bad\\q");
+    }
+
+    #[test]
     fn test_parse_stored_secrets_with_single_quoted_value() {
         let content = "KEY='single quoted'\n";
         let stored = GpgBackend::parse_stored_secrets(content);
@@ -343,7 +373,7 @@ mod tests {
             },
         );
         let serialized = GpgBackend::serialize_stored_secrets(&stored);
-        assert!(serialized.contains("PLAIN_KEY=plain_value"));
+        assert!(serialized.contains("PLAIN_KEY=\"plain_value\""));
         assert!(!serialized.contains("# pw-env:"));
     }
 
@@ -352,6 +382,33 @@ mod tests {
         let stored = BTreeMap::new();
         let serialized = GpgBackend::serialize_stored_secrets(&stored);
         assert_eq!(serialized, "");
+    }
+
+    #[test]
+    fn test_serialize_stored_secrets_round_trips_special_values() {
+        let values = [
+            " leading and trailing spaces ",
+            "line one\nline two",
+            "quotes: \"double\" and \\'single\\'",
+            r"backslashes\\stay\",
+        ];
+        let mut stored = BTreeMap::new();
+        for (index, value) in values.iter().enumerate() {
+            stored.insert(
+                format!("KEY_{index}"),
+                StoredSecret {
+                    value: (*value).to_string(),
+                    ..StoredSecret::default()
+                },
+            );
+        }
+
+        let serialized = GpgBackend::serialize_stored_secrets(&stored);
+        let parsed = GpgBackend::parse_stored_secrets(&serialized);
+
+        for (index, value) in values.iter().enumerate() {
+            assert_eq!(parsed[&format!("KEY_{index}")].value, *value);
+        }
     }
 
     #[test]
@@ -499,7 +556,7 @@ PLAIN=value
             "# pw-env: created-with=pw-env ({})",
             env!("CARGO_PKG_VERSION")
         )));
-        assert!(serialized.contains("API_KEY=secret"));
+        assert!(serialized.contains("API_KEY=\"secret\""));
     }
 
     // ------- Error-path tests (no mock needed) -------
@@ -855,8 +912,8 @@ PLAIN=value
             let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
             assert!(result.is_ok(), "store failed: {:?}", result);
             let encrypted = std::fs::read_to_string(&gpg_file).unwrap();
-            assert!(encrypted.contains("EXISTING_KEY=existing-value"));
-            assert!(encrypted.contains("NEW_KEY=new-value"));
+            assert!(encrypted.contains("EXISTING_KEY=\"existing-value\""));
+            assert!(encrypted.contains("NEW_KEY=\"new-value\""));
         });
     }
 

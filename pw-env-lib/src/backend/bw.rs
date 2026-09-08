@@ -44,29 +44,7 @@ thread_local! {
 
 /// Write a file with owner-only permissions (0o600) on Unix.
 fn write_private_file(path: &Path, contents: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("Failed to create {}", path.display()))?;
-        file.write_all(contents.as_bytes())
-            .with_context(|| format!("Failed to write {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, contents)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
-    }
-
-    Ok(())
+    crate::config::write_private_file(path, contents)
 }
 
 impl FolderIdCacheStore {
@@ -223,9 +201,9 @@ impl BwBackend {
         );
     }
 
-    fn run_timed_command(mut cmd: Command, action: &str, exec_context: &str) -> Result<Output> {
+    fn run_timed_command(cmd: Command, action: &str, exec_context: &str) -> Result<Output> {
         let started_at = Instant::now();
-        match cmd.output() {
+        match super::run_command_with_timeout(cmd, exec_context) {
             Ok(output) => {
                 Self::log_action_timing(action, started_at, output.status.success());
                 Ok(output)

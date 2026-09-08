@@ -15,7 +15,10 @@ pub use config::{
     SecretFetchApprovalMode,
 };
 pub use env_file::{EntryKind, EnvEntry, EnvFile, EnvLine};
-pub use resolve::{detect_project_name, resolve_env_file, resolve_env_file_with_interaction};
+pub use resolve::{
+    detect_project_name, resolve_env_file, resolve_env_file_allow_missing,
+    resolve_env_file_with_interaction,
+};
 
 #[cfg(feature = "test-support")]
 pub mod test_support {
