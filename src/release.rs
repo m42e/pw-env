@@ -323,10 +323,11 @@ fn verify_release_checksum(
                 archive_path.display()
             )
         })?;
-        if read == 0 {
+        if read > 0 {
+            hasher.update(&buffer[..read]);
+        } else {
             break;
         }
-        hasher.update(&buffer[..read]);
     }
     let actual = hasher
         .finalize()
@@ -397,10 +398,11 @@ fn extract_binary_from_archive(
                     .path()
                     .context("failed to read tar archive entry path")?;
                 let entry_name = entry_path.to_string_lossy();
-                if archive_entry_is_safe(&entry_name)
-                    && entry.header().entry_type().is_file()
-                    && archive_entry_matches_binary_name(&entry_name, asset.binary_name)
-                {
+                if archive_entry_is_extractable(
+                    &entry_name,
+                    entry.header().entry_type().is_file(),
+                    asset.binary_name,
+                ) {
                     let mut output = File::create(&extracted_binary_path).with_context(|| {
                         format!("failed to create {}", extracted_binary_path.display())
                     })?;
@@ -427,10 +429,7 @@ fn extract_binary_from_archive(
                     .by_index(index)
                     .context("failed to read zip archive entry")?;
                 let entry_name = entry.name().replace('\\', "/");
-                if archive_entry_is_safe(&entry_name)
-                    && entry.is_file()
-                    && archive_entry_matches_binary_name(&entry_name, asset.binary_name)
-                {
+                if archive_entry_is_extractable(&entry_name, entry.is_file(), asset.binary_name) {
                     let mut output = File::create(&extracted_binary_path).with_context(|| {
                         format!("failed to create {}", extracted_binary_path.display())
                     })?;
@@ -479,6 +478,12 @@ fn normalize_tag(input: &str) -> String {
 
 fn archive_entry_matches_binary_name(entry_name: &str, binary_name: &str) -> bool {
     entry_name.rsplit('/').next() == Some(binary_name)
+}
+
+fn archive_entry_is_extractable(entry_name: &str, is_file: bool, binary_name: &str) -> bool {
+    archive_entry_is_safe(entry_name)
+        && is_file
+        && archive_entry_matches_binary_name(entry_name, binary_name)
 }
 
 fn archive_entry_is_safe(entry_name: &str) -> bool {
@@ -801,6 +806,26 @@ mod tests {
         assert!(!archive_entry_is_safe("/tmp/pw-env"));
         assert!(!archive_entry_is_safe(r"release\..\pw-env"));
         assert!(!archive_entry_is_safe(r"C:\tmp\pw-env"));
+    }
+
+    #[test]
+    fn archive_entry_is_extractable_requires_a_safe_regular_matching_file() {
+        assert!(archive_entry_is_extractable(
+            "nested/pw-env",
+            true,
+            "pw-env"
+        ));
+        assert!(!archive_entry_is_extractable(
+            "nested/pw-env",
+            false,
+            "pw-env"
+        ));
+        assert!(!archive_entry_is_extractable(
+            "nested/not-pw-env",
+            true,
+            "pw-env"
+        ));
+        assert!(!archive_entry_is_extractable("../pw-env", true, "pw-env"));
     }
 
     #[test]

@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn backend_store_creates_new_item_when_no_item_config() {
-        with_mock_op("#!/bin/sh\necho 'created'\n", || {
+        with_mock_op("#!/bin/sh\ncat >/dev/null\necho 'created'\n", || {
             let config = Config {
                 defaults: Defaults::default(), // no item configured
                 log: LogConfig::default(),

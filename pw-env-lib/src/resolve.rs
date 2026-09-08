@@ -1318,6 +1318,27 @@ branch "broken"]
     }
 
     #[test]
+    fn resolve_env_file_with_interaction_fails_closed_for_unresolved_entries() {
+        let temp = unique_subdir("resolve-interaction-strict");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        let env_file = EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let result = resolve_env_file_with_interaction(&env_file, &config, &temp, None);
+        let _ = fs::remove_dir_all(&temp);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn formats_audit_log_ignores_empty_project_string_and_uses_dir_name() {
         // When project is Some(""), the empty string must be filtered out
         // and the git root / dir name used instead.

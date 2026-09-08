@@ -93,11 +93,29 @@ pub fn replace_file_atomically(temporary_path: &Path, destination: &Path) -> Res
 }
 
 fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    create_temporary_file_with_nonce(path, private, nonce)
+}
+
+fn create_temporary_file_with_nonce(
+    path: &Path,
+    private: bool,
+    nonce: u128,
+) -> Result<(File, PathBuf)> {
     #[cfg(not(unix))]
     let _ = private;
     let parent = path
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+        .and_then(|parent| {
+            if parent.as_os_str().is_empty() {
+                None
+            } else {
+                Some(parent)
+            }
+        })
         .unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
@@ -109,10 +127,6 @@ fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> 
     } else {
         None
     };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
 
     for attempt in 0..100u32 {
         let temporary_path = parent.join(format!(
@@ -3475,6 +3489,43 @@ backend = "op"
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(fs::read_to_string(path).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_atomic_writes_preserve_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("ordinary-state.json");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        atomic_write_file(&path, b"new", false).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o640);
+        assert_eq!(fs::read_to_string(path).unwrap(), "new");
+    }
+
+    #[test]
+    fn temporary_file_creation_retries_after_a_name_collision() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("state.json");
+        let nonce = 12345;
+        let first_candidate = temp_dir.path().join(format!(
+            ".state.json.pw-env-{}-{nonce}-0.tmp",
+            std::process::id()
+        ));
+        fs::write(&first_candidate, b"collision").unwrap();
+
+        let (file, temporary_path) = create_temporary_file_with_nonce(&path, false, nonce).unwrap();
+        drop(file);
+        assert_ne!(temporary_path, first_candidate);
+        assert!(temporary_path.exists());
+
+        fs::remove_file(first_candidate).unwrap();
+        fs::remove_file(temporary_path).unwrap();
     }
 
     #[test]

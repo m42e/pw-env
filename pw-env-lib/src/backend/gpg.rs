@@ -340,6 +340,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_stored_secrets_falls_back_for_invalid_json_quotes() {
+        let content = "KEY=\"bad\\q\"\n";
+        let stored = GpgBackend::parse_stored_secrets(content);
+        assert_eq!(stored.get("KEY").unwrap().value, "bad\\q");
+    }
+
+    #[test]
     fn test_parse_stored_secrets_with_single_quoted_value() {
         let content = "KEY='single quoted'\n";
         let stored = GpgBackend::parse_stored_secrets(content);
