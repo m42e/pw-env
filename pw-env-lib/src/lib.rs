@@ -8,6 +8,7 @@ pub mod backend;
 pub mod cache;
 pub mod config;
 pub mod env_file;
+mod file_io;
 pub mod resolve;
 
 pub use config::{
