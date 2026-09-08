@@ -162,6 +162,50 @@ function Expand-ArchiveFile {
     throw "Unsupported archive format: $ArchiveFormat"
 }
 
+function Assert-SafeArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$ArchiveFormat
+    )
+
+    if ($ArchiveFormat -eq "zip") {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+        try {
+            foreach ($entry in $archive.Entries) {
+                $entryName = $entry.FullName.Replace('\', '/')
+                if ([System.IO.Path]::IsPathRooted($entryName) -or
+                    $entryName -match '(^|/)\.\.?(/|$)' -or
+                    $entryName -match '^[A-Za-z]:/') {
+                    throw "Archive contains an unsafe path: $entryName"
+                }
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+        return
+    }
+
+    if ($ArchiveFormat -eq "tar.gz") {
+        $entries = & tar -tzf $ArchivePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to inspect archive contents"
+        }
+        foreach ($entry in $entries) {
+            $normalized = [string]$entry
+            if ($normalized.StartsWith('/') -or
+                $normalized -match '(^|/)\.\.?(/|$)' -or
+                $normalized -match '^[A-Za-z]:/') {
+                throw "Archive contains an unsafe path: $normalized"
+            }
+        }
+        return
+    }
+
+    throw "Unsupported archive format: $ArchiveFormat"
+}
+
 if ($Help) {
     Show-Usage
     exit 0
@@ -175,6 +219,7 @@ if ($tag -eq "latest") {
 
 $archiveName = "$BinaryName-$tag-$($targetInfo.Target).$($targetInfo.ArchiveFormat)"
 $downloadUrl = "https://github.com/$Owner/$Repo/releases/download/$tag/$archiveName"
+$checksumUrl = "https://github.com/$Owner/$Repo/releases/download/$tag/SHA256SUMS"
 $installDir = Get-DefaultInstallDir
 $installPath = Join-Path $installDir $targetInfo.ArchiveBinaryName
 
@@ -183,21 +228,38 @@ if ($DryRun) {
     Write-Output "target=$($targetInfo.Target)"
     Write-Output "archive=$archiveName"
     Write-Output "url=$downloadUrl"
+    Write-Output "checksum_url=$checksumUrl"
     Write-Output "install_dir=$installDir"
     exit 0
 }
 
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString("N"))
+$temporaryInstallPath = $null
 New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
 try {
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
     $archivePath = Join-Path $tmpDir $archiveName
+    $checksumPath = Join-Path $tmpDir "SHA256SUMS"
     Write-Output "Downloading $archiveName..."
     Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+    Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath
+
+    $checksumLine = Get-Content -LiteralPath $checksumPath |
+        Where-Object { $_ -match "^(?<hash>[0-9A-Fa-f]{64})\s+\*?$([regex]::Escape($archiveName))$" } |
+        Select-Object -First 1
+    if (-not $checksumLine) {
+        throw "Checksum manifest does not contain $archiveName"
+    }
+    $expectedHash = $checksumLine -replace "^([0-9A-Fa-f]{64}).*$", '$1'
+    $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    if ($actualHash -ne $expectedHash) {
+        throw "Checksum verification failed for $archiveName"
+    }
 
     Write-Output "Installing $BinaryName to $installPath..."
+    Assert-SafeArchive -ArchivePath $archivePath -ArchiveFormat $targetInfo.ArchiveFormat
     Expand-ArchiveFile -ArchivePath $archivePath -Destination $tmpDir -ArchiveFormat $targetInfo.ArchiveFormat
 
     $extractedBinary = Join-Path $tmpDir $targetInfo.ArchiveBinaryName
@@ -205,14 +267,18 @@ try {
         throw "Archive did not contain $($targetInfo.ArchiveBinaryName)"
     }
 
-    Copy-Item -LiteralPath $extractedBinary -Destination $installPath -Force
+    $temporaryInstallPath = Join-Path $installDir ".$($targetInfo.ArchiveBinaryName).pw-env-install-$([System.Guid]::NewGuid().ToString('N'))"
+    Copy-Item -LiteralPath $extractedBinary -Destination $temporaryInstallPath -Force
 
     if (-not $IsWindows) {
-        & chmod 755 $installPath
+        & chmod 755 $temporaryInstallPath
         if ($LASTEXITCODE -ne 0) {
-            throw "Failed to set executable permissions on $installPath"
+            throw "Failed to set executable permissions on $temporaryInstallPath"
         }
     }
+
+    Move-Item -LiteralPath $temporaryInstallPath -Destination $installPath -Force
+    $temporaryInstallPath = $null
 
     Write-Output "Installed $BinaryName $tag to $installPath"
 
@@ -238,6 +304,9 @@ try {
     }
 }
 finally {
+    if ($temporaryInstallPath -and (Test-Path -LiteralPath $temporaryInstallPath)) {
+        Remove-Item -LiteralPath $temporaryInstallPath -Force
+    }
     if (Test-Path -LiteralPath $tmpDir) {
         Remove-Item -LiteralPath $tmpDir -Recurse -Force
     }

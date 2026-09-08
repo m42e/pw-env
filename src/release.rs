@@ -3,8 +3,9 @@ use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
@@ -19,6 +20,7 @@ const GITHUB_OWNER: &str = "m42e";
 const GITHUB_REPO: &str = "pw-env";
 const RELEASE_API_URL: &str = "https://api.github.com/repos/m42e/pw-env/releases/latest";
 const RELEASES_URL: &str = "https://github.com/m42e/pw-env/releases/latest";
+const RELEASE_CHECKSUMS_FILE: &str = "SHA256SUMS";
 const REQUEST_TIMEOUT_SECS: u64 = 2;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 
@@ -128,6 +130,7 @@ pub fn update(requested_version: Option<&str>) -> Result<()> {
         release.version, asset.target
     );
     download_file(&download_url, &archive_path)?;
+    verify_release_checksum(&release.tag, &archive_name, &archive_path)?;
 
     let extracted_binary_path = extract_binary_from_archive(&archive_path, &tempdir, &asset)
         .with_context(|| format!("failed to extract {}", archive_name))?;
@@ -276,6 +279,79 @@ fn release_download_url(tag: &str, archive_name: &str) -> String {
     )
 }
 
+fn release_checksums_url(tag: &str) -> String {
+    format!(
+        "https://github.com/{}/{}/releases/download/{}/{}",
+        GITHUB_OWNER, GITHUB_REPO, tag, RELEASE_CHECKSUMS_FILE
+    )
+}
+
+fn verify_release_checksum(tag: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
+    let client = http_client(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))?;
+    let checksums_url = release_checksums_url(tag);
+    let checksums = client
+        .get(&checksums_url)
+        .header(reqwest::header::USER_AGENT, user_agent())
+        .send()
+        .with_context(|| format!("failed to download {}", checksums_url))?
+        .error_for_status()
+        .with_context(|| format!("checksum manifest returned an error for {}", checksums_url))?
+        .text()
+        .context("failed to read release checksum manifest")?;
+
+    let expected = expected_release_checksum(&checksums, archive_name)?;
+
+    let mut file = File::open(archive_path)
+        .with_context(|| {
+            format!(
+                "failed to open {} for checksum verification",
+                archive_path.display()
+            )
+        })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| {
+                format!(
+                    "failed to read {} for checksum verification",
+                    archive_path.display()
+                )
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected) {
+        anyhow::bail!(
+            "checksum verification failed for {archive_name}: expected {expected}, got {actual}"
+        );
+    }
+
+    Ok(())
+}
+
+fn expected_release_checksum<'a>(manifest: &'a str, archive_name: &str) -> Result<&'a str> {
+    let expected = manifest
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let digest = fields.next()?;
+            let filename = fields.next()?.trim_start_matches('*');
+            (filename == archive_name).then_some(digest)
+        })
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("checksum manifest does not contain {archive_name}"))?;
+
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("checksum manifest contains an invalid digest for {archive_name}");
+    }
+    Ok(expected)
+}
+
 fn download_file(url: &str, destination: &Path) -> Result<()> {
     let client = http_client(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))?;
     let mut response = client
@@ -312,15 +388,17 @@ fn extract_binary_from_archive(
                 let entry_path = entry
                     .path()
                     .context("failed to read tar archive entry path")?;
-                if archive_entry_matches_binary_name(
-                    entry_path.to_string_lossy().as_ref(),
-                    asset.binary_name,
-                ) {
-                    entry.unpack(&extracted_binary_path).with_context(|| {
+                let entry_name = entry_path.to_string_lossy();
+                if archive_entry_is_safe(&entry_name)
+                    && entry.header().entry_type().is_file()
+                    && archive_entry_matches_binary_name(&entry_name, asset.binary_name)
+                {
+                    let mut output = File::create(&extracted_binary_path).with_context(|| {
+                        format!("failed to create {}", extracted_binary_path.display())
+                    })?;
+                    io::copy(&mut entry, &mut output).with_context(|| {
                         format!(
-                            "failed to unpack {} to {}",
-                            asset.binary_name,
-                            extracted_binary_path.display()
+                            "failed to unpack {} to {}", asset.binary_name, extracted_binary_path.display()
                         )
                     })?;
                     return Ok(extracted_binary_path);
@@ -339,7 +417,10 @@ fn extract_binary_from_archive(
                     .by_index(index)
                     .context("failed to read zip archive entry")?;
                 let entry_name = entry.name().replace('\\', "/");
-                if archive_entry_matches_binary_name(&entry_name, asset.binary_name) {
+                if archive_entry_is_safe(&entry_name)
+                    && entry.is_file()
+                    && archive_entry_matches_binary_name(&entry_name, asset.binary_name)
+                {
                     let mut output = File::create(&extracted_binary_path).with_context(|| {
                         format!("failed to create {}", extracted_binary_path.display())
                     })?;
@@ -388,6 +469,15 @@ fn normalize_tag(input: &str) -> String {
 
 fn archive_entry_matches_binary_name(entry_name: &str, binary_name: &str) -> bool {
     entry_name.rsplit('/').next() == Some(binary_name)
+}
+
+fn archive_entry_is_safe(entry_name: &str) -> bool {
+    let path = Path::new(entry_name);
+    !path.is_absolute()
+        && !entry_name.is_empty()
+        && !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
 fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
@@ -451,29 +541,9 @@ impl ReleaseCheckState {
 
         let contents = serde_json::to_string_pretty(self)
             .context("failed to serialize release check state")?;
-        #[cfg(unix)]
-        {
-            use std::fs::OpenOptions;
-            use std::io::Write as _;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .with_context(|| format!("failed to create {}", path.display()))?;
-            file.write_all(contents.as_bytes()).with_context(|| {
-                format!("failed to write release check state to {}", path.display())
-            })?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path, &contents).with_context(|| {
-                format!("failed to write release check state to {}", path.display())
-            })?;
-        }
-        Ok(())
+        config::write_private_file(path, &contents).with_context(|| {
+            format!("failed to write release check state to {}", path.display())
+        })
     }
 
     fn is_due(&self, now: u64, interval: Duration) -> bool {
@@ -615,6 +685,28 @@ mod tests {
         assert!(url.contains("m42e/pw-env"));
         assert!(url.contains("v1.2.3"));
         assert!(url.contains("pw-env-v1.2.3-x86_64-apple-darwin.tar.gz"));
+    }
+
+    #[test]
+    fn checksum_manifest_selects_the_exact_archive() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let manifest = format!("{digest}  first.tar.gz\n{digest} *second.tar.gz\n");
+        assert_eq!(expected_release_checksum(&manifest, "second.tar.gz").unwrap(), digest);
+    }
+
+    #[test]
+    fn checksum_manifest_rejects_missing_or_invalid_entries() {
+        assert!(expected_release_checksum("abcd  archive.tar.gz\n", "archive.tar.gz").is_err());
+        assert!(expected_release_checksum("", "archive.tar.gz").is_err());
+    }
+
+    #[test]
+    fn archive_entry_safety_rejects_traversal_and_absolute_paths() {
+        assert!(archive_entry_is_safe("pw-env"));
+        assert!(archive_entry_is_safe("release/pw-env"));
+        assert!(!archive_entry_is_safe("../pw-env"));
+        assert!(!archive_entry_is_safe("release/../../pw-env"));
+        assert!(!archive_entry_is_safe("/tmp/pw-env"));
     }
 
     #[test]

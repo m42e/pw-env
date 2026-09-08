@@ -218,7 +218,7 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
     match update {
         EnvEntryUpdate::Create(path) => {
             let entry_value = url.unwrap_or("");
-            std::fs::write(&path, format!("{key}={entry_value}\n"))
+            crate::config::atomic_write_file(&path, format!("{key}={entry_value}\n").as_bytes(), false)
                 .with_context(|| format!("Failed to create {}", path.display()))?;
             if url.is_some() {
                 Ok(format!(
@@ -240,7 +240,7 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
                 contents.push('\n');
             }
             contents.push_str(&format!("{key}={entry_value}\n"));
-            std::fs::write(&path, contents)
+            crate::config::atomic_write_file(&path, contents.as_bytes(), false)
                 .with_context(|| format!("Failed to update {}", path.display()))?;
             if url.is_some() {
                 Ok(format!(

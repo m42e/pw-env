@@ -274,7 +274,7 @@ pub fn resolve_env_file(
     config: &Config,
     dir: &Path,
 ) -> Result<BTreeMap<String, String>> {
-    resolve_env_file_with_interaction(env_file, config, dir, None)
+    resolve_env_file_with_options(env_file, config, dir, None, false)
 }
 
 /// Resolve all entries from an `.env` file with optional application-provided UI hooks.
@@ -283,6 +283,30 @@ pub fn resolve_env_file_with_interaction(
     config: &Config,
     dir: &Path,
     interaction: Option<&dyn ResolutionInteraction>,
+) -> Result<BTreeMap<String, String>> {
+    resolve_env_file_with_options(env_file, config, dir, interaction, false)
+}
+
+/// Resolve all entries while permitting unresolved managed keys.
+///
+/// This is intended for diagnostic commands that need to report partial
+/// results. Commands that export or execute with secrets should use the
+/// fail-closed defaults in [`resolve_env_file`] instead.
+pub fn resolve_env_file_allow_missing(
+    env_file: &EnvFile,
+    config: &Config,
+    dir: &Path,
+    interaction: Option<&dyn ResolutionInteraction>,
+) -> Result<BTreeMap<String, String>> {
+    resolve_env_file_with_options(env_file, config, dir, interaction, true)
+}
+
+fn resolve_env_file_with_options(
+    env_file: &EnvFile,
+    config: &Config,
+    dir: &Path,
+    interaction: Option<&dyn ResolutionInteraction>,
+    allow_missing: bool,
 ) -> Result<BTreeMap<String, String>> {
     let started_at = Instant::now();
     let mut resolved = BTreeMap::new();
@@ -619,6 +643,20 @@ pub fn resolve_env_file_with_interaction(
                     .entry(entry.key.clone())
                     .or_insert_with(|| value.clone());
             }
+        }
+    }
+
+    if !allow_missing {
+        let missing = entries
+            .iter()
+            .filter(|entry| !resolved.contains_key(&entry.key))
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "failed to resolve required environment entries: {}",
+                missing.join(", ")
+            );
         }
     }
 

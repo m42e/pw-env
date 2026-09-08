@@ -261,7 +261,7 @@ impl EnvFile {
                 }
             }
         }
-        std::fs::write(&self.path, output)
+        crate::config::atomic_write_file(&self.path, output.as_bytes(), false)
             .with_context(|| format!("Failed to rewrite .env file: {}", self.path.display()))?;
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())
@@ -295,7 +295,7 @@ impl EnvFile {
                 }
             }
         }
-        std::fs::write(&self.path, output)
+        crate::config::atomic_write_file(&self.path, output.as_bytes(), false)
             .with_context(|| format!("Failed to rewrite .env file: {}", self.path.display()))?;
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())

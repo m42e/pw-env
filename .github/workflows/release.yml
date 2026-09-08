@@ -298,6 +298,18 @@ jobs:
         run: |
           cp LICENSE dist/LICENSE
 
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > dist/SHA256SUMS
+          for archive in dist/pw-env-*.tar.gz dist/pw-env-*.zip; do
+            if [ -f "$archive" ]; then
+              (cd dist && sha256sum "${archive#dist/}") >> dist/SHA256SUMS
+            fi
+          done
+          test -s dist/SHA256SUMS
+
       - name: Generate release notes
         uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # pin: v4.7.1
         with:

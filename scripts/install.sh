@@ -95,6 +95,26 @@ download_file() {
   fail "either curl or wget is required"
 }
 
+verify_checksum() {
+  archive_path="$1"
+  archive_name="$2"
+  checksum_path="$3"
+
+  expected=$(awk -v name="$archive_name" '$2 == name || $2 == "*" name { print $1; exit }' "$checksum_path")
+  [ -n "$expected" ] || fail "checksum manifest does not contain $archive_name"
+  printf '%s' "$expected" | grep -Eq '^[[:xdigit:]]{64}$' || fail "invalid checksum for $archive_name"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$archive_path" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$archive_path" | awk '{print $1}')
+  else
+    fail "sha256sum or shasum is required to verify release downloads"
+  fi
+
+  [ "${actual,,}" = "${expected,,}" ] || fail "checksum verification failed for $archive_name"
+}
+
 extract_archive() {
   archive_path="$1"
   destination="$2"
@@ -116,6 +136,39 @@ extract_archive() {
       fail "unsupported archive format: $ARCHIVE_FORMAT"
       ;;
   esac
+}
+
+validate_archive_entries() {
+  archive_path="$1"
+  entries=""
+
+  case "$ARCHIVE_FORMAT" in
+    tar.gz)
+      entries=$(tar -tzf "$archive_path") || fail "unable to inspect archive contents"
+      ;;
+    zip)
+      if command -v unzip >/dev/null 2>&1; then
+        entries=$(unzip -Z1 "$archive_path") || fail "unable to inspect archive contents"
+      elif command -v bsdtar >/dev/null 2>&1; then
+        entries=$(bsdtar -tf "$archive_path") || fail "unable to inspect archive contents"
+      else
+        fail "zip archive inspection requires unzip or bsdtar"
+      fi
+      ;;
+    *)
+      fail "unsupported archive format: $ARCHIVE_FORMAT"
+      ;;
+  esac
+
+  while IFS= read -r entry; do
+    case "$entry" in
+      /*|../*|*/../*|..|[A-Za-z]:/*)
+        fail "archive contains an unsafe path: $entry"
+        ;;
+    esac
+  done <<EOF
+$entries
+EOF
 }
 
 default_install_dir() {
@@ -281,6 +334,7 @@ fi
 
 archive_name="${BINARY_NAME}-${tag}-${target}.${ARCHIVE_FORMAT}"
 download_url="https://github.com/${OWNER}/${REPO}/releases/download/${tag}/${archive_name}"
+checksum_url="https://github.com/${OWNER}/${REPO}/releases/download/${tag}/SHA256SUMS"
 install_dir=$(default_install_dir)
 install_path="${install_dir}/${ARCHIVE_BINARY_NAME}"
 
@@ -289,29 +343,39 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "target=$target"
   echo "archive=$archive_name"
   echo "url=$download_url"
+  echo "checksum_url=$checksum_url"
   echo "install_dir=$install_dir"
   exit 0
 fi
 
 tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT
+install_tmp_path=""
+trap 'rm -rf "$tmpdir"; if [ -n "$install_tmp_path" ]; then rm -f "$install_tmp_path"; fi' EXIT
 
 mkdir -p "$install_dir"
 archive_path="${tmpdir}/${archive_name}"
+checksum_path="${tmpdir}/SHA256SUMS"
 
 echo "Downloading ${archive_name}..."
 download_file "$download_url" "$archive_path"
+download_file "$checksum_url" "$checksum_path"
+verify_checksum "$archive_path" "$archive_name" "$checksum_path"
 
 echo "Installing ${BINARY_NAME} to ${install_path}..."
+validate_archive_entries "$archive_path"
 extract_archive "$archive_path" "$tmpdir"
 [ -f "${tmpdir}/${ARCHIVE_BINARY_NAME}" ] || fail "archive did not contain ${ARCHIVE_BINARY_NAME}"
 
 if command -v install >/dev/null 2>&1; then
-  install -m 0755 "${tmpdir}/${ARCHIVE_BINARY_NAME}" "$install_path"
+  install_tmp_path="${install_dir}/.${ARCHIVE_BINARY_NAME}.pw-env-install-$$"
+  install -m 0755 "${tmpdir}/${ARCHIVE_BINARY_NAME}" "$install_tmp_path"
 else
-  cp "${tmpdir}/${ARCHIVE_BINARY_NAME}" "$install_path"
-  chmod 0755 "$install_path"
+  install_tmp_path="${install_dir}/.${ARCHIVE_BINARY_NAME}.pw-env-install-$$"
+  cp "${tmpdir}/${ARCHIVE_BINARY_NAME}" "$install_tmp_path"
+  chmod 0755 "$install_tmp_path"
 fi
+mv -f "$install_tmp_path" "$install_path"
+install_tmp_path=""
 
 echo "Installed ${BINARY_NAME} ${tag} to ${install_path}"
 print_post_install_note "$install_dir"
