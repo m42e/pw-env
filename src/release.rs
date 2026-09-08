@@ -5,7 +5,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
@@ -308,26 +308,29 @@ fn verify_release_checksum(
 
     let expected = expected_release_checksum(&checksums, archive_name)?;
 
-    let mut file = File::open(archive_path).with_context(|| {
+    let file = File::open(archive_path).with_context(|| {
         format!(
             "failed to open {} for checksum verification",
             archive_path.display()
         )
     })?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65_536];
+    let mut reader = io::BufReader::new(file);
     loop {
-        let read = file.read(&mut buffer).with_context(|| {
-            format!(
-                "failed to read {} for checksum verification",
-                archive_path.display()
-            )
-        })?;
-        if read > 0 {
-            hasher.update(&buffer[..read]);
-        } else {
-            break;
-        }
+        let buffer_len = {
+            let buffer = reader.fill_buf().with_context(|| {
+                format!(
+                    "failed to read {} for checksum verification",
+                    archive_path.display()
+                )
+            })?;
+            if buffer.is_empty() {
+                break;
+            }
+            hasher.update(buffer);
+            buffer.len()
+        };
+        reader.consume(buffer_len);
     }
     let actual = hasher
         .finalize()
