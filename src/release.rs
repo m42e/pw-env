@@ -130,7 +130,7 @@ pub fn update(requested_version: Option<&str>) -> Result<()> {
         release.version, asset.target
     );
     download_file(&download_url, &archive_path)?;
-    verify_release_checksum(&release.tag, &archive_name, &archive_path)?;
+    verify_release_checksum(&release.tag, &archive_name, &archive_path, None)?;
 
     let extracted_binary_path = extract_binary_from_archive(&archive_path, &tempdir, &asset)
         .with_context(|| format!("failed to extract {}", archive_name))?;
@@ -286,9 +286,16 @@ fn release_checksums_url(tag: &str) -> String {
     )
 }
 
-fn verify_release_checksum(tag: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
+fn verify_release_checksum(
+    tag: &str,
+    archive_name: &str,
+    archive_path: &Path,
+    checksums_url_override: Option<&str>,
+) -> Result<()> {
     let client = http_client(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))?;
-    let checksums_url = release_checksums_url(tag);
+    let checksums_url = checksums_url_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| release_checksums_url(tag));
     let checksums = client
         .get(&checksums_url)
         .header(reqwest::header::USER_AGENT, user_agent())
@@ -308,7 +315,7 @@ fn verify_release_checksum(tag: &str, archive_name: &str, archive_path: &Path) -
         )
     })?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = [0u8; 65_536];
     loop {
         let read = file.read(&mut buffer).with_context(|| {
             format!(
@@ -579,6 +586,33 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    fn serve_http_body(body: String) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_buf = [0_u8; 1024];
+            let mut request = Vec::new();
+            loop {
+                let bytes_read = stream.read(&mut request_buf).unwrap();
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&request_buf[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (format!("http://{addr}/SHA256SUMS"), handle)
+    }
+
     #[test]
     fn strips_v_prefix_from_release_tags() {
         assert_eq!(normalize_version("v1.2.3").unwrap(), "1.2.3");
@@ -699,12 +733,57 @@ mod tests {
 
     #[test]
     fn checksum_manifest_selects_the_exact_archive() {
-        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let manifest = format!("{digest}  first.tar.gz\n{digest} *second.tar.gz\n");
+        let first_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+        let second_digest = "1111111111111111111111111111111111111111111111111111111111111111";
+        let manifest = format!("{first_digest}  first.tar.gz\n{second_digest} *second.tar.gz\n");
         assert_eq!(
             expected_release_checksum(&manifest, "second.tar.gz").unwrap(),
-            digest
+            second_digest
         );
+    }
+
+    #[test]
+    fn release_checksums_url_uses_the_release_tag_and_manifest_name() {
+        assert_eq!(
+            release_checksums_url("v1.2.3"),
+            "https://github.com/m42e/pw-env/releases/download/v1.2.3/SHA256SUMS"
+        );
+    }
+
+    #[test]
+    fn verify_release_checksum_accepts_matching_and_rejects_mismatching_archives() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_name = "pw-env-test.tar.gz";
+        let archive_path = temp_dir.path().join(archive_name);
+        let archive_contents = vec![b'a'; 70_000];
+        std::fs::write(&archive_path, &archive_contents).unwrap();
+
+        let actual_digest = Sha256::digest(&archive_contents);
+        let actual_digest = actual_digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let matching_manifest = format!("{actual_digest} *{archive_name}\n");
+        let (matching_url, matching_server) = serve_http_body(matching_manifest);
+
+        verify_release_checksum("v-test", archive_name, &archive_path, Some(&matching_url))
+            .unwrap();
+        matching_server.join().unwrap();
+
+        let mismatching_manifest = format!(
+            "0000000000000000000000000000000000000000000000000000000000000000 *{archive_name}\n"
+        );
+        let (mismatching_url, mismatching_server) = serve_http_body(mismatching_manifest);
+        assert!(
+            verify_release_checksum(
+                "v-test",
+                archive_name,
+                &archive_path,
+                Some(&mismatching_url)
+            )
+            .is_err()
+        );
+        mismatching_server.join().unwrap();
     }
 
     #[test]
