@@ -93,6 +93,8 @@ pub fn replace_file_atomically(temporary_path: &Path, destination: &Path) -> Res
 }
 
 fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> {
+    #[cfg(not(unix))]
+    let _ = private;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -107,8 +109,6 @@ fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> 
     } else {
         None
     };
-    #[cfg(not(unix))]
-    let _existing_mode = None::<u32>;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -152,11 +152,6 @@ fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> 
 fn file_mode(metadata: fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     metadata.permissions().mode() & 0o7777
-}
-
-#[cfg(not(unix))]
-fn file_mode(_metadata: fs::Metadata) -> u32 {
-    0
 }
 
 #[derive(Debug, Clone)]

@@ -475,12 +475,20 @@ fn archive_entry_matches_binary_name(entry_name: &str, binary_name: &str) -> boo
 }
 
 fn archive_entry_is_safe(entry_name: &str) -> bool {
-    let path = Path::new(entry_name);
-    !path.is_absolute()
-        && !entry_name.is_empty()
-        && !path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
+    if entry_name.is_empty() {
+        return false;
+    }
+
+    // Archive names use POSIX separators, but ZIP files may contain Windows
+    // separators as well. Keep this check independent of the host platform so
+    // a name safe on Unix cannot become absolute when extracted on Windows.
+    let normalized = entry_name.replace('\\', "/");
+    let is_windows_drive_path = normalized.len() >= 2
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[0].is_ascii_alphabetic();
+    !normalized.starts_with('/')
+        && !is_windows_drive_path
+        && !normalized.split('/').any(|component| component == "..")
 }
 
 fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
@@ -712,6 +720,8 @@ mod tests {
         assert!(!archive_entry_is_safe("../pw-env"));
         assert!(!archive_entry_is_safe("release/../../pw-env"));
         assert!(!archive_entry_is_safe("/tmp/pw-env"));
+        assert!(!archive_entry_is_safe(r"release\..\pw-env"));
+        assert!(!archive_entry_is_safe(r"C:\tmp\pw-env"));
     }
 
     #[test]
