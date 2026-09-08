@@ -324,7 +324,11 @@ fn verify_release_checksum(tag: &str, archive_name: &str, archive_path: &Path) -
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     if !actual.eq_ignore_ascii_case(expected) {
         anyhow::bail!(
             "checksum verification failed for {archive_name}: expected {expected}, got {actual}"

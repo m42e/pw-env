@@ -105,11 +105,14 @@ fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> 
         .file_name()
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| std::borrow::Cow::Borrowed("pw-env-file"));
+    #[cfg(unix)]
     let existing_mode = if !private {
         fs::metadata(path).ok().map(file_mode)
     } else {
         None
     };
+    #[cfg(not(unix))]
+    let _existing_mode = None::<u32>;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
