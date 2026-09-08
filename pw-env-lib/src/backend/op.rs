@@ -153,12 +153,13 @@ impl OpBackend {
                 .take()
                 .context("Missing 1Password item write stdin")?;
             serde_json::to_writer(&mut stdin, payload)
-                .context("Failed to send 1Password item JSON")?;
+                .map_err(|_| anyhow::anyhow!("1Password item write failed"))?;
             stdin
                 .flush()
-                .context("Failed to flush 1Password item JSON")?;
+                .map_err(|_| anyhow::anyhow!("1Password item write failed"))?;
         }
-        let output = super::wait_with_output_timeout(child, "Failed to wait for 1Password item write")?;
+        let output =
+            super::wait_with_output_timeout(child, "Failed to wait for 1Password item write")?;
         if !output.status.success() {
             bail!("1Password item write failed");
         }

@@ -1683,7 +1683,8 @@ branch "broken"]
 
         let resolved =
             with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
-                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+                resolve_env_file_allow_missing(&env_file, &config, &temp, None)
+                    .expect("should resolve env file")
             });
 
         let log = fs::read_to_string(&call_log).unwrap();
@@ -1736,7 +1737,8 @@ branch "broken"]
 
         let resolved =
             with_approval_and_mock_binaries(Some(&op_script), None, None, &env_path, || {
-                resolve_env_file(&env_file, &config, &temp).expect("should resolve env file")
+                resolve_env_file_allow_missing(&env_file, &config, &temp, None)
+                    .expect("should resolve env file")
             });
 
         let log = fs::read_to_string(&call_log).unwrap();

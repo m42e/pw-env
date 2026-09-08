@@ -190,8 +190,7 @@ impl GpgBackend {
     /// Encrypt content and write to the GPG file.
     fn encrypt_to_file(content: &str, path: &PathBuf, recipient: &str) -> Result<()> {
         debug!("Encrypting content to GPG file: {}", path.display());
-        let (temporary_file, temporary_path) =
-            crate::config::create_private_temp_file(path)?;
+        let (temporary_file, temporary_path) = crate::config::create_private_temp_file(path)?;
         drop(temporary_file);
 
         let mut cmd = Command::new("gpg");
@@ -220,7 +219,8 @@ impl GpgBackend {
                 use std::io::Write;
                 stdin.write_all(content.as_bytes())?;
             }
-            let output = super::wait_with_output_timeout(child, "Failed to wait for `gpg` encryption")?;
+            let output =
+                super::wait_with_output_timeout(child, "Failed to wait for `gpg` encryption")?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 bail!("gpg encrypt failed: {stderr}");
@@ -549,7 +549,7 @@ PLAIN=value
             "# pw-env: created-with=pw-env ({})",
             env!("CARGO_PKG_VERSION")
         )));
-        assert!(serialized.contains("API_KEY=secret"));
+        assert!(serialized.contains("API_KEY=\"secret\""));
     }
 
     // ------- Error-path tests (no mock needed) -------
@@ -905,8 +905,8 @@ PLAIN=value
             let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
             assert!(result.is_ok(), "store failed: {:?}", result);
             let encrypted = std::fs::read_to_string(&gpg_file).unwrap();
-            assert!(encrypted.contains("EXISTING_KEY=existing-value"));
-            assert!(encrypted.contains("NEW_KEY=new-value"));
+            assert!(encrypted.contains("EXISTING_KEY=\"existing-value\""));
+            assert!(encrypted.contains("NEW_KEY=\"new-value\""));
         });
     }
 

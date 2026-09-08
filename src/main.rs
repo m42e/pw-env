@@ -503,13 +503,8 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                 .into_iter()
                 .map(|e| e.key.clone())
                 .collect();
-            let resolved = resolve_environment(
-                &env_file,
-                &config,
-                &dir,
-                Some(&interaction),
-                allow_missing,
-            )?;
+            let resolved =
+                resolve_environment(&env_file, &config, &dir, Some(&interaction), allow_missing)?;
 
             if should_warn_missing(warn_missing, config.effective_warn_missing(&dir)) {
                 emit_missing_entries_warning(&resolvable_keys, &resolved);

@@ -218,8 +218,12 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
     match update {
         EnvEntryUpdate::Create(path) => {
             let entry_value = url.unwrap_or("");
-            crate::config::atomic_write_file(&path, format!("{key}={entry_value}\n").as_bytes(), false)
-                .with_context(|| format!("Failed to create {}", path.display()))?;
+            crate::config::atomic_write_file(
+                &path,
+                format!("{key}={entry_value}\n").as_bytes(),
+                false,
+            )
+            .with_context(|| format!("Failed to create {}", path.display()))?;
             if url.is_some() {
                 Ok(format!(
                     "Created {} with a managed entry for {key}.",
@@ -631,7 +635,7 @@ mod tests {
         assert!(temp_dir.path().join(".env.gpg").exists());
 
         let encrypted_payload = std::fs::read_to_string(gpg_output_path).unwrap();
-        assert!(encrypted_payload.contains("API_KEY=super-secret"));
+        assert!(encrypted_payload.contains("API_KEY=\"super-secret\""));
     }
 
     #[test]

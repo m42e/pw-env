@@ -81,12 +81,8 @@ pub fn create_private_temp_file(path: &Path) -> Result<(File, PathBuf)> {
 
 /// Atomically move a completed sibling file into place.
 pub fn replace_file_atomically(temporary_path: &Path, destination: &Path) -> Result<()> {
-    fs::rename(temporary_path, destination).with_context(|| {
-        format!(
-            "Failed to atomically replace {}",
-            destination.display()
-        )
-    })?;
+    fs::rename(temporary_path, destination)
+        .with_context(|| format!("Failed to atomically replace {}", destination.display()))?;
 
     if let Some(parent) = destination.parent() {
         if let Ok(directory) = File::open(parent) {
@@ -140,10 +136,7 @@ fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> 
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!(
-                        "Failed to create temporary file beside {}",
-                        path.display()
-                    )
+                    format!("Failed to create temporary file beside {}", path.display())
                 });
             }
         }

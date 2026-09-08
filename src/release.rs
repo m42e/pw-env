@@ -301,24 +301,21 @@ fn verify_release_checksum(tag: &str, archive_name: &str, archive_path: &Path) -
 
     let expected = expected_release_checksum(&checksums, archive_name)?;
 
-    let mut file = File::open(archive_path)
-        .with_context(|| {
-            format!(
-                "failed to open {} for checksum verification",
-                archive_path.display()
-            )
-        })?;
+    let mut file = File::open(archive_path).with_context(|| {
+        format!(
+            "failed to open {} for checksum verification",
+            archive_path.display()
+        )
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| {
-                format!(
-                    "failed to read {} for checksum verification",
-                    archive_path.display()
-                )
-            })?;
+        let read = file.read(&mut buffer).with_context(|| {
+            format!(
+                "failed to read {} for checksum verification",
+                archive_path.display()
+            )
+        })?;
         if read == 0 {
             break;
         }
@@ -402,7 +399,9 @@ fn extract_binary_from_archive(
                     })?;
                     io::copy(&mut entry, &mut output).with_context(|| {
                         format!(
-                            "failed to unpack {} to {}", asset.binary_name, extracted_binary_path.display()
+                            "failed to unpack {} to {}",
+                            asset.binary_name,
+                            extracted_binary_path.display()
                         )
                     })?;
                     return Ok(extracted_binary_path);
@@ -545,9 +544,8 @@ impl ReleaseCheckState {
 
         let contents = serde_json::to_string_pretty(self)
             .context("failed to serialize release check state")?;
-        config::write_private_file(path, &contents).with_context(|| {
-            format!("failed to write release check state to {}", path.display())
-        })
+        config::write_private_file(path, &contents)
+            .with_context(|| format!("failed to write release check state to {}", path.display()))
     }
 
     fn is_due(&self, now: u64, interval: Duration) -> bool {
@@ -695,7 +693,10 @@ mod tests {
     fn checksum_manifest_selects_the_exact_archive() {
         let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let manifest = format!("{digest}  first.tar.gz\n{digest} *second.tar.gz\n");
-        assert_eq!(expected_release_checksum(&manifest, "second.tar.gz").unwrap(), digest);
+        assert_eq!(
+            expected_release_checksum(&manifest, "second.tar.gz").unwrap(),
+            digest
+        );
     }
 
     #[test]
