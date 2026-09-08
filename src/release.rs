@@ -593,12 +593,26 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::Instant;
 
     fn serve_http_body(body: String) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
         let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("HTTP test server did not receive a request: {error}"),
+                }
+            };
             let mut request_buf = [0_u8; 1024];
             let mut request = Vec::new();
             loop {
