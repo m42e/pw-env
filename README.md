@@ -326,6 +326,20 @@ After the shell hook is installed, entering that folder wraps the listed command
 available to those child processes without being exported into the parent shell. Command entries may be exact names or
 executable-name patterns such as `cargo*`.
 
+Prefer executable commands for command-scoped wrappers. Shell builtins such as `echo`, `cd`, and `pwd` may run directly
+in the shell, and `echo "$API_KEY"` expands `$API_KEY` before `pw-env exec` can inject it. To run a builtin with
+transient secrets, configure the shell executable and pass the command through it, for example:
+
+```toml
+commands = ["bash"]
+```
+
+```bash
+bash -c 'echo "$API_KEY"'
+```
+
+Use the equivalent shell executable and command option for `zsh`, `fish`, or `powershell`.
+
 When migrating plaintext values, `pw-env migrate` asks whether the migrated secrets should be command-scoped and can
 create or update the project config for you. It prints the approval and shell-hook commands to run afterward.
 

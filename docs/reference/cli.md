@@ -97,6 +97,12 @@ pw-env approvals approve ./api/.pw-env.toml
 eval "$(pw-env init bash)"
 ```
 
+Command-scoped wrappers work best with executable commands. Shell builtins such as `echo`, `cd`, and `pwd` may be
+handled directly by the shell, and expressions such as `echo "$API_KEY"` expand the variable before `pw-env exec` can
+inject it. To run a builtin with transient secrets, configure the shell executable and pass the command through it,
+for example `commands = ["bash"]` followed by `bash -c 'echo "$API_KEY"'`. Use the equivalent executable and command
+option for the shell in use.
+
 ## `load`
 
 ```console
