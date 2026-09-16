@@ -901,6 +901,7 @@ mod tests {
         // Mock op that succeeds for all operations (create, get/verify)
         let script = r#"#!/bin/sh
 # Handle any op command with success
+        cat >/dev/null
 echo "mock-value"
 exit 0
 "#;
@@ -1040,6 +1041,7 @@ exit 0
         set_mock_prompt(BTreeSet::from([1]));
 
         let script = r#"#!/bin/sh
+cat >/dev/null
 echo "mock-value"
 exit 0
 "#;
