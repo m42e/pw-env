@@ -17,6 +17,7 @@ The interactive manual is published with GitHub Pages at [m42e.de/pw-env](https:
 - Supports explicit `op://...` and `bw://...` references per variable
 - Supports GPG-backed secret files such as `.env.gpg`
 - Generates shell hooks for `bash`, `zsh`, `fish`, and `powershell`
+- Runs commands with secrets in the child process only, or wraps configured commands per project
 - Warns when likely plaintext secrets are still present in `.env`
 - Migrates plaintext values out of `.env` into the configured backend
 - Supports per-project backend overrides via config
@@ -215,8 +216,14 @@ Minimal example using 1Password:
 backend = "op"
 
 [defaults.op]
-vault = "Development"
+vault = "work"
+
+[defaults.op.vault_aliases]
+work = "Development"
 ```
+
+The `vault_aliases` table maps short names to real 1Password vault names. Aliases can be used in the default `vault`
+setting and in `op://alias/item/field` references.
 
 Minimal example using Bitwarden:
 
@@ -298,6 +305,30 @@ hook auto-loads a directory.
 `cmd.exe` does not expose equivalent automatic hook points for per-directory or per-command lifecycle events. Use
 `pw-env exec` directly when working from cmd.
 
+### Command-scoped secrets
+
+For a one-off command, load secrets only into that command's environment:
+
+```bash
+pw-env exec --dir . -- cargo test
+```
+
+To wrap commands automatically in a project, add a matching project entry to the global config or put the same
+`commands` setting in the project's approved `.pw-env.toml`:
+
+```toml
+[[projects]]
+path = "/home/user/work/api-server"
+commands = ["cargo", "npm", "terraform"]
+```
+
+After the shell hook is installed, entering that folder wraps the listed commands through `pw-env exec`. Secrets are
+available to those child processes without being exported into the parent shell. Command entries may be exact names or
+executable-name patterns such as `cargo*`.
+
+When migrating plaintext values, `pw-env migrate` asks whether the migrated secrets should be command-scoped and can
+create or update the project config for you. It prints the approval and shell-hook commands to run afterward.
+
 ## Backend Resolution Model
 
 `pw-env` resolves variables in three groups:
@@ -327,7 +358,8 @@ Default config path:
 Top-level sections:
 
 - `[defaults]` selects the default backend
-- `[defaults.op]` configures 1Password defaults such as `vault`, `account`, and `item`
+- `[defaults.op]` configures 1Password defaults such as `vault`, `account`, and `item`; `vault` can use a `vault_aliases` entry
+- `[defaults.op.vault_aliases]` maps user-friendly 1Password vault aliases to real vault names
 - `[defaults.bw]` configures Bitwarden defaults such as `folder`, `organization`, and `item`
 - `[defaults.gpg]` configures `file_pattern` and `recipient`
 - `[log]` configures log level and optional log file path
@@ -419,10 +451,14 @@ pw-env --help
 Main subcommands:
 
 - `pw-env init <bash|zsh|fish>` prints shell hook code
+- `pw-env exec [--dir <dir>] -- <command> [args...]` runs one command with transient secrets
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
 - `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show
   full values
 - `pw-env status [--short]` lists loaded and failed keys for the current directory, or only their counts with `--short`
+- `pw-env commands list [--dir <dir>]` lists commands that receive secrets for a directory
+- `pw-env commands add [--dir <dir>] <command>...` adds command names or patterns to the directory configuration and
+  prints the approval and shell-hook setup commands
 - `pw-env add [--dir <dir>] [--backend <op|bw|gpg>] <KEY> [VALUE]` stores a secret in the configured backend, or a
   backend chosen for that invocation, and ensures `.env` contains
   `KEY=` for runtime resolution; omit `VALUE` to prompt or read it from stdin

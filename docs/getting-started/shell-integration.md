@@ -83,6 +83,10 @@ runs those commands through `pw-env exec` so the resolved secrets exist only in 
 
 Command-scoped mode matches exact command names and shell-style glob patterns against executable names.
 
+`pw-env migrate` can create this project-local setting for you. After selecting the plaintext entries to migrate, answer
+yes when it asks whether they should be limited to specific commands, then enter names such as `cargo npm`. The command
+writes or updates `.pw-env.toml`, tells you how to approve it, and prints the shell-hook command for your shell.
+
 ## Per-shell behavior
 
 | Shell | Hook strategy |

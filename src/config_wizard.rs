@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
@@ -245,6 +246,7 @@ struct ConfigWizardState {
     cache_enabled: bool,
     cache_ttl_hours: u64,
     op_vault: Option<String>,
+    op_vault_aliases: BTreeMap<String, String>,
     op_account: Option<String>,
     op_item: Option<String>,
     bw_folder: Option<String>,
@@ -271,6 +273,7 @@ impl ConfigWizardState {
             cache_enabled: config.defaults.cache.enabled,
             cache_ttl_hours: config.defaults.cache.ttl_hours,
             op_vault: config.defaults.op.vault.clone(),
+            op_vault_aliases: config.defaults.op.vault_aliases.clone(),
             op_account: config.defaults.op.account.clone(),
             op_item: config.defaults.op.item.clone(),
             bw_folder: config.defaults.bw.folder.clone(),
@@ -302,6 +305,7 @@ impl ConfigWizardState {
                 },
                 op: crate::config::OpConfig {
                     vault: self.op_vault.clone(),
+                    vault_aliases: self.op_vault_aliases.clone(),
                     account: self.op_account.clone(),
                     item: self.op_item.clone(),
                 },
@@ -345,7 +349,11 @@ impl ConfigWizardState {
             format!("ttl_hours = {}", self.cache_ttl_hours),
         ];
 
-        if self.op_vault.is_some() || self.op_account.is_some() || self.op_item.is_some() {
+        if self.op_vault.is_some()
+            || !self.op_vault_aliases.is_empty()
+            || self.op_account.is_some()
+            || self.op_item.is_some()
+        {
             lines.push(String::new());
             lines.push("[defaults.op]".to_string());
             if let Some(vault) = &self.op_vault {
@@ -356,6 +364,13 @@ impl ConfigWizardState {
             }
             if let Some(item) = &self.op_item {
                 lines.push(format!("item = {}", quoted(item)));
+            }
+            if !self.op_vault_aliases.is_empty() {
+                lines.push(String::new());
+                lines.push("[defaults.op.vault_aliases]".to_string());
+                for (alias, vault) in &self.op_vault_aliases {
+                    lines.push(format!("{} = {}", quoted(alias), quoted(vault)));
+                }
             }
         }
 
@@ -1060,6 +1075,7 @@ mod tests {
                 },
                 op: OpConfig {
                     vault: Some("Work".to_string()),
+                    vault_aliases: BTreeMap::from([("work".to_string(), "Work Vault".to_string())]),
                     account: Some("team".to_string()),
                     item: Some("shared-env".to_string()),
                 },
@@ -1100,6 +1116,15 @@ mod tests {
         assert!(!round_trip.defaults.cache.enabled);
         assert_eq!(round_trip.defaults.cache.ttl_hours, 12);
         assert_eq!(round_trip.defaults.op.vault.as_deref(), Some("Work"));
+        assert_eq!(
+            round_trip
+                .defaults
+                .op
+                .vault_aliases
+                .get("work")
+                .map(String::as_str),
+            Some("Work Vault")
+        );
         assert_eq!(round_trip.defaults.op.account.as_deref(), Some("team"));
         assert_eq!(round_trip.defaults.op.item.as_deref(), Some("shared-env"));
         assert_eq!(round_trip.defaults.bw.folder.as_deref(), Some("env"));
@@ -1132,6 +1157,7 @@ mod tests {
             cache_enabled: true,
             cache_ttl_hours: 8,
             op_vault: None,
+            op_vault_aliases: BTreeMap::new(),
             op_account: None,
             op_item: None,
             bw_folder: Some("secrets".to_string()),
@@ -1162,6 +1188,33 @@ mod tests {
         assert!(rendered.contains("level = \"warn\""));
         assert!(rendered.contains("[[projects]]"));
         assert!(rendered.contains("path = \"/workspace/app\""));
+    }
+
+    #[test]
+    fn render_config_keeps_op_fields_outside_vault_alias_table() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.op_vault = Some("work".to_string());
+        state
+            .op_vault_aliases
+            .insert("work".to_string(), "Work Vault".to_string());
+        state.op_account = Some("team".to_string());
+        state.op_item = Some("shared-env".to_string());
+
+        let rendered = state.render_config();
+        let parsed: Config = toml::from_str(&rendered).unwrap();
+
+        assert_eq!(parsed.defaults.op.vault.as_deref(), Some("work"));
+        assert_eq!(
+            parsed
+                .defaults
+                .op
+                .vault_aliases
+                .get("work")
+                .map(String::as_str),
+            Some("Work Vault")
+        );
+        assert_eq!(parsed.defaults.op.account.as_deref(), Some("team"));
+        assert_eq!(parsed.defaults.op.item.as_deref(), Some("shared-env"));
     }
 
     #[test]

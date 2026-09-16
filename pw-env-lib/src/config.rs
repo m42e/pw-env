@@ -205,11 +205,41 @@ fn default_cache_ttl_hours() -> u64 {
 pub struct OpConfig {
     #[serde(default)]
     pub vault: Option<String>,
+    #[serde(default, alias = "aliases")]
+    pub vault_aliases: BTreeMap<String, String>,
     #[serde(default)]
     pub account: Option<String>,
     /// Item name to look up keys as fields (if set, keys are resolved as fields of this item)
     #[serde(default)]
     pub item: Option<String>,
+}
+
+impl OpConfig {
+    pub fn resolve_vault<'a>(&'a self, vault: &'a str) -> &'a str {
+        self.vault_aliases
+            .get(vault)
+            .map(String::as_str)
+            .unwrap_or(vault)
+    }
+
+    pub fn resolved_vault(&self) -> Option<&str> {
+        self.vault.as_deref().map(|vault| self.resolve_vault(vault))
+    }
+
+    pub fn resolve_reference(&self, reference: &str) -> String {
+        let Some(reference_body) = reference.strip_prefix("op://") else {
+            return reference.to_string();
+        };
+        let Some((vault, remainder)) = reference_body.split_once('/') else {
+            return reference.to_string();
+        };
+        let resolved_vault = self.resolve_vault(vault);
+        if resolved_vault == vault {
+            reference.to_string()
+        } else {
+            format!("op://{resolved_vault}/{remainder}")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1279,6 +1309,35 @@ backend = "bw"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.defaults.backend, "bw");
+    }
+
+    #[test]
+    fn test_parse_op_vault_aliases() {
+        let toml_str = r#"
+[defaults.op]
+vault = "work"
+
+[defaults.op.vault_aliases]
+work = "Work Vault"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(config.defaults.op.resolved_vault(), Some("Work Vault"));
+        assert_eq!(config.defaults.op.resolve_vault("personal"), "personal");
+        assert_eq!(
+            config
+                .defaults
+                .op
+                .resolve_reference("op://work/shared/password"),
+            "op://Work Vault/shared/password"
+        );
+        assert_eq!(
+            config
+                .defaults
+                .op
+                .resolve_reference("op://Personal/item/field"),
+            "op://Personal/item/field"
+        );
     }
 
     #[test]

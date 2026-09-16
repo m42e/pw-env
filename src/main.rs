@@ -155,6 +155,15 @@ enum Commands {
         #[arg(long, value_parser = ["op", "bw", "gpg"])]
         backend: Option<String>,
     },
+    /// List or configure commands that receive secrets transiently
+    #[command(name = "commands")]
+    Command {
+        /// Directory whose command configuration should be inspected or changed
+        #[arg(long, global = true)]
+        dir: Option<PathBuf>,
+        #[command(subcommand)]
+        command: CommandCommands,
+    },
     /// Check availability of password manager backends
     Check,
     /// Manage approval state for project-local overrides and secret fetching
@@ -243,6 +252,18 @@ enum ApprovalCommands {
 enum CacheCommands {
     /// Clear persisted Bitwarden metadata and resolved-secret cache state
     Clear,
+}
+
+#[derive(Subcommand)]
+enum CommandCommands {
+    /// List commands configured for the directory
+    List,
+    /// Add one or more commands to the directory configuration
+    Add {
+        /// Command names or executable-name patterns such as cargo or cargo*
+        #[arg(required = true)]
+        commands: Vec<String>,
+    },
 }
 
 fn main() {
@@ -703,6 +724,8 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
             migrate::migrate_with_interaction(&dir, &config, backend.as_deref(), Some(&interaction))
         }
 
+        Commands::Command { dir, command } => handle_commands(dir, command),
+
         Commands::Check => {
             let dir = resolve_dir(None)?;
             let config = load_config_for_dir(&dir)?;
@@ -831,15 +854,23 @@ fn handle_status(
         .map(|entry| entry.key.clone())
         .collect::<Vec<_>>();
     let resolved = resolve_environment(&env_file, config, dir, interaction, true)?;
+    let mut loaded_keys = resolved.keys().cloned().collect::<BTreeSet<_>>();
+    loaded_keys.extend(
+        env_file
+            .entries()
+            .into_iter()
+            .filter(|entry| matches!(&entry.kind, env_file::EntryKind::Plaintext(_)))
+            .map(|entry| entry.key.clone()),
+    );
     let failed = missing_resolvable_keys(&resolvable_keys, &resolved);
 
     if short {
-        println!("{}", format_status_counts(resolved.len(), failed.len()));
+        println!("{}", format_status_counts(loaded_keys.len(), failed.len()));
         return Ok(());
     }
 
-    println!("Loaded keys for {} ({}):", dir.display(), resolved.len());
-    for key in resolved.keys() {
+    println!("Loaded keys for {} ({}):", dir.display(), loaded_keys.len());
+    for key in loaded_keys {
         println!("  {key}");
     }
 
@@ -1401,6 +1432,54 @@ fn handle_cache(command: CacheCommands) -> Result<()> {
     }
 }
 
+fn handle_commands(dir: Option<PathBuf>, command: CommandCommands) -> Result<()> {
+    let dir = resolve_dir(dir)?;
+    let config = load_config_for_dir(&dir)?;
+
+    match command {
+        CommandCommands::List => {
+            let commands = config.effective_commands(&dir);
+            if commands.is_empty() {
+                println!(
+                    "No command-scoped commands configured for {}.",
+                    dir.display()
+                );
+            } else {
+                println!("Commands receiving secrets for {}:", dir.display());
+                for command in commands {
+                    println!("  {command}");
+                }
+            }
+            Ok(())
+        }
+        CommandCommands::Add { commands } => {
+            let additions = migrate::parse_command_names(&commands.join(","))?;
+            let mut configured = config
+                .effective_commands(&dir)
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if let Some(override_path) = config::Config::project_override_path(&dir) {
+                configured.extend(migrate::project_override_commands(&override_path)?);
+            }
+            configured.extend(additions);
+            let configured = configured.into_iter().collect::<Vec<_>>();
+            let env_path = find_env_path(&dir, &config);
+            let config_path =
+                migrate::configure_command_scope(&dir, env_path.as_deref(), &config, &configured)?;
+
+            println!(
+                "Commands receiving secrets for {}: {}",
+                dir.display(),
+                configured.join(", ")
+            );
+            println!("Wrote project config: {}", config_path.display());
+            migrate::print_command_scope_instructions(&config_path);
+            Ok(())
+        }
+    }
+}
+
 fn keyring_clear_status_message(result: &cache::ClearSecretCacheResult) -> Option<String> {
     if result.keyring_unavailable {
         Some("Resolved-secret cache index was cleared, but the OS keyring was unavailable so cached keyring entries could not be removed".to_string())
@@ -1448,6 +1527,9 @@ ttl_hours = 4
 [defaults.op]
 # Default 1Password vault to search in
 # vault = "Development"
+# Optional aliases for vault names used by `vault` and `op://...` references.
+# [defaults.op.vault_aliases]
+# work = "Work Vault"
 # 1Password account shorthand (for multiple accounts)
 # account = "my-team"
 # Default item name — if set, keys are resolved as fields on this item
@@ -1849,6 +1931,8 @@ mod tests {
         assert!(template.contains("sync_throttle_secs"));
         assert!(template.contains("[defaults.cache]"));
         assert!(template.contains("ttl_hours"));
+        assert!(template.contains("[defaults.op.vault_aliases]"));
+        assert!(template.contains("work = \"Work Vault\""));
     }
 
     #[test]

@@ -1,12 +1,17 @@
 use anyhow::{Context, Result};
+#[cfg(not(test))]
+use dialoguer::{Confirm, Input};
 use dialoguer::{MultiSelect, theme::ColorfulTheme};
+use glob::Pattern;
+use serde::Serialize;
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::backend::{self, ResolutionInteraction, ResolveContext, StoreContext};
-use crate::config::Config;
+use crate::config::{self, BwConfig, CacheConfig, Config, GpgConfig, OpConfig};
 use crate::env_file::EnvFile;
 use crate::resolve;
 
@@ -14,6 +19,7 @@ use crate::resolve;
 thread_local! {
     static MOCK_INTERACTIVE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static MOCK_PROMPT_RESULT: std::cell::RefCell<Option<BTreeSet<usize>>> = const { std::cell::RefCell::new(None) };
+    static MOCK_COMMAND_SCOPE: std::cell::RefCell<Option<Option<Vec<String>>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Run the migration process: detect plaintext secrets in .env, offer to store them
@@ -80,6 +86,11 @@ pub fn migrate_with_interaction(
     if selected_indexes.is_empty() {
         eprintln!("No entries selected for migration.");
     }
+    let command_scope = if selected_indexes.is_empty() {
+        None
+    } else {
+        prompt_for_command_scope()?
+    };
 
     let (selected_entries, skipped_entries): (Vec<_>, Vec<_>) = plaintext_entries
         .iter()
@@ -163,6 +174,17 @@ pub fn migrate_with_interaction(
     Config::remember_reviewed_migration_entries(&env_path, skipped_fingerprints)?;
 
     if !migrated_keys.is_empty() {
+        if let Some(commands) = command_scope {
+            let config_path =
+                configure_command_scope(dir, Some(&env_path), &effective_config, &commands)?;
+            eprintln!();
+            eprintln!(
+                "Configured migrated secrets for these commands only: {}",
+                commands.join(", ")
+            );
+            eprintln!("Wrote project config: {}", config_path.display());
+            print_command_scope_instructions(&config_path);
+        }
         eprintln!();
         eprintln!(
             "Clearing {} migrated value(s) from .env...",
@@ -182,6 +204,128 @@ fn uses_bitwarden_backend(backend_name: &str) -> bool {
 
 fn config_for_migration(config: &Config, dir: &Path, backend_override: Option<&str>) -> Config {
     config.with_backend_override_for_dir(dir, backend_override)
+}
+
+#[derive(Serialize)]
+struct GeneratedProjectOverride {
+    backend: String,
+    search_parent_env: bool,
+    source_all: bool,
+    warn_missing: bool,
+    fallback_example_env: bool,
+    cache: CacheConfig,
+    op: OpConfig,
+    bw: BwConfig,
+    gpg: GpgConfig,
+    item: Option<String>,
+    commands: Vec<String>,
+}
+
+pub fn configure_command_scope(
+    dir: &Path,
+    env_path: Option<&Path>,
+    config: &Config,
+    commands: &[String],
+) -> Result<PathBuf> {
+    let config_path = Config::project_override_path(dir).unwrap_or_else(|| {
+        env_path
+            .and_then(Path::parent)
+            .unwrap_or(dir)
+            .join(".pw-env.toml")
+    });
+
+    if config_path.is_symlink() {
+        anyhow::bail!(
+            "Refusing to update symlinked project override: {}",
+            config_path.display()
+        );
+    }
+
+    let mut document = if config_path.exists() {
+        let contents = fs::read_to_string(&config_path).with_context(|| {
+            format!(
+                "Failed to read project override from {}",
+                config_path.display()
+            )
+        })?;
+        contents
+            .parse::<toml_edit::DocumentMut>()
+            .with_context(|| {
+                format!(
+                    "Failed to parse project override from {}",
+                    config_path.display()
+                )
+            })?
+    } else {
+        let generated = GeneratedProjectOverride {
+            backend: config.effective_backend(dir).to_string(),
+            search_parent_env: config.effective_search_parent_env(dir),
+            source_all: config.effective_source_all(dir),
+            warn_missing: config.effective_warn_missing(dir),
+            fallback_example_env: config.effective_fallback_example_env(dir),
+            cache: config.effective_cache(dir).clone(),
+            op: config.effective_op(dir).clone(),
+            bw: config.effective_bw(dir).clone(),
+            gpg: config.effective_gpg(dir).clone(),
+            item: config.effective_item(dir).map(ToOwned::to_owned),
+            commands: Vec::new(),
+        };
+        toml::to_string_pretty(&generated)
+            .context("Failed to serialize generated project override")?
+            .parse::<toml_edit::DocumentMut>()
+            .context("Generated project override is invalid")?
+    };
+
+    let mut command_values = toml_edit::Array::new();
+    for command in commands {
+        command_values.push(command.as_str());
+    }
+    document["commands"] = toml_edit::value(command_values);
+
+    config::write_private_file(&config_path, &document.to_string()).with_context(|| {
+        format!(
+            "Failed to write project override to {}",
+            config_path.display()
+        )
+    })?;
+
+    Ok(config_path)
+}
+
+pub fn project_override_commands(path: &Path) -> Result<Vec<String>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read project override from {}", path.display()))?;
+    let document = contents
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("Failed to parse project override from {}", path.display()))?;
+
+    Ok(document
+        .get("commands")
+        .and_then(toml_edit::Item::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(toml_edit::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+pub fn print_command_scope_instructions(config_path: &Path) {
+    eprintln!(
+        "Approve it with: pw-env approvals approve {}",
+        config_path.display()
+    );
+    eprintln!("Then enable the shell wrappers once with one of these:");
+    eprintln!("  bash:       eval \"$(pw-env init bash)\"");
+    eprintln!("  zsh:        eval \"$(pw-env init zsh)\"");
+    eprintln!("  fish:       pw-env init fish | source");
+    eprintln!("  PowerShell: Invoke-Expression (& pw-env init powershell)");
 }
 
 fn is_interactive() -> bool {
@@ -262,6 +406,72 @@ fn prompt_for_entries(
         .context("Migration selection was interrupted")?;
 
     Ok(selected.into_iter().collect())
+}
+
+fn prompt_for_command_scope() -> Result<Option<Vec<String>>> {
+    #[cfg(test)]
+    if let Some(result) = MOCK_COMMAND_SCOPE.with(|value| value.borrow().clone()) {
+        return Ok(result);
+    }
+
+    #[cfg(test)]
+    return Ok(None);
+
+    #[cfg(not(test))]
+    {
+        let restricted = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Should migrated secrets be available only to specific commands?")
+            .default(false)
+            .interact()
+            .context("Command-scope selection was interrupted")?;
+        if !restricted {
+            return Ok(None);
+        }
+
+        loop {
+            let input = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("Command names (space or comma separated, for example: cargo npm)")
+                .interact_text()
+                .context("Command-scope editing was interrupted")?;
+            match parse_command_names(&input) {
+                Ok(commands) => return Ok(Some(commands)),
+                Err(error) => eprintln!("Invalid command list: {error}"),
+            }
+        }
+    }
+}
+
+pub fn parse_command_names(input: &str) -> Result<Vec<String>> {
+    let mut commands = BTreeSet::new();
+    for command in input.split(|character: char| character == ',' || character.is_whitespace()) {
+        if command.is_empty() {
+            continue;
+        }
+        if !is_safe_command_pattern(command) {
+            anyhow::bail!("'{command}' is not a safe command name; use names such as cargo or npm");
+        }
+        commands.insert(command.to_string());
+    }
+
+    if commands.is_empty() {
+        anyhow::bail!("enter at least one command name");
+    }
+
+    Ok(commands.into_iter().collect())
+}
+
+fn is_safe_command_pattern(command: &str) -> bool {
+    if crate::output::is_safe_command_name(command) {
+        return true;
+    }
+
+    let has_glob = command.contains(['*', '?', '[']);
+    has_glob
+        && command.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '_' | '-' | '.' | ':' | '*' | '?' | '[' | ']')
+        })
+        && Pattern::new(command).is_ok()
 }
 
 #[cfg(test)]
@@ -528,9 +738,74 @@ mod tests {
         MOCK_PROMPT_RESULT.with(|r| *r.borrow_mut() = Some(indexes));
     }
 
+    fn set_mock_command_scope(commands: Option<Vec<String>>) {
+        MOCK_COMMAND_SCOPE.with(|value| *value.borrow_mut() = Some(commands));
+    }
+
     #[allow(dead_code)]
     fn clear_mock_prompt() {
         MOCK_PROMPT_RESULT.with(|r| *r.borrow_mut() = None);
+    }
+
+    fn clear_mock_command_scope() {
+        MOCK_COMMAND_SCOPE.with(|value| *value.borrow_mut() = None);
+    }
+
+    #[test]
+    fn parse_command_names_accepts_space_and_comma_separated_names() {
+        let commands = parse_command_names("npm, cargo cargo").unwrap();
+
+        assert_eq!(commands, vec!["cargo", "npm"]);
+    }
+
+    #[test]
+    fn parse_command_names_accepts_executable_glob_patterns() {
+        let commands = parse_command_names("cargo* npm?").unwrap();
+
+        assert_eq!(commands, vec!["cargo*", "npm?"]);
+    }
+
+    #[test]
+    fn parse_command_names_rejects_shell_syntax() {
+        let error = parse_command_names("cargo;rm").unwrap_err();
+
+        assert!(error.to_string().contains("not a safe command name"));
+    }
+
+    #[test]
+    fn configure_command_scope_preserves_existing_override_settings() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        let override_path = temp_dir.path().join(".pw-env.toml");
+        fs::write(&env_path, "API_KEY=plain\n").unwrap();
+        fs::write(
+            &override_path,
+            "# Keep this comment.\nbackend = \"op\"\nitem = \"project-env\"\n",
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let path = configure_command_scope(
+            temp_dir.path(),
+            Some(&env_path),
+            &config,
+            &["cargo".to_string(), "npm".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(path, override_path);
+        let contents = fs::read_to_string(&override_path).unwrap();
+        assert!(contents.contains("# Keep this comment."));
+        assert!(contents.contains("item = \"project-env\""));
+        assert!(contents.contains("commands = [\"cargo\", \"npm\"]"));
+        let parsed: toml::Value = toml::from_str(&contents).unwrap();
+        assert_eq!(
+            parsed
+                .get("commands")
+                .and_then(toml::Value::as_array)
+                .map(|values| values.len()),
+            Some(2)
+        );
     }
 
     #[test]
@@ -645,6 +920,47 @@ exit 0
 
         clear_mock_interactive();
         clear_mock_prompt();
+        crate::config::set_test_reviewed_migrations_path(None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrate_writes_command_scope_to_project_override() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        fs::write(&env_path, "SECRET_KEY=super_secret_long_value_here\n").unwrap();
+
+        let reviewed_dir = TempDir::new().unwrap();
+        crate::config::set_test_reviewed_migrations_path(Some(
+            reviewed_dir.path().join("reviewed-migrations.json"),
+        ));
+
+        let config = crate::config::Config {
+            defaults: crate::config::Defaults {
+                backend: "op".to_string(),
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        set_mock_interactive(true);
+        set_mock_prompt(BTreeSet::from([0]));
+        set_mock_command_scope(Some(vec!["cargo".to_string(), "npm".to_string()]));
+
+        with_mock_op_backend("#!/bin/sh\necho mock-value\nexit 0\n", || {
+            let result = migrate(temp_dir.path(), &config, None);
+            assert!(result.is_ok(), "migration failed: {:?}", result);
+        });
+
+        let override_path = temp_dir.path().join(".pw-env.toml");
+        let contents = fs::read_to_string(override_path).unwrap();
+        assert!(contents.contains("commands = [\"cargo\", \"npm\"]"));
+
+        clear_mock_interactive();
+        clear_mock_prompt();
+        clear_mock_command_scope();
         crate::config::set_test_reviewed_migrations_path(None);
     }
 

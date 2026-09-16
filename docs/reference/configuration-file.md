@@ -30,6 +30,9 @@ ttl_hours = 4
 [defaults.op]
 # Default 1Password vault to search in
 # vault = "Development"
+# Optional aliases for vault names used by `vault` and `op://...` references.
+# [defaults.op.vault_aliases]
+# work = "Work Vault"
 # 1Password account shorthand (for multiple accounts)
 # account = "my-team"
 # Default item name - if set, keys are resolved as fields on this item
@@ -93,7 +96,8 @@ check_interval_hours = 24
 | --- | --- | --- |
 | `[defaults]` | `backend`, `search_parent_env`, `source_all`, `fallback_example_env` | Selects the default backend for empty `.env` values, controls parent `.env` discovery, controls whether plaintext values are exported, and enables `.env.example` fallback |
 | `[defaults.cache]` | `enabled`, `ttl_hours` | Enables OS-keyring caching of resolved secrets and sets the expiry window |
-| `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings |
+| `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings; `vault` may use a configured alias |
+| `[defaults.op.vault_aliases]` | `<alias> = <vault>` | Maps user-friendly 1Password vault aliases to real vault names; also applies to `op://<alias>/...` references |
 | `[defaults.bw]` | `folder`, `organization`, `item` | Default Bitwarden lookup settings |
 | `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |

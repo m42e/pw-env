@@ -343,7 +343,7 @@ impl OpBackend {
     /// matching items are fetched.
     pub fn resolve_batch(keys: &[&str], ctx: &ResolveContext) -> BTreeMap<String, Result<String>> {
         let op_config = ctx.config.effective_op(ctx.dir);
-        let vault = op_config.vault.as_deref();
+        let vault = op_config.resolved_vault();
         let account = op_config.account.as_deref();
         let mut results = BTreeMap::new();
 
@@ -436,7 +436,8 @@ impl Backend for OpBackend {
             // Direct op:// reference
             if ref_str.starts_with("op://") {
                 debug!("Resolving 1Password reference: {ref_str}");
-                return Self::run_op(&["read", ref_str], account);
+                let resolved_reference = op_config.resolve_reference(ref_str);
+                return Self::run_op(&["read", &resolved_reference], account);
             }
         }
 
@@ -447,10 +448,10 @@ impl Backend for OpBackend {
             Self::get_item_field(
                 item,
                 label_arg.as_str(),
-                op_config.vault.as_deref(),
+                op_config.resolved_vault(),
                 account,
             )
-        } else if let Some(ref vault) = op_config.vault {
+        } else if let Some(vault) = op_config.resolved_vault() {
             // Search for an item named after the key in the configured vault
             debug!("Resolving key '{key}' as item in vault '{vault}'");
             let result = Self::get_item_field(key, "label=password", Some(vault), account);
@@ -504,17 +505,13 @@ impl Backend for OpBackend {
         let op_config = ctx.config.effective_op(ctx.dir);
         let account = op_config.account.as_deref();
         let metadata_fields = Self::migration_fields(ctx);
-        let vault_arg = op_config
-            .vault
-            .as_ref()
-            .map(|vault| format!("--vault={vault}"));
+        let vault = op_config.resolved_vault();
+        let vault_arg = vault.map(|vault| format!("--vault={vault}"));
 
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             // Try to edit the existing item first, preserving its supported fields.
             debug!("Storing key '{key}' as field on item '{item}'");
-            if let Ok(mut item_json) =
-                Self::get_item_json(item, op_config.vault.as_deref(), account)
-            {
+            if let Ok(mut item_json) = Self::get_item_json(item, vault, account) {
                 if Self::contains_passkey(&item_json) {
                     bail!(
                         "Cannot update 1Password item '{item}' because JSON templates do not support passkeys"
@@ -997,6 +994,44 @@ mod tests {
     }
 
     #[test]
+    fn backend_resolve_with_op_reference_applies_vault_alias() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let argv_log = temp_dir.path().join("argv.log");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho 'op-alias-secret'\n",
+            argv_log.display()
+        );
+
+        with_mock_op(&script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault_aliases: BTreeMap::from([(
+                            "work".to_string(),
+                            "Work Vault".to_string(),
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("API_KEY", Some("op://work/item/field"), &ctx);
+
+            assert_eq!(result.unwrap(), "op-alias-secret");
+        });
+
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            ["read", "op://Work Vault/item/field"]
+        );
+    }
+
+    #[test]
     fn backend_has_returns_true_when_resolve_succeeds() {
         with_mock_op("#!/bin/sh\necho 'some-value'\n", || {
             let config = Config {
@@ -1089,6 +1124,34 @@ mod tests {
             let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
             let result = OpBackend.resolve("MY_KEY", None, &ctx);
             assert_eq!(result.unwrap(), "vault-item-value");
+        });
+    }
+
+    #[test]
+    fn backend_resolve_with_vault_alias_uses_real_vault() {
+        let script = "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--vault=Work Vault\" ]; then\n    echo 'vault-alias-value'\n    exit 0\n  fi\ndone\necho 'missing resolved vault' >&2\nexit 1\n";
+
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults {
+                    op: crate::config::OpConfig {
+                        vault: Some("work".to_string()),
+                        vault_aliases: BTreeMap::from([(
+                            "work".to_string(),
+                            "Work Vault".to_string(),
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Defaults::default()
+                },
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp"));
+            let result = OpBackend.resolve("MY_KEY", None, &ctx);
+
+            assert_eq!(result.unwrap(), "vault-alias-value");
         });
     }
 

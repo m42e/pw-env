@@ -69,6 +69,107 @@ fn hook_outputs_powershell_wrappers_and_tracking() {
 }
 
 #[test]
+fn commands_add_and_list_for_given_directory() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+    let xdg_state_home = workspace.path().join("state");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+
+    let add = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("commands")
+        .arg("add")
+        .arg("--dir")
+        .arg(&project_dir)
+        .args(["cargo", "npm"])
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(add.status.success());
+
+    let second_add = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("commands")
+        .arg("add")
+        .arg("--dir")
+        .arg(&project_dir)
+        .arg("terraform")
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(second_add.status.success());
+    let override_contents = std::fs::read_to_string(project_dir.join(".pw-env.toml")).unwrap();
+    assert!(override_contents.contains("commands = [\"cargo\", \"npm\", \"terraform\"]"));
+
+    let approve = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve")
+        .arg(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+    assert!(approve.status.success());
+
+    let list = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("commands")
+        .arg("list")
+        .arg("--dir")
+        .arg(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(list.status.success());
+    let canonical_project = project_dir.canonicalize().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&list.stdout),
+        format!(
+            "Commands receiving secrets for {}:\n  cargo\n  npm\n  terraform\n",
+            canonical_project.display()
+        )
+    );
+}
+
+#[test]
+fn commands_add_defaults_to_current_directory() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("project");
+    let xdg_config_home = workspace.path().join("xdg");
+    let xdg_state_home = workspace.path().join("state");
+
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("commands")
+        .arg("add")
+        .arg("cargo*")
+        .current_dir(&project_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let override_contents = std::fs::read_to_string(project_dir.join(".pw-env.toml")).unwrap();
+    assert!(override_contents.contains("commands = [\"cargo*\"]"));
+}
+
+#[test]
 fn export_powershell_tracks_only_valid_keys_from_source_all() {
     let workspace = TempDir::new().unwrap();
     let project_dir = workspace.path().join("project");
@@ -808,7 +909,7 @@ fn status_lists_loaded_and_failed_keys_for_current_directory() {
     std::fs::create_dir_all(&bin_dir).unwrap();
     std::fs::write(
         project_dir.join(".env"),
-        "API_KEY=op://vault/item/field\nMISSING_KEY=op://vault/missing-item/field\n",
+        "API_KEY=op://vault/item/field\nMISSING_KEY=op://vault/missing-item/field\nLOG_LEVEL=debug\n",
     )
     .unwrap();
     std::fs::write(
@@ -845,7 +946,7 @@ fn status_lists_loaded_and_failed_keys_for_current_directory() {
     assert_eq!(
         stdout,
         format!(
-            "Loaded keys for {} (1):\n  API_KEY\nFailed keys (1):\n  MISSING_KEY\n",
+            "Loaded keys for {} (2):\n  API_KEY\n  LOG_LEVEL\nFailed keys (1):\n  MISSING_KEY\n",
             project_dir.display()
         )
     );
@@ -867,7 +968,7 @@ fn status_short_reports_loaded_and_failed_counts() {
     std::fs::create_dir_all(&bin_dir).unwrap();
     std::fs::write(
         project_dir.join(".env"),
-        "API_KEY=op://vault/item/field\nMISSING_KEY=op://vault/missing-item/field\n",
+        "API_KEY=op://vault/item/field\nMISSING_KEY=op://vault/missing-item/field\nLOG_LEVEL=debug\n",
     )
     .unwrap();
     std::fs::write(
@@ -902,7 +1003,7 @@ fn status_short_reports_loaded_and_failed_counts() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "1 loaded, 1 failed\n"
+        "2 loaded, 1 failed\n"
     );
 }
 

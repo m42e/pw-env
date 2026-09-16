@@ -13,6 +13,7 @@
 | `status` | Show loaded and failed environment keys for the current directory |
 | `add` | Store a secret in the effective backend, or a backend chosen by flag, and ensure `.env` contains `KEY=` |
 | `migrate` | Move plaintext values into the effective backend, or a backend chosen by flag |
+| `commands` | List or add commands that receive secrets transiently for a directory |
 | `check` | Verify backend binaries and config discovery |
 | `approvals` | Manage local override and secret-fetch approvals |
 | `cache` | Clear local metadata caches and the resolved-secret cache index |
@@ -58,6 +59,43 @@ there.
 
 This command is still useful for one-off shell exports. Projects that configure `commands` use transient wrappers
 through the generated hook instead of directory-wide exports.
+
+## `migrate` command scope
+
+During an interactive migration, after selecting plaintext entries, pw-env asks whether the migrated secrets should be
+available only to specific commands. Enter command names separated by spaces or commas, for example `cargo npm`.
+pw-env then creates or updates the project-local `.pw-env.toml` with a `commands` list, preserving existing settings and
+comments where possible.
+
+Approve the generated or changed override and enable the shell hook as shown in the migration output:
+
+```console
+pw-env approvals approve ./path/to/.pw-env.toml
+eval "$(pw-env init bash)"
+```
+
+After that, the configured commands receive the migrated secrets through `pw-env exec`; the secrets are not exported
+into the parent shell. Choosing no command scope keeps the normal migration behavior.
+
+## `commands`
+
+```console
+pw-env commands list [--dir <DIR>]
+pw-env commands add [--dir <DIR>] <COMMAND>...
+```
+
+`list` shows the effective command wrappers for the current directory, or for the directory passed with `--dir`.
+`add` creates or updates that directory's project-local `.pw-env.toml` and adds exact command names or executable-name
+patterns such as `cargo`, `npm`, or `cargo*`. Adding a command is idempotent, and repeated additions are merged.
+
+The generated or changed project override must be approved before the shell hook will use it. `add` prints the exact
+approval command and shell-hook setup commands after writing the file:
+
+```console
+pw-env commands add --dir ./api cargo npm
+pw-env approvals approve ./api/.pw-env.toml
+eval "$(pw-env init bash)"
+```
 
 ## `load`
 
