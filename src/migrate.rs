@@ -766,6 +766,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_names_rejects_glob_patterns_with_unsafe_characters() {
+        assert_eq!(is_safe_command_pattern("cargo*;rm"), false);
+    }
+
+    #[test]
+    fn parse_command_names_rejects_unsafe_non_glob_patterns() {
+        assert_eq!(is_safe_command_pattern("cargo/rm"), false);
+    }
+
+    #[test]
     fn parse_command_names_rejects_shell_syntax() {
         let error = parse_command_names("cargo;rm").unwrap_err();
 

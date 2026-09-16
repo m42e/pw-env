@@ -1231,6 +1231,34 @@ mod tests {
     }
 
     #[test]
+    fn render_config_omits_defaults_op_section_without_op_settings() {
+        let rendered = ConfigWizardState::from_config(&Config::default()).render_config();
+
+        assert!(!rendered.contains("[defaults.op]"));
+    }
+
+    #[test]
+    fn render_config_includes_defaults_op_section_when_only_vault_alias_is_set() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state
+            .op_vault_aliases
+            .insert("work".to_string(), "Work Vault".to_string());
+
+        let rendered = state.render_config();
+        let parsed: Config = toml::from_str(&rendered).unwrap();
+
+        assert_eq!(
+            parsed
+                .defaults
+                .op
+                .vault_aliases
+                .get("work")
+                .map(String::as_str),
+            Some("Work Vault")
+        );
+    }
+
+    #[test]
     fn save_config_to_path_creates_expected_file() {
         let workspace = TempDir::new().unwrap();
         let target = workspace.path().join("pw-env/config.toml");
