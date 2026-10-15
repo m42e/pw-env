@@ -11,7 +11,23 @@ use super::{
 
 pub struct OpBackend;
 
+#[derive(Debug)]
+pub(crate) struct AmbiguousItems(String);
+
+impl std::fmt::Display for AmbiguousItems {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AmbiguousItems {}
+
 impl OpBackend {
+    fn is_multiple_items_error(error: &anyhow::Error) -> bool {
+        let message = error.to_string().to_lowercase();
+        message.contains("more than 1 item") || message.contains("more than one item")
+    }
+
     #[cfg(test)]
     fn text_field_assignment(field_name: &str, value: &str) -> String {
         format!("{field_name}[text]={value}")
@@ -233,21 +249,23 @@ impl OpBackend {
     }
 
     /// Resolve a key when multiple items share the same name, by checking
-    /// metadata custom fields in repository-first order.
+    /// metadata custom fields in directory, repository, then project order.
     fn resolve_by_metadata(
         key: &str,
+        dir: Option<&std::path::Path>,
         repository: Option<&str>,
         project: Option<&str>,
         vault: Option<&str>,
         account: Option<&str>,
     ) -> Result<String> {
         let items = Self::list_items(vault, account)?;
-        Self::resolve_by_metadata_from_list(key, &items, repository, project, vault, account)
+        Self::resolve_by_metadata_from_list(key, &items, dir, repository, project, vault, account)
     }
 
     fn resolve_by_metadata_from_list(
         key: &str,
         items: &[serde_json::Value],
+        dir: Option<&std::path::Path>,
         repository: Option<&str>,
         project: Option<&str>,
         vault: Option<&str>,
@@ -281,6 +299,48 @@ impl OpBackend {
             let full_item: serde_json::Value =
                 serde_json::from_str(&full_json).context("Failed to parse op item get JSON")?;
             candidates.push((id.to_string(), full_item));
+        }
+
+        // Prefer the originating directory, including when repository/project names collide.
+        if let Some(dir) = dir {
+            let directory_matches: Vec<_> = candidates
+                .iter()
+                .filter(|(_, item)| {
+                    item.get("fields")
+                        .and_then(|fields| fields.as_array())
+                        .is_some_and(|fields| {
+                            fields.iter().any(|field| {
+                                field
+                                    .get("label")
+                                    .and_then(|label| label.as_str())
+                                    .is_some_and(|label| {
+                                        label.eq_ignore_ascii_case(MIGRATED_FROM_FIELD_NAME)
+                                    })
+                                    && field
+                                        .get("value")
+                                        .and_then(|value| value.as_str())
+                                        .is_some_and(|value| {
+                                            let origin = std::path::Path::new(value);
+                                            origin == dir
+                                                || origin
+                                                    .canonicalize()
+                                                    .ok()
+                                                    .zip(dir.canonicalize().ok())
+                                                    .is_some_and(|(origin, current)| {
+                                                        origin == current
+                                                    })
+                                        })
+                            })
+                        })
+                })
+                .cloned()
+                .collect();
+            if !directory_matches.is_empty() {
+                candidates = directory_matches;
+            }
+            if candidates.len() == 1 {
+                return Self::get_item_field(&candidates[0].0, "label=password", vault, account);
+            }
         }
 
         if let Some(repository) = repository {
@@ -331,9 +391,18 @@ impl OpBackend {
             }
         }
 
-        bail!(
-            "Multiple 1Password items found for '{key}' but repository/project metadata did not disambiguate them"
-        );
+        Err(AmbiguousItems(format!(
+            "Multiple 1Password items found for '{key}': directory {}, repository {:?}, project {:?} did not disambiguate the matching item IDs: {}. Resolve the duplicate items in 1Password or correct their migrated_from/project/repository fields, then retry.",
+            dir.map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| "(unknown)".into()),
+            repository,
+            project,
+            candidates
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )).into())
     }
 
     /// Resolve multiple key-only lookups while reusing the item data that can be shared.
@@ -405,19 +474,16 @@ impl OpBackend {
                     Ok(item_id) => Self::get_item_field(item_id, "label=password", vault, account),
                     Err(error) => Err(error),
                 }
-            } else if ctx.repository.is_some() || ctx.project.is_some() {
+            } else {
                 Self::resolve_by_metadata_from_list(
                     key,
                     &items,
+                    Some(ctx.dir),
                     ctx.repository.as_deref(),
                     ctx.project.as_deref(),
                     vault,
                     account,
                 )
-            } else {
-                Err(anyhow::anyhow!(
-                    "Multiple 1Password items found for '{key}' but repository/project metadata did not disambiguate them"
-                ))
             };
 
             results.insert((*key).to_string(), result);
@@ -457,21 +523,18 @@ impl Backend for OpBackend {
             let result = Self::get_item_field(key, "label=password", Some(vault), account);
             match result {
                 Ok(value) => Ok(value),
-                Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
-                    if ctx.repository.is_some() || ctx.project.is_some() {
-                        debug!(
-                            "Multiple items match '{key}', disambiguating by repository/project metadata"
-                        );
-                        Self::resolve_by_metadata(
-                            key,
-                            ctx.repository.as_deref(),
-                            ctx.project.as_deref(),
-                            Some(vault),
-                            account,
-                        )
-                    } else {
-                        Err(e)
-                    }
+                Err(e) if Self::is_multiple_items_error(&e) => {
+                    debug!(
+                        "Multiple items match '{key}', disambiguating by directory/repository/project metadata"
+                    );
+                    Self::resolve_by_metadata(
+                        key,
+                        Some(ctx.dir),
+                        ctx.repository.as_deref(),
+                        ctx.project.as_deref(),
+                        Some(vault),
+                        account,
+                    )
                 }
                 Err(e) => Err(e),
             }
@@ -480,21 +543,18 @@ impl Backend for OpBackend {
             let result = Self::get_item_field(key, "label=password", None, account);
             match result {
                 Ok(value) => Ok(value),
-                Err(e) if format!("{e}").to_lowercase().contains("more than 1 item") => {
-                    if ctx.repository.is_some() || ctx.project.is_some() {
-                        debug!(
-                            "Multiple items match '{key}', disambiguating by repository/project metadata"
-                        );
-                        Self::resolve_by_metadata(
-                            key,
-                            ctx.repository.as_deref(),
-                            ctx.project.as_deref(),
-                            None,
-                            account,
-                        )
-                    } else {
-                        Err(e)
-                    }
+                Err(e) if Self::is_multiple_items_error(&e) => {
+                    debug!(
+                        "Multiple items match '{key}', disambiguating by directory/repository/project metadata"
+                    );
+                    Self::resolve_by_metadata(
+                        key,
+                        Some(ctx.dir),
+                        ctx.repository.as_deref(),
+                        ctx.project.as_deref(),
+                        None,
+                        account,
+                    )
                 }
                 Err(e) => Err(e),
             }
@@ -1306,8 +1366,51 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_items_resolve_by_directory_in_single_and_batch_lookups() {
+        let script = r#"#!/bin/sh
+if [ "$2" = list ]; then
+  echo '[{"id":"other","title":"MY_KEY"},{"id":"current","title":"MY_KEY"}]'
+elif [ "$3" = MY_KEY ]; then
+  echo 'More than one item matches' >&2
+  exit 1
+elif [ "$4" = --format=json ]; then
+  if [ "$3" = current ]; then
+    echo '{"fields":[{"label":"migrated_from","value":"/tmp/current"}]}'
+  else
+    echo '{"fields":[{"label":"migrated_from","value":"/tmp/other"}]}'
+  fi
+elif [ "$3" = current ]; then
+  echo correct-secret
+else
+  echo 'wrong item selected' >&2
+  exit 1
+fi
+"#;
+        with_mock_op(script, || {
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let ctx = make_op_resolve_context(&config, Path::new("/tmp/current"));
+            assert_eq!(
+                OpBackend.resolve("MY_KEY", None, &ctx).unwrap(),
+                "correct-secret"
+            );
+            assert_eq!(
+                OpBackend::resolve_batch(&["MY_KEY"], &ctx)
+                    .remove("MY_KEY")
+                    .unwrap()
+                    .unwrap(),
+                "correct-secret"
+            );
+        });
+    }
+
+    #[test]
     fn resolve_batch_rejects_multiple_items_without_metadata() {
-        let script = "#!/bin/sh\nif [ \"$2\" = \"list\" ]; then\n  echo '[{\"id\":\"item-a\",\"title\":\"MY_KEY\"},{\"id\":\"item-b\",\"title\":\"MY_KEY\"}]'\n  exit 0\nfi\necho 'unexpected item fetch' >&2\nexit 1\n";
+        let script = "#!/bin/sh\nif [ \"$2\" = \"list\" ]; then\n  echo '[{\"id\":\"item-a\",\"title\":\"MY_KEY\"},{\"id\":\"item-b\",\"title\":\"MY_KEY\"}]'\n  exit 0\nfi\necho '{\"fields\":[]}'\nexit 0\n";
         with_mock_op(script, || {
             let config = Config {
                 defaults: Defaults::default(),
@@ -1325,10 +1428,12 @@ mod tests {
             let mut results = OpBackend::resolve_batch(&["MY_KEY"], &ctx);
             let result = results.remove("MY_KEY").expect("batch result should exist");
             let error = result.expect_err("duplicate items without metadata should fail");
-            assert_eq!(
-                error.to_string(),
-                "Multiple 1Password items found for 'MY_KEY' but repository/project metadata did not disambiguate them"
+            assert!(
+                error
+                    .to_string()
+                    .contains("Resolve the duplicate items in 1Password")
             );
+            assert!(error.to_string().contains("item-a, item-b"));
         });
     }
 
@@ -1394,6 +1499,7 @@ mod tests {
         with_mock_op(script, || {
             let result = OpBackend::resolve_by_metadata(
                 "MY_KEY",
+                None,
                 Some("test-repo"),
                 Some("test-project"),
                 None,

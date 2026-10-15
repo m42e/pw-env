@@ -141,18 +141,18 @@ pub fn migrate_with_interaction(
         info!("Storing '{}' in {}", entry.key, backend.name());
 
         match backend.store(&entry.key, &value, &store_ctx) {
-            Ok(()) => match backend.has(&entry.key, &resolve_ctx) {
-                Ok(true) => {
+            Ok(()) => match backend.resolve(&entry.key, None, &resolve_ctx) {
+                Ok(stored_value) if stored_value == value => {
                     eprintln!("  Stored and verified: {}", entry.key);
                     migrated_keys.push(&entry.key);
                 }
-                Ok(false) => {
+                Ok(_) => {
                     warn!(
-                        "Stored '{}' but verification failed — keeping in .env",
+                        "Stored '{}' but the retrieved value differs — keeping in .env",
                         entry.key
                     );
                     eprintln!(
-                        "  Warning: stored '{}' but could not verify. Keeping in .env.",
+                        "  Warning: stored '{}' but the retrieved value differs. Keeping in .env.",
                         entry.key
                     );
                 }
@@ -902,7 +902,7 @@ mod tests {
         let script = r#"#!/bin/sh
 # Handle any op command with success
         cat >/dev/null
-echo "mock-value"
+echo "super_secret_long_value_here"
 exit 0
 "#;
 
@@ -960,10 +960,13 @@ exit 0
         set_mock_prompt(BTreeSet::from([0]));
         set_mock_command_scope(Some(vec!["cargo".to_string(), "npm".to_string()]));
 
-        with_mock_op_backend("#!/bin/sh\necho mock-value\nexit 0\n", || {
-            let result = migrate(temp_dir.path(), &config, None);
-            assert!(result.is_ok(), "migration failed: {:?}", result);
-        });
+        with_mock_op_backend(
+            "#!/bin/sh\necho super_secret_long_value_here\nexit 0\n",
+            || {
+                let result = migrate(temp_dir.path(), &config, None);
+                assert!(result.is_ok(), "migration failed: {:?}", result);
+            },
+        );
 
         let override_path = temp_dir.path().join(".pw-env.toml");
         let contents = fs::read_to_string(override_path).unwrap();
@@ -1042,7 +1045,7 @@ exit 0
 
         let script = r#"#!/bin/sh
 cat >/dev/null
-echo "mock-value"
+echo "another_plaintext_value"
 exit 0
 "#;
 

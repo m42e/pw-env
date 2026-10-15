@@ -531,6 +531,9 @@ fn resolve_env_file_with_options(
                         resolved.insert(entry.key.clone(), value.clone());
                     }
                     Some(Err(error)) => {
+                        if error.is::<backend::op::AmbiguousItems>() {
+                            anyhow::bail!("{error}");
+                        }
                         warn!("Failed to resolve {} via 1Password: {error}", entry.key);
                     }
                     None => {
@@ -619,6 +622,9 @@ fn resolve_env_file_with_options(
                         resolved.insert(entry.key.clone(), value);
                     }
                     Err(e) => {
+                        if e.is::<backend::op::AmbiguousItems>() {
+                            return Err(e);
+                        }
                         warn!(
                             "Failed to resolve {} via {}: {e}",
                             entry.key,

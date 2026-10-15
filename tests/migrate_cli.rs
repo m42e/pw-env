@@ -38,7 +38,11 @@ fn create_mock_op() -> TempDir {
 
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("op");
-    fs::write(&path, "#!/bin/sh\necho mock-value\nexit 0\n").unwrap();
+    fs::write(
+        &path,
+        "#!/bin/sh\necho super_secret_value_that_is_long_enough\nexit 0\n",
+    )
+    .unwrap();
     let mut permissions = fs::metadata(&path).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&path, permissions).unwrap();
@@ -230,4 +234,38 @@ fn migrate_restricted_scope_prints_approval_and_wrapper_instructions() {
     assert!(output.contains("Configured migrated secrets for these commands only: cargo, npm"));
     assert!(output.contains("Approve it with: pw-env approvals approve"));
     assert!(output.contains("Then enable the shell wrappers once with one of these:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_preserves_plaintext_when_verification_fails_or_returns_wrong_value() {
+    for (read_command, expected_warning) in [
+        (
+            "echo 'desktop app unavailable' >&2; exit 1",
+            "desktop app unavailable",
+        ),
+        ("echo wrong-value", "the retrieved value differs"),
+    ] {
+        let project_dir = TempDir::new().unwrap();
+        let env_path = project_dir.path().join(".env");
+        let original = "API_KEY=super_secret_value_that_is_long_enough\n";
+        fs::write(&env_path, original).unwrap();
+        let op_dir = create_mock_op();
+        fs::write(
+            op_dir.path().join("op"),
+            format!(
+                "#!/bin/sh\nif [ \"$2\" = create ]; then\ncat >/dev/null\nexit 0\nfi\n{read_command}\n"
+            ),
+        )
+        .unwrap();
+
+        let (output, status) = run_migrate_in_pty(project_dir.path(), op_dir.path(), "\rn\r");
+        assert!(status.success(), "migration failed: {output}");
+        assert!(
+            output.contains(expected_warning),
+            "missing diagnostic: {output}"
+        );
+        assert!(!output.contains("super_secret_value_that_is_long_enough"));
+        assert_eq!(fs::read_to_string(env_path).unwrap(), original);
+    }
 }
