@@ -140,9 +140,9 @@ pub fn migrate_with_interaction(
         let value = strip_quotes(&entry.raw_value);
         info!("Storing '{}' in {}", entry.key, backend.name());
 
-        match backend.store(&entry.key, &value, &store_ctx) {
-            Ok(()) => match backend.resolve(&entry.key, None, &resolve_ctx) {
-                Ok(stored_value) if stored_value == value => {
+        match backend.store_for_migration(&entry.key, &value, &store_ctx, interaction) {
+            Ok(expected_value) => match backend.resolve(&entry.key, None, &resolve_ctx) {
+                Ok(stored_value) if stored_value == expected_value => {
                     eprintln!("  Stored and verified: {}", entry.key);
                     migrated_keys.push(&entry.key);
                 }

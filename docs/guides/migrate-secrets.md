@@ -27,7 +27,7 @@ The migration flow:
 1. Parses the `.env` file and finds plaintext values.
 2. Highlights entries that look like secrets.
 3. Opens an interactive multi-select prompt.
-4. Stores the selected values in the effective backend, or the backend chosen by flag.
+4. Checks for existing 1Password values and offers to reuse one, create a new item, or skip. Other backends store the selected values directly.
 5. Verifies each stored value before clearing it from `.env`.
 
 Entries that look like secrets are selected by default in the prompt.
@@ -51,6 +51,30 @@ LOG_LEVEL=debug # pw-env:ignore
 ```
 
 Only values that were stored and verified are cleared. Skipped entries and failed writes stay in `.env`.
+
+## Reusing existing 1Password values
+
+Before storing a selected key, migration checks for existing items with that title (or the key's field on a configured
+shared item). The prompt shows item titles, vaults, project metadata, and whether the stored value matches `.env`. You can reuse
+an item, create a new item with the plaintext value, or skip migration for that key.
+
+Reuse adds the current directory, repository, and project metadata while preserving existing project associations and
+the stored secret. Reusing a different value requires confirmation that the plaintext value will be discarded. The
+selected stored value is verified before `.env` is cleared. Failed lookups or updates keep the plaintext value.
+
+When a shared item is configured, reuse is supported; creating a separate item requires changing that configuration
+first so future lookups can find the separate item.
+
+## Resolving duplicate 1Password items
+
+When several items share a key's title, pw-env compares their `migrated_from` directory, repository, and project
+metadata. If these still leave multiple matches, an interactive terminal offers an item chooser showing item titles, vaults, creation dates when available,
+and existing metadata, without showing secret values.
+
+Select an item and confirm to associate it with the current directory, repository, and project. This replaces those
+metadata fields on the chosen item and preserves its other fields. Future loads use the saved metadata to resolve
+the item. You can leave the ambiguity unresolved without changing any item. Noninteractive loads report the
+conflicting item IDs instead of prompting. Migration keeps plaintext values unless the selected secret matches.
 
 ## Terminal requirements
 

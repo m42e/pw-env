@@ -23,6 +23,51 @@ impl std::fmt::Display for AmbiguousItems {
 impl std::error::Error for AmbiguousItems {}
 
 impl OpBackend {
+    fn item_choice(
+        id: &str,
+        item: &serde_json::Value,
+        key: &str,
+        vault: Option<&str>,
+    ) -> super::OpItemChoice {
+        let metadata = |name: &str| {
+            let values: Vec<_> = item
+                .get("fields")
+                .and_then(|fields| fields.as_array())
+                .into_iter()
+                .flatten()
+                .filter(|field| {
+                    field
+                        .get("label")
+                        .and_then(|label| label.as_str())
+                        .is_some_and(|label| label.eq_ignore_ascii_case(name))
+                })
+                .filter_map(|field| field.get("value").and_then(|value| value.as_str()))
+                .collect();
+            (!values.is_empty()).then(|| values.join(", "))
+        };
+        super::OpItemChoice {
+            id: id.to_owned(),
+            title: item
+                .get("title")
+                .and_then(|title| title.as_str())
+                .unwrap_or(key)
+                .to_owned(),
+            vault: item
+                .get("vault")
+                .and_then(|vault| vault.get("name"))
+                .and_then(|name| name.as_str())
+                .or(vault)
+                .map(str::to_owned),
+            created_at: item
+                .get("created_at")
+                .and_then(|date| date.as_str())
+                .map(str::to_owned),
+            directory: metadata(MIGRATED_FROM_FIELD_NAME),
+            repository: metadata(REPOSITORY_FIELD_NAME),
+            project: metadata(PROJECT_FIELD_NAME),
+        }
+    }
+
     fn is_multiple_items_error(error: &anyhow::Error) -> bool {
         let message = error.to_string().to_lowercase();
         message.contains("more than 1 item") || message.contains("more than one item")
@@ -257,11 +302,22 @@ impl OpBackend {
         project: Option<&str>,
         vault: Option<&str>,
         account: Option<&str>,
+        interaction: Option<&dyn super::ResolutionInteraction>,
     ) -> Result<String> {
         let items = Self::list_items(vault, account)?;
-        Self::resolve_by_metadata_from_list(key, &items, dir, repository, project, vault, account)
+        Self::resolve_by_metadata_from_list(
+            key,
+            &items,
+            dir,
+            repository,
+            project,
+            vault,
+            account,
+            interaction,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_by_metadata_from_list(
         key: &str,
         items: &[serde_json::Value],
@@ -270,6 +326,7 @@ impl OpBackend {
         project: Option<&str>,
         vault: Option<&str>,
         account: Option<&str>,
+        interaction: Option<&dyn super::ResolutionInteraction>,
     ) -> Result<String> {
         // Filter by items whose title matches the key
         let matching: Vec<&serde_json::Value> = items
@@ -391,6 +448,51 @@ impl OpBackend {
             }
         }
 
+        if let (Some(interaction), Some(dir)) = (interaction, dir) {
+            let choices: Vec<_> = candidates
+                .iter()
+                .map(|(id, item)| Self::item_choice(id, item, key, vault))
+                .collect();
+            if let Some(index) =
+                interaction.select_op_item(key, &choices, dir, repository, project)?
+            {
+                let (id, _) = candidates
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid 1Password item selection"))?;
+                // Fetch revealed JSON only after selection; preserve all existing fields.
+                let mut item = Self::get_item_json(id, vault, account)?;
+                if Self::contains_passkey(&item) {
+                    bail!(
+                        "Cannot update 1Password item '{id}' because JSON templates do not support passkeys"
+                    );
+                }
+                Self::upsert_json_field(
+                    &mut item,
+                    MIGRATED_FROM_FIELD_NAME,
+                    &dir.display().to_string(),
+                    "STRING",
+                )?;
+                if let Some(repository) = repository {
+                    Self::upsert_json_field(
+                        &mut item,
+                        REPOSITORY_FIELD_NAME,
+                        repository,
+                        "STRING",
+                    )?;
+                }
+                if let Some(project) = project {
+                    Self::upsert_json_field(&mut item, PROJECT_FIELD_NAME, project, "STRING")?;
+                }
+                let mut args = vec!["item", "edit", id.as_str()];
+                let vault_arg = vault.map(|vault| format!("--vault={vault}"));
+                if let Some(vault_arg) = vault_arg.as_deref() {
+                    args.push(vault_arg);
+                }
+                Self::run_op_write(&args, &item, account)?;
+                return Self::get_item_field(id, "label=password", vault, account);
+            }
+        }
+
         Err(AmbiguousItems(format!(
             "Multiple 1Password items found for '{key}': directory {}, repository {:?}, project {:?} did not disambiguate the matching item IDs: {}. Resolve the duplicate items in 1Password or correct their migrated_from/project/repository fields, then retry.",
             dir.map(|dir| dir.display().to_string())
@@ -483,6 +585,7 @@ impl OpBackend {
                     ctx.project.as_deref(),
                     vault,
                     account,
+                    ctx.interaction,
                 )
             };
 
@@ -534,6 +637,7 @@ impl Backend for OpBackend {
                         ctx.project.as_deref(),
                         Some(vault),
                         account,
+                        ctx.interaction,
                     )
                 }
                 Err(e) => Err(e),
@@ -554,9 +658,109 @@ impl Backend for OpBackend {
                         ctx.project.as_deref(),
                         None,
                         account,
+                        ctx.interaction,
                     )
                 }
                 Err(e) => Err(e),
+            }
+        }
+    }
+
+    fn store_for_migration(
+        &self,
+        key: &str,
+        value: &str,
+        ctx: &StoreContext,
+        interaction: Option<&dyn super::ResolutionInteraction>,
+    ) -> Result<String> {
+        let Some(interaction) = interaction else {
+            self.store(key, value, ctx)?;
+            return Ok(value.to_owned());
+        };
+        let config = ctx.config.effective_op(ctx.dir);
+        let vault = config.resolved_vault();
+        let account = config.account.as_deref();
+        let mut existing = Vec::new();
+        if let Some(id) = ctx.config.effective_item(ctx.dir) {
+            // A configured item stores this key as a field rather than its password.
+            let item = Self::get_item_json(id, vault, account)?;
+            if let Ok(secret) = Self::extract_field_from_value(&item, key) {
+                existing.push((id.to_owned(), item, secret));
+            }
+        } else {
+            for summary in Self::list_items(vault, account)? {
+                if summary.get("title").and_then(|title| title.as_str()) != Some(key) {
+                    continue;
+                }
+                let id = summary
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("1Password item missing id"))?;
+                let item = Self::get_item_json(id, vault, account)?;
+                let secret = Self::extract_field_from_value(&item, "password")?;
+                existing.push((id.to_owned(), item, secret));
+            }
+        }
+        if existing.is_empty() {
+            self.store(key, value, ctx)?;
+            return Ok(value.to_owned());
+        }
+        let choices: Vec<_> = existing
+            .iter()
+            .map(|(id, item, secret)| super::OpMigrationItem {
+                item: Self::item_choice(id, item, key, vault),
+                matches_plaintext: secret == value,
+            })
+            .collect();
+        match interaction.select_op_migration_item(key, &choices)? {
+            super::OpMigrationChoice::CreateNew => {
+                if ctx.config.effective_item(ctx.dir).is_some() {
+                    bail!(
+                        "Cannot create a separate item while a shared 1Password item is configured; change the item configuration first or reuse its value. Keeping in .env."
+                    );
+                }
+                self.store(key, value, ctx)?;
+                Ok(value.to_owned())
+            }
+            super::OpMigrationChoice::Skip => {
+                bail!("Migration skipped for '{key}'; keeping in .env")
+            }
+            super::OpMigrationChoice::Reuse(index) => {
+                let (id, item, secret) = existing
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid 1Password item selection"))?;
+                let mut item = item.clone();
+                if Self::contains_passkey(&item) {
+                    bail!(
+                        "Cannot update 1Password item '{id}' because JSON templates do not support passkeys"
+                    );
+                }
+                // Retain associations with other projects when sharing this value.
+                for (label, metadata) in [
+                    (MIGRATED_FROM_FIELD_NAME, Some(ctx.migrated_from())),
+                    (REPOSITORY_FIELD_NAME, ctx.repository.clone()),
+                    (PROJECT_FIELD_NAME, ctx.project.clone()),
+                ] {
+                    if let Some(metadata) = metadata
+                        && !Self::item_matches_text_field(&item, label, &metadata)
+                    {
+                        item["fields"]
+                            .as_array_mut()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("1Password item fields must be an array")
+                            })?
+                            .push(
+                                serde_json::json!({"label":label,"type":"STRING","value":metadata}),
+                            );
+                    }
+                }
+                let mut args = vec!["item", "edit", id.as_str()];
+                let vault_arg = vault.map(|vault| format!("--vault={vault}"));
+                if let Some(vault_arg) = vault_arg.as_deref() {
+                    args.push(vault_arg);
+                }
+                Self::run_op_write(&args, &item, account)?;
+                Ok(secret.clone())
             }
         }
     }
@@ -1365,6 +1569,220 @@ mod tests {
         });
     }
 
+    struct MigrationInteraction {
+        action: usize,
+    }
+
+    impl super::super::ResolutionInteraction for MigrationInteraction {
+        fn select_op_migration_item(
+            &self,
+            key: &str,
+            choices: &[super::super::OpMigrationItem],
+        ) -> Result<super::super::OpMigrationChoice> {
+            assert_eq!(key, "MY_KEY");
+            assert_eq!(choices.len(), 1);
+            assert_eq!(choices[0].item.id, "existing");
+            assert!(!choices[0].matches_plaintext);
+            Ok(match self.action {
+                0 => super::super::OpMigrationChoice::Reuse(0),
+                1 => super::super::OpMigrationChoice::CreateNew,
+                _ => super::super::OpMigrationChoice::Skip,
+            })
+        }
+        fn prompt_bitwarden_password(&self) -> Result<String> {
+            unreachable!()
+        }
+        fn start_progress(&self, _: &str) -> Box<dyn super::super::ProgressReporter> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn migration_offers_reuse_create_or_skip_before_writing() {
+        for action in 0..3 {
+            let temp = tempfile::TempDir::new().unwrap();
+            let saved = temp.path().join("write.json");
+            let operation = temp.path().join("operation");
+            let script = format!(
+                r#"#!/bin/sh
+if [ "$2" = list ]; then
+  echo '[{{"id":"existing","title":"MY_KEY"}}]'
+elif [ "$2" = get ]; then
+  echo '{{"title":"MY_KEY","fields":[{{"label":"password","type":"CONCEALED","value":"existing-value"}},{{"label":"migrated_from","value":"/old/project"}},{{"label":"project","value":"old-project"}},{{"label":"unrelated","value":"keep-me"}}]}}'
+else
+  echo "$2" > '{}'
+  cat > '{}'
+fi
+"#,
+                operation.display(),
+                saved.display()
+            );
+            with_mock_op(&script, || {
+                let config = Config {
+                    defaults: Defaults::default(),
+                    log: LogConfig::default(),
+                    updates: UpdateConfig::default(),
+                    projects: vec![],
+                };
+                let ctx = StoreContext {
+                    dir: Path::new("/new/project"),
+                    config: &config,
+                    project: Some("new-project".into()),
+                    repository: Some("new-repository".into()),
+                };
+                let result = OpBackend.store_for_migration(
+                    "MY_KEY",
+                    "new-value",
+                    &ctx,
+                    Some(&MigrationInteraction { action }),
+                );
+                if action == 2 {
+                    assert!(result.is_err());
+                    assert!(!saved.exists());
+                } else {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+                    if action == 0 {
+                        assert_eq!(result.unwrap(), "existing-value");
+                        assert_eq!(std::fs::read_to_string(&operation).unwrap().trim(), "edit");
+                        for (label, value) in [
+                            (MIGRATED_FROM_FIELD_NAME, "/old/project"),
+                            (MIGRATED_FROM_FIELD_NAME, "/new/project"),
+                            (PROJECT_FIELD_NAME, "old-project"),
+                            (PROJECT_FIELD_NAME, "new-project"),
+                            (REPOSITORY_FIELD_NAME, "new-repository"),
+                            ("unrelated", "keep-me"),
+                            ("password", "existing-value"),
+                        ] {
+                            assert!(OpBackend::item_matches_text_field(&payload, label, value));
+                        }
+                    } else {
+                        assert_eq!(result.unwrap(), "new-value");
+                        assert_eq!(
+                            std::fs::read_to_string(&operation).unwrap().trim(),
+                            "create"
+                        );
+                        assert!(OpBackend::item_matches_text_field(
+                            &payload,
+                            "password",
+                            "new-value"
+                        ));
+                    }
+                }
+            });
+        }
+    }
+
+    struct SelectingInteraction {
+        selection: Option<usize>,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl super::super::ResolutionInteraction for SelectingInteraction {
+        fn select_op_item(
+            &self,
+            key: &str,
+            choices: &[super::super::OpItemChoice],
+            _dir: &Path,
+            _repository: Option<&str>,
+            _project: Option<&str>,
+        ) -> Result<Option<usize>> {
+            assert_eq!(key, "MY_KEY");
+            assert_eq!(choices.len(), 2);
+            assert_eq!(choices[1].id, "chosen");
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.selection)
+        }
+        fn prompt_bitwarden_password(&self) -> Result<String> {
+            unreachable!()
+        }
+        fn start_progress(&self, _: &str) -> Box<dyn super::super::ProgressReporter> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn interactive_selection_updates_only_chosen_item_and_persists_for_future_loads() {
+        for (selection, fail_write) in [
+            (Some(1), false),
+            (None, false),
+            (Some(99), false),
+            (Some(1), true),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let saved = temp.path().join("edited.json");
+            let script = format!(
+                r#"#!/bin/sh
+if [ "$2" = list ]; then
+  echo '[{{"id":"other","title":"MY_KEY"}},{{"id":"chosen","title":"MY_KEY"}}]'
+elif [ "$2" = edit ]; then
+  [ "{fail_write}" = true ] && exit 1
+  [ "$3" = chosen ] || exit 1
+  cat > '{}'
+elif [ "$3" = MY_KEY ]; then
+  echo 'More than one item matches' >&2
+  exit 1
+elif [ "$4" = --format=json ]; then
+  if [ "$3" = chosen ] && [ -f '{}' ]; then
+    cat '{}'
+  else
+    echo '{{"title":"MY_KEY","fields":[{{"id":"password","label":"password","type":"CONCEALED","value":"original-secret"}},{{"label":"unrelated","value":"keep-me"}}]}}'
+  fi
+else
+  [ "$3" = chosen ] || exit 1
+  echo original-secret
+fi
+"#,
+                saved.display(),
+                saved.display(),
+                saved.display()
+            );
+            with_mock_op(&script, || {
+                let config = Config {
+                    defaults: Defaults::default(),
+                    log: LogConfig::default(),
+                    updates: UpdateConfig::default(),
+                    projects: vec![],
+                };
+                let interaction = SelectingInteraction {
+                    selection,
+                    calls: std::cell::Cell::new(0),
+                };
+                let mut ctx =
+                    make_op_resolve_context(&config, Path::new("/tmp/interactive-project"));
+                ctx.repository = Some("test-repository".into());
+                ctx.project = Some("test-project".into());
+                ctx.interaction = Some(&interaction);
+                let result = OpBackend::resolve_batch(&["MY_KEY"], &ctx)
+                    .remove("MY_KEY")
+                    .unwrap();
+                assert_eq!(interaction.calls.get(), 1);
+                if selection == Some(1) && !fail_write {
+                    assert_eq!(result.unwrap(), "original-secret");
+                    let item: serde_json::Value =
+                        serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+                    for (label, value) in [
+                        (MIGRATED_FROM_FIELD_NAME, "/tmp/interactive-project"),
+                        (REPOSITORY_FIELD_NAME, "test-repository"),
+                        (PROJECT_FIELD_NAME, "test-project"),
+                        ("unrelated", "keep-me"),
+                        ("password", "original-secret"),
+                    ] {
+                        assert!(OpBackend::item_matches_text_field(&item, label, value));
+                    }
+                    ctx.interaction = None;
+                    assert_eq!(
+                        OpBackend.resolve("MY_KEY", None, &ctx).unwrap(),
+                        "original-secret"
+                    );
+                } else {
+                    assert!(result.is_err());
+                    assert!(!saved.exists());
+                }
+            });
+        }
+    }
+
     #[test]
     fn duplicate_items_resolve_by_directory_in_single_and_batch_lookups() {
         let script = r#"#!/bin/sh
@@ -1502,6 +1920,7 @@ fi
                 None,
                 Some("test-repo"),
                 Some("test-project"),
+                None,
                 None,
                 None,
             );

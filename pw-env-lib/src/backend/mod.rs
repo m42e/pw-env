@@ -42,12 +42,56 @@ pub struct StoreContext<'a> {
     pub repository: Option<String>,
 }
 
+/// Non-secret metadata shown when choosing between ambiguous 1Password items.
+pub enum OpMigrationChoice {
+    CreateNew,
+    Reuse(usize),
+    Skip,
+}
+
+pub struct OpMigrationItem {
+    pub item: OpItemChoice,
+    pub matches_plaintext: bool,
+}
+
+pub struct OpItemChoice {
+    pub id: String,
+    pub title: String,
+    pub vault: Option<String>,
+    pub created_at: Option<String>,
+    pub directory: Option<String>,
+    pub repository: Option<String>,
+    pub project: Option<String>,
+}
+
 /// UI operations that may be needed while resolving or storing secrets.
 ///
 /// The library never reads from a terminal or writes progress output itself.
 /// Applications such as the `pw-env` CLI can provide these operations when
 /// they want interactive Bitwarden unlocks and progress reporting.
 pub trait ResolutionInteraction {
+    /// Choose whether to reuse an existing value or create a separate item.
+    fn select_op_migration_item(
+        &self,
+        _key: &str,
+        _choices: &[OpMigrationItem],
+    ) -> Result<OpMigrationChoice> {
+        Ok(OpMigrationChoice::Skip)
+    }
+
+    /// Select an item and approve updating its directory/repository/project metadata.
+    /// Returning None leaves items untouched and reports the ambiguity.
+    fn select_op_item(
+        &self,
+        _key: &str,
+        _choices: &[OpItemChoice],
+        _dir: &Path,
+        _repository: Option<&str>,
+        _project: Option<&str>,
+    ) -> Result<Option<usize>> {
+        Ok(None)
+    }
+
     /// Ask the caller for a Bitwarden master password.
     fn prompt_bitwarden_password(&self) -> Result<String>;
 
@@ -83,6 +127,18 @@ pub trait Backend {
 
     /// Store a key-value pair in the password manager.
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()>;
+
+    /// Store or explicitly reuse a secret during migration, returning the value to verify.
+    fn store_for_migration(
+        &self,
+        key: &str,
+        value: &str,
+        ctx: &StoreContext,
+        _interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<String> {
+        self.store(key, value, ctx)?;
+        Ok(value.to_owned())
+    }
 
     /// Return the backend reference URL to write into the .env file after storing.
     /// Returns `None` for backends that do not use URL references (e.g. GPG).

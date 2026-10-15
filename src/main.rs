@@ -52,7 +52,103 @@ impl CliResolutionInteraction {
     }
 }
 
+fn op_item_label(choice: &backend::OpItemChoice) -> String {
+    let mut label = format!(
+        "{} | vault: {} | directory: {} | repository: {} | project: {}",
+        choice.title,
+        choice.vault.as_deref().unwrap_or("(unknown)"),
+        choice.directory.as_deref().unwrap_or("(unset)"),
+        choice.repository.as_deref().unwrap_or("(unset)"),
+        choice.project.as_deref().unwrap_or("(unset)")
+    );
+    if let Some(created_at) = &choice.created_at {
+        label.push_str(&format!(" | created: {created_at}"));
+    }
+    label
+}
+
 impl backend::ResolutionInteraction for CliResolutionInteraction {
+    fn select_op_migration_item(
+        &self,
+        key: &str,
+        choices: &[backend::OpMigrationItem],
+    ) -> Result<backend::OpMigrationChoice> {
+        use backend::OpMigrationChoice;
+        if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+            return Ok(OpMigrationChoice::Skip);
+        }
+        let _progress_suspension = progress::suspend_progress_output();
+        let mut labels = vec![
+            "Skip migration (keep in .env)".to_owned(),
+            "Create a new item with the .env value".to_owned(),
+        ];
+        labels.extend(choices.iter().map(|choice| {
+            format!(
+                "Reuse {} | {}",
+                op_item_label(&choice.item),
+                if choice.matches_plaintext {
+                    "same value as .env"
+                } else {
+                    "DIFFERENT value from .env"
+                }
+            )
+        }));
+        match dialoguer::Select::new()
+            .with_prompt(format!("1Password already has values for {key}"))
+            .items(&labels)
+            .default(0)
+            .interact_opt()?
+        {
+            Some(1) => Ok(OpMigrationChoice::CreateNew),
+            Some(index) if index >= 2 => {
+                let index = index - 2;
+                let warning = if choices[index].matches_plaintext {
+                    ""
+                } else {
+                    " The stored value differs: the current .env value will be discarded after verification."
+                };
+                let confirmed = dialoguer::Confirm::new().with_prompt(format!(
+                    "Reuse item {} and add this project's directory/repository/project metadata, preserving its existing associations?{}",
+                    op_item_label(&choices[index].item), warning
+                )).default(false).interact()?;
+                Ok(if confirmed {
+                    OpMigrationChoice::Reuse(index)
+                } else {
+                    OpMigrationChoice::Skip
+                })
+            }
+            _ => Ok(OpMigrationChoice::Skip),
+        }
+    }
+
+    fn select_op_item(
+        &self,
+        key: &str,
+        choices: &[backend::OpItemChoice],
+        dir: &Path,
+        repository: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Option<usize>> {
+        if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+            return Ok(None);
+        }
+        let _progress_suspension = progress::suspend_progress_output();
+        let mut labels = vec!["Leave unresolved (do not change any item)".to_string()];
+        labels.extend(choices.iter().map(op_item_label));
+        let selection = dialoguer::Select::new()
+            .with_prompt(format!("Multiple 1Password items match {key}. Choose an item to associate with this project"))
+            .items(&labels).default(0).interact_opt()?;
+        let Some(index) = selection.and_then(|index| index.checked_sub(1)) else {
+            return Ok(None);
+        };
+        let confirmed = dialoguer::Confirm::new().with_prompt(format!(
+            "Update item {} with migrated_from={}, repository={}, project={}? Existing values for these fields will be replaced",
+            op_item_label(&choices[index]), dir.display(), repository.unwrap_or("(keep existing)"),
+            project.unwrap_or("(keep existing)")
+        )).default(false).interact()?;
+        Ok(confirmed.then_some(index))
+    }
+
     fn prompt_bitwarden_password(&self) -> Result<String> {
         if let Some(password) = &self.password_override {
             return Ok(password.clone());

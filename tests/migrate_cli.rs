@@ -40,7 +40,7 @@ fn create_mock_op() -> TempDir {
     let path = dir.path().join("op");
     fs::write(
         &path,
-        "#!/bin/sh\necho super_secret_value_that_is_long_enough\nexit 0\n",
+        "#!/bin/sh\nif [ \"$2\" = list ]; then echo '[]'; else echo super_secret_value_that_is_long_enough; fi\nexit 0\n",
     )
     .unwrap();
     let mut permissions = fs::metadata(&path).unwrap().permissions();
@@ -54,6 +54,15 @@ fn run_migrate_in_pty(
     dir: &Path,
     op_dir: &Path,
     input: &str,
+) -> (String, portable_pty::ExitStatus) {
+    run_migrate_in_pty_steps(dir, op_dir, &[("", input)])
+}
+
+#[cfg(unix)]
+fn run_migrate_in_pty_steps(
+    dir: &Path,
+    op_dir: &Path,
+    steps: &[(&str, &str)],
 ) -> (String, portable_pty::ExitStatus) {
     let home_dir = TempDir::new().unwrap();
     let config_dir = TempDir::new().unwrap();
@@ -123,9 +132,28 @@ fn run_migrate_in_pty(
         let _ = reader_done_tx.send(());
     });
 
-    thread::sleep(Duration::from_millis(100));
-    writer.lock().unwrap().write_all(input.as_bytes()).unwrap();
-    writer.lock().unwrap().flush().unwrap();
+    for (prompt, input) in steps {
+        let prompt_deadline = Instant::now() + Duration::from_secs(5);
+        while !String::from_utf8_lossy(&output.lock().unwrap()).contains(prompt) {
+            assert!(
+                Instant::now() < prompt_deadline,
+                "prompt did not appear: {prompt}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(100));
+        writer
+            .lock()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "PTY input failed: {error}; output: {}",
+                    String::from_utf8_lossy(&output.lock().unwrap())
+                )
+            });
+        writer.lock().unwrap().flush().unwrap();
+    }
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
@@ -254,7 +282,7 @@ fn migrate_preserves_plaintext_when_verification_fails_or_returns_wrong_value() 
         fs::write(
             op_dir.path().join("op"),
             format!(
-                "#!/bin/sh\nif [ \"$2\" = create ]; then\ncat >/dev/null\nexit 0\nfi\n{read_command}\n"
+                "#!/bin/sh\nif [ \"$2\" = list ]; then echo '[]'; exit 0; fi\nif [ \"$2\" = create ]; then\ncat >/dev/null\nexit 0\nfi\n{read_command}\n"
             ),
         )
         .unwrap();
@@ -268,4 +296,55 @@ fn migrate_preserves_plaintext_when_verification_fails_or_returns_wrong_value() 
         assert!(!output.contains("super_secret_value_that_is_long_enough"));
         assert_eq!(fs::read_to_string(env_path).unwrap(), original);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_can_reuse_a_different_stored_value_after_confirmation() {
+    let project_dir = TempDir::new().unwrap();
+    let env_path = project_dir.path().join(".env");
+    fs::write(&env_path, "API_KEY=original-plaintext-value\n").unwrap();
+    let op_dir = create_mock_op();
+    fs::write(
+        op_dir.path().join("op"),
+        r#"#!/bin/sh
+if [ "$2" = list ]; then
+  echo '[{"id":"existing-item","title":"API_KEY"}]'
+elif [ "$2" = get ] && [ "$4" = --format=json ]; then
+  echo '{"title":"Paperless API","vault":{"name":"Development"},"created_at":"2026-10-15T09:00:00Z","fields":[{"label":"password","type":"CONCEALED","value":"different-stored-value"}]}'
+elif [ "$2" = get ]; then
+  echo different-stored-value
+elif [ "$2" = edit ]; then
+  cat >/dev/null
+else
+  echo 'unexpected create' >&2
+  exit 1
+fi
+"#,
+    )
+    .unwrap();
+    let (output, status) = run_migrate_in_pty_steps(
+        project_dir.path(),
+        op_dir.path(),
+        &[
+            ("", "\rn"),
+            ("DIFFERENT value from .env", "\x1b[B\x1b[B\r"),
+            ("preserving its existing associations?", "y\r"),
+        ],
+    );
+    assert!(status.success(), "migration failed: {output}");
+    assert!(
+        output.contains("DIFFERENT value from .env"),
+        "missing choice: {output}"
+    );
+    assert!(
+        output.contains("Stored and verified: API_KEY"),
+        "not verified: {output}"
+    );
+    assert_eq!(fs::read_to_string(env_path).unwrap(), "API_KEY=\n");
+    assert!(output.contains("Paperless API | vault: Development"));
+    assert!(output.contains("created: 2026-10-15T09:00:00Z"));
+    assert!(!output.contains("existing-item"));
+    assert!(!output.contains("original-plaintext-value"));
+    assert!(!output.contains("different-stored-value"));
 }
