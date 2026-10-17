@@ -67,7 +67,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pw-env-lib = { version = "0.3", path = "pw-env-lib", features = ["test-support"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 portable-pty = "0.9"
