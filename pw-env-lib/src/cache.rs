@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +61,8 @@ struct SecretCacheIndex {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct SecretCacheIndexEntry {
     cached_at_unix_secs: u64,
+    #[serde(default)]
+    pending_deletion: bool,
 }
 
 pub struct SecretValueCache {
@@ -103,14 +106,61 @@ impl SecretValueCache {
             return None;
         }
 
+        let _index_lock = match lock_secret_cache_index() {
+            Ok(lock) => lock,
+            Err(error) => {
+                warn!("Failed to lock resolved-secret cache index: {error}");
+                return None;
+            }
+        };
+        self.index = match SecretCacheIndex::load() {
+            Ok(index) => index,
+            Err(error) => {
+                warn!("Failed to reload resolved-secret cache index: {error}");
+                return None;
+            }
+        };
+
         let fingerprint = key.fingerprint();
         let entry = self.index.entries.get(&fingerprint).cloned()?;
 
+        if entry.pending_deletion {
+            match delete_secret(&fingerprint) {
+                Ok(_) => {
+                    self.index.entries.remove(&fingerprint);
+                    self.save_index();
+                }
+                Err(KeyringAccess::Unavailable) => {}
+            }
+            return None;
+        }
+
         if self.is_expired(entry.cached_at_unix_secs) {
             debug!("Resolved-secret cache expired for {}", key.entry_key);
-            self.index.entries.remove(&fingerprint);
-            self.save_index();
-            let _ = delete_secret(&fingerprint);
+            let mut pending_entry = entry;
+            pending_entry.pending_deletion = true;
+            self.index
+                .entries
+                .insert(fingerprint.clone(), pending_entry);
+            if let Err(error) = self.index.save() {
+                warn!(
+                    "Failed to persist expired cache deletion for {}: {error}",
+                    key.entry_key
+                );
+                return None;
+            }
+            match delete_secret(&fingerprint) {
+                Ok(_) => {
+                    self.index.entries.remove(&fingerprint);
+                    self.save_index();
+                }
+                Err(KeyringAccess::Unavailable) => {
+                    warn!(
+                        "Expired cache entry for {} could not be deleted; retaining its index entry for retry",
+                        key.entry_key
+                    );
+                }
+            }
             return None;
         }
 
@@ -130,22 +180,57 @@ impl SecretValueCache {
             return;
         }
 
+        let _index_lock = match lock_secret_cache_index() {
+            Ok(lock) => lock,
+            Err(error) => {
+                warn!("Failed to lock resolved-secret cache index: {error}");
+                return;
+            }
+        };
+        self.index = match SecretCacheIndex::load() {
+            Ok(index) => index,
+            Err(error) => {
+                warn!("Failed to reload resolved-secret cache index: {error}");
+                return;
+            }
+        };
+
         let fingerprint = key.fingerprint();
+        if self
+            .index
+            .entries
+            .get(&fingerprint)
+            .is_some_and(|entry| entry.pending_deletion)
+        {
+            return;
+        }
+
+        self.index.entries.insert(
+            fingerprint.clone(),
+            SecretCacheIndexEntry {
+                cached_at_unix_secs: now_unix_secs(),
+                pending_deletion: true,
+            },
+        );
+        if let Err(error) = self.index.save() {
+            warn!("Failed to reserve resolved-secret cache entry: {error}");
+            return;
+        }
+
         match set_secret(&fingerprint, value) {
             Ok(()) => {
-                self.index.entries.insert(
-                    fingerprint.clone(),
-                    SecretCacheIndexEntry {
-                        cached_at_unix_secs: now_unix_secs(),
-                    },
-                );
+                if let Some(entry) = self.index.entries.get_mut(&fingerprint) {
+                    entry.cached_at_unix_secs = now_unix_secs();
+                    entry.pending_deletion = false;
+                }
                 if let Err(error) = self.index.save() {
                     warn!("Failed to persist resolved-secret cache index: {error}");
-                    self.index.entries.remove(&fingerprint);
-                    let _ = delete_secret(&fingerprint);
                 }
             }
-            Err(KeyringAccess::Unavailable) => {}
+            Err(KeyringAccess::Unavailable) => {
+                self.index.entries.remove(&fingerprint);
+                self.save_index();
+            }
         }
     }
 
@@ -214,6 +299,44 @@ impl SecretCacheIndex {
 
         Some(state_dir().join("pw-env").join(SECRET_CACHE_FILE_NAME))
     }
+
+    fn lock_path() -> Option<PathBuf> {
+        let index_path = Self::path()?;
+        let mut lock_name = index_path.file_name()?.to_os_string();
+        lock_name.push(".lock");
+        Some(index_path.with_file_name(lock_name))
+    }
+}
+
+fn lock_secret_cache_index() -> Result<File> {
+    let path = SecretCacheIndex::lock_path()
+        .context("Resolved-secret cache index lock path is unavailable")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let file = options.open(&path).with_context(|| {
+        format!(
+            "Failed to open resolved-secret cache lock {}",
+            path.display()
+        )
+    })?;
+    file.lock().with_context(|| {
+        format!(
+            "Failed to lock resolved-secret cache index {}",
+            path.display()
+        )
+    })?;
+    Ok(file)
 }
 
 pub fn secret_cache_index_path() -> Option<PathBuf> {
@@ -221,14 +344,28 @@ pub fn secret_cache_index_path() -> Option<PathBuf> {
 }
 
 pub fn clear_secret_cache() -> Result<ClearSecretCacheResult> {
+    let _index_lock = lock_secret_cache_index()?;
     let mut result = ClearSecretCacheResult::default();
     let path = SecretCacheIndex::path();
-    let index = SecretCacheIndex::load()?;
+    let mut index = SecretCacheIndex::load()?;
 
-    for fingerprint in index.entries.keys() {
-        match delete_secret(fingerprint) {
-            Ok(true) => result.deleted_credentials += 1,
-            Ok(false) => {}
+    if !index.entries.is_empty() {
+        for entry in index.entries.values_mut() {
+            entry.pending_deletion = true;
+        }
+        index.save()?;
+    }
+
+    let fingerprints = index.entries.keys().cloned().collect::<Vec<_>>();
+    for fingerprint in fingerprints {
+        match delete_secret(&fingerprint) {
+            Ok(true) => {
+                result.deleted_credentials += 1;
+                index.entries.remove(&fingerprint);
+            }
+            Ok(false) => {
+                index.entries.remove(&fingerprint);
+            }
             Err(KeyringAccess::Unavailable) => {
                 result.keyring_unavailable = true;
                 result.keyring_delete_failures += 1;
@@ -236,7 +373,9 @@ pub fn clear_secret_cache() -> Result<ClearSecretCacheResult> {
         }
     }
 
-    if let Some(path) = path
+    if !index.entries.is_empty() {
+        index.save()?;
+    } else if let Some(path) = path
         && path.exists()
     {
         std::fs::remove_file(&path).with_context(|| {
@@ -465,7 +604,7 @@ mod tests {
             .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
-        set_test_secret_cache_index_path(Some(index_path));
+        set_test_secret_cache_index_path(Some(index_path.clone()));
         set_test_keyring_available(true);
 
         let mut cache = SecretValueCache::load(&CacheConfig::default());
@@ -478,6 +617,31 @@ mod tests {
         set_test_secret_cache_index_path(None);
 
         assert_eq!(cached.as_deref(), Some("secret-value"));
+    }
+
+    #[test]
+    fn stale_cache_writer_reloads_index_before_adding_entries() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
+        set_test_secret_cache_index_path(Some(index_path));
+        set_test_keyring_available(true);
+
+        let mut first_cache = SecretValueCache::load(&CacheConfig::default());
+        let mut stale_cache = SecretValueCache::load(&CacheConfig::default());
+        let first = sample_key();
+        let mut second = sample_key();
+        second.entry_key = "SECOND_KEY".to_string();
+        first_cache.set(&first, "first-value");
+        stale_cache.set(&second, "second-value");
+
+        let saved_index = SecretCacheIndex::load().unwrap();
+        assert_eq!(saved_index.entries.len(), 2);
+
+        reset_test_keyring();
+        set_test_secret_cache_index_path(None);
     }
 
     #[test]
@@ -562,6 +726,7 @@ mod tests {
             fingerprint.clone(),
             SecretCacheIndexEntry {
                 cached_at_unix_secs: 0,
+                pending_deletion: false,
             },
         );
         index.save().unwrap();
@@ -585,13 +750,58 @@ mod tests {
     }
 
     #[test]
+    fn secret_value_cache_expired_entry_keeps_index_when_delete_fails() {
+        let _lock = keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
+        set_test_secret_cache_index_path(Some(index_path.clone()));
+        set_test_keyring_available(true);
+
+        let key = sample_key();
+        let fingerprint = key.fingerprint();
+        let mut index = SecretCacheIndex::default();
+        index.entries.insert(
+            fingerprint.clone(),
+            SecretCacheIndexEntry {
+                cached_at_unix_secs: 0,
+                pending_deletion: false,
+            },
+        );
+        index.save().unwrap();
+        TEST_KEYRING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values
+            .insert(fingerprint.clone(), "stale-secret".to_string());
+
+        set_test_keyring_available(false);
+        let mut cache = SecretValueCache::load(&CacheConfig::default());
+        assert!(cache.get(&key).is_none());
+        let saved_index = SecretCacheIndex::load().unwrap();
+
+        assert!(saved_index.entries.contains_key(&fingerprint));
+        assert!(saved_index.entries[&fingerprint].pending_deletion);
+        assert!(index_path.exists());
+
+        set_test_keyring_available(true);
+        assert!(cache.get(&key).is_none());
+        assert!(!test_keyring_contains(&fingerprint));
+        assert!(SecretCacheIndex::load().unwrap().entries.is_empty());
+
+        reset_test_keyring();
+        set_test_secret_cache_index_path(None);
+    }
+
+    #[test]
     fn secret_value_cache_removes_stale_index_when_keyring_entry_is_missing() {
         let _lock = keyring_test_lock()
             .lock()
             .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
-        set_test_secret_cache_index_path(Some(index_path));
+        set_test_secret_cache_index_path(Some(index_path.clone()));
         set_test_keyring_available(true);
 
         let key = sample_key();
@@ -640,7 +850,7 @@ mod tests {
             .expect("keyring test mutex poisoned");
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("pw-env").join(SECRET_CACHE_FILE_NAME);
-        set_test_secret_cache_index_path(Some(index_path));
+        set_test_secret_cache_index_path(Some(index_path.clone()));
         set_test_keyring_available(true);
 
         let mut cache = SecretValueCache::load(&CacheConfig::default());
@@ -656,6 +866,23 @@ mod tests {
 
         assert!(result.keyring_unavailable);
         assert_eq!(result.keyring_delete_failures, 2);
+        assert!(!result.cleared_index_file);
+        assert!(index_path.exists());
+        let pending_index = SecretCacheIndex::load().unwrap();
+        assert_eq!(pending_index.entries.len(), 2);
+        assert!(
+            pending_index
+                .entries
+                .values()
+                .all(|entry| entry.pending_deletion)
+        );
+
+        set_test_keyring_available(true);
+        assert!(cache.get(&first).is_none());
+        assert!(cache.get(&second).is_none());
+        let retry_result = clear_secret_cache().unwrap();
+        assert!(retry_result.cleared_index_file);
+        assert!(!index_path.exists());
 
         reset_test_keyring();
         set_test_secret_cache_index_path(None);

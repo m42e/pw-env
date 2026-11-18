@@ -1532,20 +1532,28 @@ fn handle_cache(command: CacheCommands) -> Result<()> {
                 (true, Some(path)) => {
                     eprintln!("Cleared resolved-secret cache index: {}", path.display())
                 }
+                (false, Some(path)) if secret_cache_result.keyring_delete_failures > 0 => {
+                    eprintln!(
+                        "Retained resolved-secret cache index for retry: {}",
+                        path.display()
+                    )
+                }
                 (false, Some(path)) => {
                     eprintln!("No resolved-secret cache index found at {}", path.display())
                 }
                 (true, None) => eprintln!("Cleared resolved-secret cache index"),
+                (false, None) if secret_cache_result.keyring_delete_failures > 0 => {
+                    eprintln!("Retained resolved-secret cache index for retry")
+                }
                 (false, None) => {
                     eprintln!("No resolved-secret cache location is available on this system")
                 }
             }
 
-            if keyring_clear_status_message(&secret_cache_result).is_some() {
-                eprintln!(
-                    "Resolved-secret keyring cache clear completed with warnings; rerun with secure diagnostics if needed."
-                );
+            if let Some(message) = keyring_clear_status_message(&secret_cache_result) {
+                eprintln!("{message}.");
             }
+            ensure_secret_cache_clear_complete(&secret_cache_result)?;
 
             Ok(())
         }
@@ -1602,7 +1610,14 @@ fn handle_commands(dir: Option<PathBuf>, command: CommandCommands) -> Result<()>
 
 fn keyring_clear_status_message(result: &cache::ClearSecretCacheResult) -> Option<String> {
     if result.keyring_unavailable {
-        Some("Resolved-secret cache index was cleared, but the OS keyring was unavailable so cached keyring entries could not be removed".to_string())
+        let index_state = if result.cleared_index_file {
+            "Resolved-secret cache index was cleared"
+        } else {
+            "Resolved-secret cache index was retained for retry"
+        };
+        Some(format!(
+            "{index_state}, but the OS keyring was unavailable so cached keyring entries could not be removed"
+        ))
     } else if result.keyring_delete_failures > 0 {
         Some(format!(
             "Failed to remove {} resolved-secret cache keyring entr{}",
@@ -1626,6 +1641,17 @@ fn keyring_clear_status_message(result: &cache::ClearSecretCacheResult) -> Optio
     } else {
         None
     }
+}
+
+fn ensure_secret_cache_clear_complete(result: &cache::ClearSecretCacheResult) -> Result<()> {
+    if result.keyring_delete_failures > 0 {
+        anyhow::bail!(
+            "{}",
+            keyring_clear_status_message(result)
+                .unwrap_or_else(|| "Resolved-secret cache clear was incomplete".to_string())
+        );
+    }
+    Ok(())
 }
 
 fn config_template() -> String {
@@ -2720,16 +2746,30 @@ mod tests {
     #[test]
     fn keyring_clear_status_message_reports_keyring_unavailable() {
         let result = cache::ClearSecretCacheResult {
-            cleared_index_file: true,
+            cleared_index_file: false,
             deleted_credentials: 0,
             keyring_delete_failures: 1,
             keyring_unavailable: true,
         };
         let msg = keyring_clear_status_message(&result).unwrap();
         assert!(
-            msg.contains("OS keyring was unavailable"),
+            msg.contains("OS keyring was unavailable") && msg.contains("retained for retry"),
             "unexpected message: {msg}"
         );
+    }
+
+    #[test]
+    fn incomplete_secret_cache_clear_returns_error() {
+        let result = cache::ClearSecretCacheResult {
+            cleared_index_file: false,
+            deleted_credentials: 0,
+            keyring_delete_failures: 2,
+            keyring_unavailable: true,
+        };
+
+        let error = ensure_secret_cache_clear_complete(&result).unwrap_err();
+
+        assert!(error.to_string().contains("retained for retry"));
     }
 
     #[test]
