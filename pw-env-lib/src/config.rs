@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
@@ -13,6 +14,68 @@ pub use crate::file_io::{
 
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 const UNAPPROVED_PROJECT_OVERRIDE_COMMAND: &str = "\0";
+
+/// Serialize updates to an approval store across pw-env processes. The lock file
+/// is separate from the store because approval stores are atomically replaced.
+fn with_approval_store_lock<T>(store_path: &Path, update: impl FnOnce() -> Result<T>) -> Result<T> {
+    let parent = store_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
+
+    let file_name = store_path.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Approval store path has no file name: {}",
+            store_path.display()
+        )
+    })?;
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    let lock_path = parent.join(lock_name);
+
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let lock_file = options
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open approval lock {}", lock_path.display()))?;
+    lock_file
+        .lock()
+        .with_context(|| format!("Failed to lock approval store {}", store_path.display()))?;
+
+    update()
+}
+
+fn update_approval_store<S, T>(
+    store_path: Option<PathBuf>,
+    load: impl FnOnce(&Path) -> Result<S>,
+    save: impl FnOnce(&S, &Path) -> Result<()>,
+    update: impl FnOnce(&mut S) -> Result<(T, bool)>,
+) -> Result<T>
+where
+    S: Default,
+{
+    let Some(store_path) = store_path else {
+        let mut store = S::default();
+        return update(&mut store).map(|(result, _)| result);
+    };
+
+    with_approval_store_lock(&store_path, || {
+        let mut store = load(&store_path)?;
+        let (result, changed) = update(&mut store)?;
+        if changed {
+            save(&store, &store_path)?;
+        }
+        Ok(result)
+    })
+}
 
 fn base_dir_from_env(
     env_value: Option<PathBuf>,
@@ -526,24 +589,32 @@ impl Config {
         validate_project_override(&override_path)?;
         let hash = hash_file(&override_path)?;
 
-        let mut approvals = ApprovedProjectConfigs::load()?;
-        approvals.approve(&override_path, hash.clone());
-        approvals.save()?;
-
-        Ok(ApprovedProjectConfigEntry {
+        let entry = ApprovedProjectConfigEntry {
             path: override_path,
             hash,
-        })
+        };
+        update_approval_store(
+            ApprovedProjectConfigs::path(),
+            ApprovedProjectConfigs::load_from_path,
+            |approvals, store_path| approvals.save_to_path(store_path),
+            |approvals| {
+                approvals.approve(&entry.path, entry.hash.clone());
+                Ok((entry, true))
+            },
+        )
     }
 
     pub fn revoke_project_override_approval(path: &Path) -> Result<bool> {
         let override_path = resolve_project_override_target(path)?;
-        let mut approvals = ApprovedProjectConfigs::load()?;
-        let removed = approvals.revoke(&override_path);
-        if removed {
-            approvals.save()?;
-        }
-        Ok(removed)
+        update_approval_store(
+            ApprovedProjectConfigs::path(),
+            ApprovedProjectConfigs::load_from_path,
+            |approvals, store_path| approvals.save_to_path(store_path),
+            |approvals| {
+                let removed = approvals.revoke(&override_path);
+                Ok((removed, removed))
+            },
+        )
     }
 
     pub fn secret_fetch_approval_status(path: &Path) -> Result<SecretFetchApprovalStatus> {
@@ -571,39 +642,47 @@ impl Config {
         let (_, env_path) = resolve_secret_fetch_target(path)?;
         let env_file = EnvFile::parse(&env_path)?;
         let project_path = env_file.project_path().to_path_buf();
-        let mut approvals = ApprovedSecretFetches::load()?;
+        let env_hash = env_file.content_hash().to_owned();
 
-        match mode {
-            SecretFetchApprovalMode::CurrentEnvHash => {
-                let env_hash = env_file.content_hash().to_owned();
-                approvals.approve_hash(&project_path, env_hash.clone());
-                approvals.save()?;
-                Ok(ApprovedSecretFetchEntry {
-                    project_path,
-                    env_hash: Some(env_hash),
-                    project_wide: false,
-                })
-            }
-            SecretFetchApprovalMode::ProjectWide => {
-                approvals.allow_project_wide(&project_path);
-                approvals.save()?;
-                Ok(ApprovedSecretFetchEntry {
-                    project_path,
-                    env_hash: None,
-                    project_wide: true,
-                })
-            }
-        }
+        update_approval_store(
+            ApprovedSecretFetches::path(),
+            ApprovedSecretFetches::load_from_path,
+            |approvals, store_path| approvals.save_to_path(store_path),
+            |approvals| {
+                let entry = match mode {
+                    SecretFetchApprovalMode::CurrentEnvHash => {
+                        approvals.approve_hash(&project_path, env_hash.clone());
+                        ApprovedSecretFetchEntry {
+                            project_path,
+                            env_hash: Some(env_hash),
+                            project_wide: false,
+                        }
+                    }
+                    SecretFetchApprovalMode::ProjectWide => {
+                        approvals.allow_project_wide(&project_path);
+                        ApprovedSecretFetchEntry {
+                            project_path,
+                            env_hash: None,
+                            project_wide: true,
+                        }
+                    }
+                };
+                Ok((entry, true))
+            },
+        )
     }
 
     pub fn revoke_secret_fetch_approval(path: &Path) -> Result<bool> {
         let (project_path, _) = resolve_secret_fetch_target(path)?;
-        let mut approvals = ApprovedSecretFetches::load()?;
-        let removed = approvals.revoke(&project_path);
-        if removed {
-            approvals.save()?;
-        }
-        Ok(removed)
+        update_approval_store(
+            ApprovedSecretFetches::path(),
+            ApprovedSecretFetches::load_from_path,
+            |approvals, store_path| approvals.save_to_path(store_path),
+            |approvals| {
+                let removed = approvals.revoke(&project_path);
+                Ok((removed, removed))
+            },
+        )
     }
 
     pub fn ensure_secret_fetch_approved(env_file: &EnvFile) -> Result<()> {
@@ -619,7 +698,7 @@ impl Config {
         let project_path = env_file.project_path().to_path_buf();
         let env_path = env_file.path().to_path_buf();
         let env_hash = env_file.content_hash().to_owned();
-        let mut approvals = ApprovedSecretFetches::load()?;
+        let approvals = ApprovedSecretFetches::load()?;
 
         if approvals.is_approved(&project_path, &env_hash) {
             debug!(
@@ -636,14 +715,24 @@ impl Config {
         };
 
         match approve(&request)? {
-            Some(SecretFetchApprovalMode::CurrentEnvHash) => {
-                approvals.approve_hash(&project_path, env_hash);
-                approvals.save()
-            }
-            Some(SecretFetchApprovalMode::ProjectWide) => {
-                approvals.allow_project_wide(&project_path);
-                approvals.save()
-            }
+            Some(SecretFetchApprovalMode::CurrentEnvHash) => update_approval_store(
+                ApprovedSecretFetches::path(),
+                ApprovedSecretFetches::load_from_path,
+                |approvals, store_path| approvals.save_to_path(store_path),
+                |approvals| {
+                    approvals.approve_hash(&project_path, env_hash);
+                    Ok(((), true))
+                },
+            ),
+            Some(SecretFetchApprovalMode::ProjectWide) => update_approval_store(
+                ApprovedSecretFetches::path(),
+                ApprovedSecretFetches::load_from_path,
+                |approvals, store_path| approvals.save_to_path(store_path),
+                |approvals| {
+                    approvals.allow_project_wide(&project_path);
+                    Ok(((), true))
+                },
+            ),
             None => anyhow::bail!(
                 "pw-env: credential fetching was not approved for project {}. Re-run in an interactive session to approve it.",
                 project_path.display()
@@ -844,7 +933,7 @@ impl ProjectDirectoryOverride {
             .with_context(|| format!("Failed to parse project override from {}", path.display()))?;
         let hash = sha256_hex(&contents);
 
-        let mut approvals = ApprovedProjectConfigs::load()?;
+        let approvals = ApprovedProjectConfigs::load()?;
         let previously_approved = approvals.approved_hash(path);
 
         if previously_approved == Some(hash.as_str()) {
@@ -856,8 +945,15 @@ impl ProjectDirectoryOverride {
             return Ok(None);
         }
 
-        approvals.approve(path, hash);
-        approvals.save()?;
+        update_approval_store(
+            ApprovedProjectConfigs::path(),
+            ApprovedProjectConfigs::load_from_path,
+            |approvals, store_path| approvals.save_to_path(store_path),
+            |approvals| {
+                approvals.approve(path, hash);
+                Ok(((), true))
+            },
+        )?;
         Ok(Some(local_override))
     }
 }
@@ -888,14 +984,6 @@ impl ApprovedProjectConfigs {
         }
         store.approved_hashes = migrated;
         Ok(store)
-    }
-
-    fn save(&self) -> Result<()> {
-        let Some(path) = Self::path() else {
-            return Ok(());
-        };
-
-        self.save_to_path(&path)
     }
 
     fn save_to_path(&self, path: &Path) -> Result<()> {
@@ -986,14 +1074,6 @@ impl ApprovedSecretFetches {
             .filter_map(|stored_path| migrate_path_key(&stored_path))
             .collect();
         Ok(store)
-    }
-
-    fn save(&self) -> Result<()> {
-        let Some(path) = Self::path() else {
-            return Ok(());
-        };
-
-        self.save_to_path(&path)
     }
 
     fn save_to_path(&self, path: &Path) -> Result<()> {
@@ -1493,8 +1573,76 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
+
+    #[test]
+    fn approval_store_lock_child_process() {
+        let Some(store_path) = std::env::var_os("PW_ENV_TEST_APPROVAL_LOCK_STORE") else {
+            return;
+        };
+        let started_path =
+            PathBuf::from(std::env::var_os("PW_ENV_TEST_APPROVAL_LOCK_STARTED").unwrap());
+        let finished_path =
+            PathBuf::from(std::env::var_os("PW_ENV_TEST_APPROVAL_LOCK_FINISHED").unwrap());
+        fs::write(&started_path, "waiting").unwrap();
+        with_approval_store_lock(Path::new(&store_path), || {
+            fs::write(&finished_path, "finished").unwrap();
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn approval_store_lock_blocks_a_second_process() {
+        let test_dir = unique_test_dir("approval-lock-process");
+        fs::create_dir_all(&test_dir).unwrap();
+        let store_path = test_dir.join("approvals.json");
+        let started_path = test_dir.join("child-started");
+        let finished_path = test_dir.join("child-finished");
+        let mut child = None;
+
+        let lock_result = with_approval_store_lock(&store_path, || {
+            child = Some(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "config::tests::approval_store_lock_child_process",
+                    ])
+                    .env("PW_ENV_TEST_APPROVAL_LOCK_STORE", &store_path)
+                    .env("PW_ENV_TEST_APPROVAL_LOCK_STARTED", &started_path)
+                    .env("PW_ENV_TEST_APPROVAL_LOCK_FINISHED", &finished_path)
+                    .spawn()
+                    .unwrap(),
+            );
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !started_path.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !started_path.exists() {
+                anyhow::bail!("child process did not start before timeout");
+            }
+
+            thread::sleep(Duration::from_millis(100));
+            Ok(!finished_path.exists())
+        });
+
+        let child_status = child.unwrap().wait().unwrap();
+        assert!(child_status.success(), "child test process failed");
+        assert!(
+            lock_result.unwrap(),
+            "child escaped the approval store lock"
+        );
+        assert!(
+            finished_path.exists(),
+            "child update did not finish after unlock"
+        );
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
 
     #[test]
     fn test_default_config() {
@@ -2664,6 +2812,7 @@ backend = "op"
     fn test_revoke_project_override_approval_returns_false_when_not_approved() {
         let test_dir = unique_test_dir("revoke-proj-override");
         fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
         let override_path = test_dir.join(PROJECT_OVERRIDE_FILE_NAME);
         fs::write(&override_path, "backend = \"bw\"\n").unwrap();
 
@@ -2678,6 +2827,7 @@ backend = "op"
     fn test_revoke_secret_fetch_approval_returns_false_when_not_approved() {
         let test_dir = unique_test_dir("revoke-sf");
         fs::create_dir_all(&test_dir).unwrap();
+        set_test_secret_fetch_store(&test_dir);
         let env_path = test_dir.join(".env");
         fs::write(&env_path, "DB_URL=\n").unwrap();
 
@@ -2730,6 +2880,7 @@ backend = "op"
     fn config_load_for_dir_with_approval_applies_local_override() {
         let test_dir = unique_test_dir("load-for-dir-approved");
         fs::create_dir_all(&test_dir).unwrap();
+        set_test_approval_store(&test_dir);
         fs::write(
             test_dir.join(PROJECT_OVERRIDE_FILE_NAME),
             "backend = \"gpg\"\n",
@@ -3415,6 +3566,119 @@ backend = "op"
     }
 
     #[test]
+    fn ensure_secret_fetch_approval_reloads_store_after_prompt_before_granting() {
+        let test_dir = unique_test_dir("ensure-sf-reload-after-prompt");
+        let state_dir = test_dir.join("state");
+        let hash_project = test_dir.join("hash-project");
+        let wide_project = test_dir.join("wide-project");
+        let concurrent_project = test_dir.join("concurrent-project");
+        let target_project = test_dir.join("target-project");
+        for dir in [
+            &state_dir,
+            &hash_project,
+            &wide_project,
+            &concurrent_project,
+            &target_project,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        set_test_secret_fetch_store(&state_dir);
+
+        let hash_env = hash_project.join(".env");
+        let wide_env = wide_project.join(".env");
+        let concurrent_env = concurrent_project.join(".env");
+        let target_env = target_project.join(".env");
+        for env_path in [&hash_env, &wide_env, &concurrent_env, &target_env] {
+            fs::write(env_path, "KEY=op://vault/item/key\n").unwrap();
+        }
+
+        Config::approve_secret_fetch(&hash_env, SecretFetchApprovalMode::CurrentEnvHash).unwrap();
+        Config::approve_secret_fetch(&wide_env, SecretFetchApprovalMode::ProjectWide).unwrap();
+        let target_snapshot = crate::env_file::EnvFile::parse(&target_env).unwrap();
+        Config::ensure_secret_fetch_approved_with(&target_snapshot, |_| {
+            assert!(Config::revoke_secret_fetch_approval(&hash_env)?);
+            assert!(Config::revoke_secret_fetch_approval(&wide_env)?);
+            Config::approve_secret_fetch(&concurrent_env, SecretFetchApprovalMode::CurrentEnvHash)?;
+            Ok(Some(SecretFetchApprovalMode::ProjectWide))
+        })
+        .unwrap();
+
+        let hash_status = Config::secret_fetch_approval_status(&hash_env).unwrap();
+        let wide_status = Config::secret_fetch_approval_status(&wide_env).unwrap();
+        let concurrent_status = Config::secret_fetch_approval_status(&concurrent_env).unwrap();
+        let target_status = Config::secret_fetch_approval_status(&target_env).unwrap();
+        assert!(hash_status.approved_env_hashes.is_empty());
+        assert!(!wide_status.project_wide);
+        assert!(
+            concurrent_status
+                .approved_env_hashes
+                .contains(concurrent_status.current_env_hash.as_ref().unwrap())
+        );
+        assert!(target_status.project_wide);
+
+        let store_path = ApprovedSecretFetches::path().unwrap();
+        let serialized_store = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
+        assert!(
+            serialized_store
+                .approved_hashes(&hash_status.project_path)
+                .is_empty()
+        );
+        assert!(!serialized_store.is_project_wide(&wide_status.project_path));
+        assert!(
+            serialized_store
+                .approved_hashes(&concurrent_status.project_path)
+                .contains(concurrent_status.current_env_hash.as_ref().unwrap())
+        );
+        assert!(serialized_store.is_project_wide(&target_status.project_path));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn ensure_secret_fetch_hash_approval_preserves_concurrent_project_wide_grants() {
+        let test_dir = unique_test_dir("ensure-sf-hash-preserves-update");
+        let state_dir = test_dir.join("state");
+        let target_project = test_dir.join("target-project");
+        let concurrent_project = test_dir.join("concurrent-project");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::create_dir_all(&target_project).unwrap();
+        fs::create_dir_all(&concurrent_project).unwrap();
+        set_test_secret_fetch_store(&state_dir);
+
+        let target_env = target_project.join(".env");
+        let concurrent_env = concurrent_project.join(".env");
+        fs::write(&target_env, "KEY=op://vault/item/target\n").unwrap();
+        fs::write(&concurrent_env, "KEY=op://vault/item/concurrent\n").unwrap();
+        let target_snapshot = crate::env_file::EnvFile::parse(&target_env).unwrap();
+
+        Config::ensure_secret_fetch_approved_with(&target_snapshot, |_| {
+            Config::approve_secret_fetch(&concurrent_env, SecretFetchApprovalMode::ProjectWide)?;
+            Ok(Some(SecretFetchApprovalMode::CurrentEnvHash))
+        })
+        .unwrap();
+
+        let target_status = Config::secret_fetch_approval_status(&target_env).unwrap();
+        let concurrent_status = Config::secret_fetch_approval_status(&concurrent_env).unwrap();
+        assert!(
+            target_status
+                .approved_env_hashes
+                .contains(target_status.current_env_hash.as_ref().unwrap())
+        );
+        assert!(concurrent_status.project_wide);
+
+        let store_path = ApprovedSecretFetches::path().unwrap();
+        let serialized_store = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
+        assert!(
+            serialized_store
+                .approved_hashes(&target_status.project_path)
+                .contains(target_status.current_env_hash.as_ref().unwrap())
+        );
+        assert!(serialized_store.is_project_wide(&concurrent_status.project_path));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
     fn ensure_secret_fetch_approval_rejects_a_different_retained_snapshot() {
         let test_dir = unique_test_dir("ensure-sf-snapshot");
         fs::create_dir_all(&test_dir).unwrap();
@@ -3615,6 +3879,69 @@ backend = "op"
             result.unwrap().is_some(),
             "answer 'yes' should approve and return Some"
         );
+    }
+
+    #[test]
+    fn project_override_prompt_reloads_store_and_applies_only_its_decision() {
+        let test_dir = unique_test_dir("override-reload-after-prompt");
+        let state_dir = test_dir.join("state");
+        let revoked_project = test_dir.join("revoked-project");
+        let concurrently_approved_project = test_dir.join("concurrent-project");
+        let target_project = test_dir.join("target-project");
+        for dir in [
+            &state_dir,
+            &revoked_project,
+            &concurrently_approved_project,
+            &target_project,
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        set_test_approval_store(&state_dir);
+
+        let revoked_override = revoked_project.join(PROJECT_OVERRIDE_FILE_NAME);
+        let concurrent_override = concurrently_approved_project.join(PROJECT_OVERRIDE_FILE_NAME);
+        let target_override = target_project.join(PROJECT_OVERRIDE_FILE_NAME);
+        for override_path in [&revoked_override, &concurrent_override, &target_override] {
+            fs::write(override_path, "backend = \"op\"\n").unwrap();
+        }
+        Config::approve_project_override(&revoked_override).unwrap();
+
+        let mut approve = |path: &Path, previously_approved: bool| -> Result<bool> {
+            assert_eq!(path, target_override);
+            assert!(!previously_approved);
+            assert!(Config::revoke_project_override_approval(&revoked_override)?);
+            Config::approve_project_override(&concurrent_override)?;
+            Ok(true)
+        };
+        let loaded =
+            ProjectDirectoryOverride::load_if_approved_with(&target_override, &mut approve)
+                .unwrap();
+        assert!(loaded.is_some());
+
+        let revoked_status = Config::project_override_approval_status(&revoked_override).unwrap();
+        let concurrent_status =
+            Config::project_override_approval_status(&concurrent_override).unwrap();
+        let target_status = Config::project_override_approval_status(&target_override).unwrap();
+        assert!(revoked_status.approved_hash.is_none());
+        assert_eq!(
+            concurrent_status.approved_hash,
+            concurrent_status.current_hash
+        );
+        assert_eq!(target_status.approved_hash, target_status.current_hash);
+
+        let store_path = ApprovedProjectConfigs::path().unwrap();
+        let serialized_store = ApprovedProjectConfigs::load_from_path(&store_path).unwrap();
+        assert!(serialized_store.approved_hash(&revoked_override).is_none());
+        assert_eq!(
+            serialized_store.approved_hash(&concurrent_override),
+            concurrent_status.current_hash.as_deref()
+        );
+        assert_eq!(
+            serialized_store.approved_hash(&target_override),
+            target_status.current_hash.as_deref()
+        );
+
+        let _ = fs::remove_dir_all(&test_dir);
     }
 
     // ── Tests for ReviewedMigrations round-trip through Config (L483, L490, L499, L845, L872) ─
