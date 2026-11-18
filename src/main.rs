@@ -1345,13 +1345,20 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
 
             eprintln!("Approved project override files:");
             for approval in approvals {
-                eprintln!("  {}  {}", approval.hash, approval.path.display());
+                eprintln!(
+                    "  {}  {}",
+                    approval.hash,
+                    config::escape_path_for_display(&approval.path)
+                );
             }
             Ok(())
         }
         ApprovalCommands::Approve { path } => {
             let approval = config::Config::approve_project_override(&path)?;
-            eprintln!("Approved project override: {}", approval.path.display());
+            eprintln!(
+                "Approved project override: {}",
+                config::escape_path_for_display(&approval.path)
+            );
             eprintln!("Stored hash: {}", approval.hash);
             Ok(())
         }
@@ -1362,7 +1369,10 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             };
             let status = config::Config::project_override_approval_status(&target)?;
 
-            eprintln!("Project override: {}", status.override_path.display());
+            eprintln!(
+                "Project override: {}",
+                config::escape_path_for_display(&status.override_path)
+            );
             match status.current_hash.as_deref() {
                 Some(hash) => eprintln!("Current hash: {hash}"),
                 None => eprintln!("Current hash: unavailable"),
@@ -1384,10 +1394,11 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
         }
         ApprovalCommands::Revoke { path } => {
             let revoked = config::Config::revoke_project_override_approval(&path)?;
+            let display_path = config::escape_path_for_display(&path);
             if revoked {
-                eprintln!("Revoked approval for {}", path.display());
+                eprintln!("Revoked approval for {display_path}");
             } else {
-                eprintln!("No approval entry found for {}", path.display());
+                eprintln!("No approval entry found for {display_path}");
             }
             Ok(())
         }
@@ -1405,9 +1416,16 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             eprintln!("Approved secret-fetch entries:");
             for approval in approvals {
                 if approval.project_wide {
-                    eprintln!("  project-wide  {}", approval.project_path.display());
+                    eprintln!(
+                        "  project-wide  {}",
+                        config::escape_path_for_display(&approval.project_path)
+                    );
                 } else if let Some(hash) = approval.env_hash {
-                    eprintln!("  {}  {}", hash, approval.project_path.display());
+                    eprintln!(
+                        "  {}  {}",
+                        hash,
+                        config::escape_path_for_display(&approval.project_path)
+                    );
                 }
             }
             Ok(())
@@ -1422,12 +1440,12 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             if approval.project_wide {
                 eprintln!(
                     "Approved secret fetching for any environment-file changes in project {}",
-                    approval.project_path.display()
+                    config::escape_path_for_display(&approval.project_path)
                 );
             } else {
                 eprintln!(
                     "Approved secret fetching for project {}",
-                    approval.project_path.display()
+                    config::escape_path_for_display(&approval.project_path)
                 );
                 if let Some(hash) = approval.env_hash {
                     eprintln!("Stored environment-file hash: {hash}");
@@ -1442,8 +1460,14 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
             };
             let status = config::Config::secret_fetch_approval_status(&target)?;
 
-            eprintln!("Project: {}", status.project_path.display());
-            eprintln!("Environment file: {}", status.env_path.display());
+            eprintln!(
+                "Project: {}",
+                config::escape_path_for_display(&status.project_path)
+            );
+            eprintln!(
+                "Environment file: {}",
+                config::escape_path_for_display(&status.env_path)
+            );
             match status.current_env_hash.as_deref() {
                 Some(hash) => eprintln!("Current environment-file hash: {hash}"),
                 None => eprintln!("Current environment-file hash: unavailable"),
@@ -1481,13 +1505,11 @@ fn handle_approvals(command: ApprovalCommands) -> Result<()> {
         }
         ApprovalCommands::RevokeFetch { path } => {
             let revoked = config::Config::revoke_secret_fetch_approval(&path)?;
+            let display_path = config::escape_path_for_display(&path);
             if revoked {
-                eprintln!("Revoked secret-fetch approvals for {}", path.display());
+                eprintln!("Revoked secret-fetch approvals for {display_path}");
             } else {
-                eprintln!(
-                    "No secret-fetch approval entry found for {}",
-                    path.display()
-                );
+                eprintln!("No secret-fetch approval entry found for {}", display_path);
             }
             Ok(())
         }

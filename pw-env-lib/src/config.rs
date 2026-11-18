@@ -874,8 +874,16 @@ impl ApprovedProjectConfigs {
 
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read approval store from {}", path.display()))?;
-        serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse approval store from {}", path.display()))
+        let mut store: Self = serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse approval store from {}", path.display()))?;
+        let mut migrated = BTreeMap::new();
+        for (stored_path, hash) in std::mem::take(&mut store.approved_hashes) {
+            if let Some(path_key) = migrate_path_key(&stored_path) {
+                migrated.entry(path_key).or_insert(hash);
+            }
+        }
+        store.approved_hashes = migrated;
+        Ok(store)
     }
 
     fn save(&self) -> Result<()> {
@@ -917,7 +925,7 @@ impl ApprovedProjectConfigs {
         self.approved_hashes
             .iter()
             .map(|(path, hash)| ApprovedProjectConfigEntry {
-                path: PathBuf::from(path),
+                path: path_from_identity(path),
                 hash: hash.clone(),
             })
             .collect()
@@ -956,12 +964,24 @@ impl ApprovedSecretFetches {
                 path.display()
             )
         })?;
-        serde_json::from_str(&contents).with_context(|| {
+        let mut store: Self = serde_json::from_str(&contents).with_context(|| {
             format!(
                 "Failed to parse secret fetch approval store from {}",
                 path.display()
             )
-        })
+        })?;
+        let mut migrated_hashes = BTreeMap::<String, BTreeSet<String>>::new();
+        for (stored_path, hashes) in std::mem::take(&mut store.approved_env_hashes) {
+            if let Some(path_key) = migrate_path_key(&stored_path) {
+                migrated_hashes.entry(path_key).or_default().extend(hashes);
+            }
+        }
+        store.approved_env_hashes = migrated_hashes;
+        store.project_wide = std::mem::take(&mut store.project_wide)
+            .into_iter()
+            .filter_map(|stored_path| migrate_path_key(&stored_path))
+            .collect();
+        Ok(store)
     }
 
     fn save(&self) -> Result<()> {
@@ -1050,7 +1070,7 @@ impl ApprovedSecretFetches {
 
         for project_path in &self.project_wide {
             entries.push(ApprovedSecretFetchEntry {
-                project_path: PathBuf::from(project_path),
+                project_path: path_from_identity(project_path),
                 env_hash: None,
                 project_wide: true,
             });
@@ -1059,7 +1079,7 @@ impl ApprovedSecretFetches {
         for (project_path, hashes) in &self.approved_env_hashes {
             for hash in hashes {
                 entries.push(ApprovedSecretFetchEntry {
-                    project_path: PathBuf::from(project_path),
+                    project_path: path_from_identity(project_path),
                     env_hash: Some(hash.clone()),
                     project_wide: false,
                 });
@@ -1102,12 +1122,20 @@ impl ReviewedMigrations {
                 path.display()
             )
         })?;
-        serde_json::from_str(&contents).with_context(|| {
+        let mut store: Self = serde_json::from_str(&contents).with_context(|| {
             format!(
                 "Failed to parse reviewed migration store from {}",
                 path.display()
             )
-        })
+        })?;
+        let mut migrated = BTreeMap::<String, BTreeSet<String>>::new();
+        for (stored_path, fingerprints) in std::mem::take(&mut store.reviewed_entry_fingerprints) {
+            if let Some(path_key) = migrate_path_key(&stored_path) {
+                migrated.entry(path_key).or_default().extend(fingerprints);
+            }
+        }
+        store.reviewed_entry_fingerprints = migrated;
+        Ok(store)
     }
 
     fn save(&self) -> Result<()> {
@@ -1193,11 +1221,151 @@ fn normalized_project_path(path: &str) -> PathBuf {
     expanded.canonicalize().unwrap_or(expanded)
 }
 
+const PATH_IDENTITY_PREFIX: &str = "pw-env-path-v2:";
+const LEGACY_PATH_REPLACEMENT: char = '\u{fffd}';
+
 fn normalize_path(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        return format!(
+            "{PATH_IDENTITY_PREFIX}unix-bytes:{}",
+            encode_hex(canonical.as_os_str().as_bytes())
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes: Vec<u8> = canonical
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        return format!(
+            "{PATH_IDENTITY_PREFIX}windows-utf16le:{}",
+            encode_hex(&bytes)
+        );
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let bytes = canonical.as_os_str().to_string_lossy().as_bytes().to_vec();
+        format!(
+            "{PATH_IDENTITY_PREFIX}other-utf8-lossy:{}",
+            encode_hex(&bytes)
+        )
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex(encoded: &str) -> Option<Vec<u8>> {
+    if encoded.len() % 2 != 0 {
+        return None;
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)? as u8;
+            let low = (pair[1] as char).to_digit(16)? as u8;
+            Some((high << 4) | low)
+        })
+        .collect()
+}
+
+fn path_from_identity(identity: &str) -> PathBuf {
+    let Some((platform, encoded)) = identity
+        .strip_prefix(PATH_IDENTITY_PREFIX)
+        .and_then(|value| value.split_once(':'))
+    else {
+        return PathBuf::from(identity);
+    };
+    let Some(bytes) = decode_hex(encoded) else {
+        return PathBuf::from(identity);
+    };
+
+    #[cfg(unix)]
+    if platform == "unix-bytes" {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        return PathBuf::from(OsString::from_vec(bytes));
+    }
+    #[cfg(windows)]
+    if platform == "windows-utf16le" && bytes.len() % 2 == 0 {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        let wide = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return PathBuf::from(OsString::from_wide(&wide));
+    }
+    PathBuf::from(identity)
+}
+
+/// Render an approval path without merging distinct native paths into one label.
+pub fn escape_path_for_display(path: &Path) -> String {
+    if let Some(path) = path.to_str() {
+        return path.to_string();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut escaped = String::new();
+        for byte in path.as_os_str().as_bytes() {
+            match byte {
+                b'\\' => escaped.push_str("\\\\"),
+                0x20..=0x7e => escaped.push(*byte as char),
+                _ => escaped.push_str(&format!("\\x{byte:02x}")),
+            }
+        }
+        return escaped;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut escaped = String::new();
+        for unit in path.as_os_str().encode_wide() {
+            match unit {
+                0x5c => escaped.push_str("\\\\"),
+                0x20..=0x7e => escaped.push(char::from_u32(unit as u32).unwrap()),
+                _ => escaped.push_str(&format!("\\u{{{unit:04x}}}")),
+            }
+        }
+        return escaped;
+    }
+    #[cfg(not(any(unix, windows)))]
+    path.to_string_lossy().into_owned()
+}
+
+fn migrate_path_key(stored_path: &str) -> Option<String> {
+    if stored_path.starts_with(PATH_IDENTITY_PREFIX) {
+        let (platform, encoded) = stored_path
+            .strip_prefix(PATH_IDENTITY_PREFIX)?
+            .split_once(':')?;
+        let _bytes = decode_hex(encoded)?;
+        #[cfg(unix)]
+        return (platform == "unix-bytes").then(|| stored_path.to_string());
+        #[cfg(windows)]
+        return (platform == "windows-utf16le" && _bytes.len() % 2 == 0)
+            .then(|| stored_path.to_string());
+        #[cfg(not(any(unix, windows)))]
+        return (platform == "other-utf8-lossy").then(|| stored_path.to_string());
+    }
+    if stored_path.contains(LEGACY_PATH_REPLACEMENT) {
+        return None;
+    }
+    Some(normalize_path(Path::new(stored_path)))
 }
 
 fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
@@ -1829,10 +1997,8 @@ vault = "Work"
     fn test_normalize_path_returns_nonempty_canonical_string() {
         let dir = std::env::temp_dir();
         let result = normalize_path(&dir);
-        assert!(!result.is_empty());
-        // The canonical path should match what std::fs::canonicalize returns.
-        let expected = dir.canonicalize().unwrap().to_string_lossy().into_owned();
-        assert_eq!(result, expected);
+        assert!(result.starts_with(PATH_IDENTITY_PREFIX));
+        assert_eq!(path_from_identity(&result), dir.canonicalize().unwrap());
     }
 
     #[test]
@@ -2239,7 +2405,88 @@ backend = "op"
     fn test_normalize_path_nonexistent_returns_input() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist/12345");
         let normalized = normalize_path(&path);
-        assert_eq!(normalized, "/nonexistent/path/that/does/not/exist/12345");
+        assert!(normalized.starts_with(PATH_IDENTITY_PREFIX));
+        assert_eq!(path_from_identity(&normalized), path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_project_paths_have_distinct_approval_identities() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = unique_test_dir("non-utf8-approval-paths");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join(std::ffi::OsString::from_vec(b"project-\x80".to_vec()));
+        let second = root.join(std::ffi::OsString::from_vec(b"project-\x81".to_vec()));
+
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+        assert_ne!(normalize_path(&first), normalize_path(&second));
+        let first_display = escape_path_for_display(&first);
+        let second_display = escape_path_for_display(&second);
+        assert_ne!(first_display, second_display);
+        assert!(first_display.contains("\\x80"));
+        assert!(second_display.contains("\\x81"));
+
+        let mut approvals = ApprovedSecretFetches::default();
+        approvals.allow_project_wide(&first);
+        approvals.approve_hash(&first, "first-hash".to_string());
+        approvals.allow_project_wide(&second);
+        approvals.approve_hash(&second, "second-hash".to_string());
+        assert!(approvals.is_approved(&first, "first-hash"));
+        assert!(approvals.is_approved(&second, "second-hash"));
+
+        let first_entry = approvals
+            .entries()
+            .into_iter()
+            .find(|entry| entry.project_path == first)
+            .unwrap();
+        assert!(first_entry.project_wide);
+
+        assert!(approvals.revoke(&first));
+        assert!(!approvals.is_approved(&first, "first-hash"));
+        assert!(approvals.is_approved(&second, "second-hash"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambiguous_legacy_path_approval_is_dropped_and_valid_legacy_path_migrates() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = unique_test_dir("legacy-path-migration");
+        fs::create_dir_all(&root).unwrap();
+        let valid = root.join("valid-project");
+        let ambiguous = root.join(std::ffi::OsString::from_vec(b"invalid-\x80".to_vec()));
+        fs::create_dir_all(&valid).unwrap();
+        let valid_legacy = valid.to_string_lossy().into_owned();
+        let ambiguous_legacy = ambiguous.to_string_lossy().into_owned();
+        assert!(ambiguous_legacy.contains(LEGACY_PATH_REPLACEMENT));
+        let store_path = root.join("approved-secret-fetches.json");
+        let legacy_store = ApprovedSecretFetches {
+            approved_env_hashes: BTreeMap::from([
+                (
+                    valid_legacy.clone(),
+                    BTreeSet::from(["valid-hash".to_string()]),
+                ),
+                (
+                    ambiguous_legacy.clone(),
+                    BTreeSet::from(["ambiguous-hash".to_string()]),
+                ),
+            ]),
+            project_wide: BTreeSet::from([valid_legacy, ambiguous_legacy]),
+        };
+        fs::write(&store_path, serde_json::to_vec(&legacy_store).unwrap()).unwrap();
+
+        let loaded = ApprovedSecretFetches::load_from_path(&store_path).unwrap();
+        assert!(loaded.is_approved(&valid, "valid-hash"));
+        assert!(!loaded.is_approved(&ambiguous, "ambiguous-hash"));
+        loaded.save_to_path(&store_path).unwrap();
+        let saved = fs::read_to_string(&store_path).unwrap();
+        assert!(saved.contains(PATH_IDENTITY_PREFIX));
+        assert!(!saved.contains(LEGACY_PATH_REPLACEMENT));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
