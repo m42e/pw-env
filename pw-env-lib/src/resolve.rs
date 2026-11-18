@@ -265,6 +265,21 @@ fn build_secret_cache_key(
     }
 }
 
+fn build_env_lookup_context<'a>(
+    env_file: &'a EnvFile,
+    config: &'a Config,
+    interaction: Option<&'a dyn ResolutionInteraction>,
+) -> ResolveContext<'a> {
+    let dir = env_file.project_path();
+    ResolveContext {
+        dir,
+        config,
+        project: detect_project_name(dir),
+        repository: detect_repository_remote(dir),
+        interaction,
+    }
+}
+
 /// Resolve all entries from an .env file to their secret values.
 /// Returns a map of KEY -> resolved_value.
 /// When `config.effective_source_all(dir)` is true, plaintext (non-secret) values from the
@@ -311,7 +326,8 @@ fn resolve_env_file_with_options(
     let started_at = Instant::now();
     let mut resolved = BTreeMap::new();
     let mut bitwarden_duration_ms = 0u128;
-    let source_all = config.effective_source_all(dir);
+    let lookup_dir = env_file.project_path();
+    let source_all = config.effective_source_all(lookup_dir);
     let entries = env_file.resolvable_entries();
 
     if entries.is_empty() && !source_all {
@@ -341,20 +357,13 @@ fn resolve_env_file_with_options(
 
     Config::ensure_secret_fetch_approved(env_file)?;
 
-    let project = detect_project_name(dir);
-    let repository = detect_repository_remote(dir);
+    let ctx = build_env_lookup_context(env_file, config, interaction);
+    let project = ctx.project.clone();
     debug!("Detected project name: {:?}", project);
 
-    let ctx = ResolveContext {
-        dir,
-        config,
-        project: project.clone(),
-        repository: repository.clone(),
-        interaction,
-    };
-    let mut secret_cache = SecretValueCache::load(config.effective_cache(dir));
+    let mut secret_cache = SecretValueCache::load(config.effective_cache(lookup_dir));
 
-    let default_backend_name = config.effective_backend(dir);
+    let default_backend_name = config.effective_backend(lookup_dir);
     info!(
         "Resolving {} entries using default backend '{}'",
         entries.len(),
@@ -882,6 +891,65 @@ mod tests {
         let name = detect_project_name(&subdir);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(name.as_deref(), Some("my-repo"));
+    }
+
+    #[test]
+    fn inherited_env_lookup_context_uses_the_approved_owner_repository() {
+        let root = unique_subdir("inherited-env-owner-context");
+        let owner = root.join("owner-project");
+        let nested = owner.join("nested-project");
+        fs::create_dir_all(owner.join(".git")).unwrap();
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        fs::write(
+            owner.join(".git/config"),
+            "[remote \"origin\"]\n url = git@github.com:example/owner.git\n",
+        )
+        .unwrap();
+        fs::write(
+            nested.join(".git/config"),
+            "[remote \"origin\"]\n url = git@github.com:example/nested.git\n",
+        )
+        .unwrap();
+        let env_path = owner.join(".env");
+        fs::write(&env_path, "API_KEY=\n").unwrap();
+        let env_file = EnvFile::parse(&env_path).unwrap();
+        let owner = owner.canonicalize().unwrap();
+        let nested = nested.canonicalize().unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults::default(),
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![
+                crate::config::ProjectOverride {
+                    path: owner.to_string_lossy().into_owned(),
+                    op: Some(crate::config::OpConfig {
+                        item: Some("owner-item".to_string()),
+                        ..crate::config::OpConfig::default()
+                    }),
+                    ..crate::config::ProjectOverride::default()
+                },
+                crate::config::ProjectOverride {
+                    path: nested.to_string_lossy().into_owned(),
+                    op: Some(crate::config::OpConfig {
+                        item: Some("nested-item".to_string()),
+                        ..crate::config::OpConfig::default()
+                    }),
+                    ..crate::config::ProjectOverride::default()
+                },
+            ],
+        };
+
+        let context = build_env_lookup_context(&env_file, &config, None);
+
+        assert_eq!(context.dir, owner);
+        assert_eq!(context.project.as_deref(), Some("owner-project"));
+        assert_eq!(
+            context.repository.as_deref(),
+            Some("git@github.com:example/owner.git")
+        );
+        assert_eq!(config.effective_item(context.dir), Some("owner-item"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
