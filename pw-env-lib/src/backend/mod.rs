@@ -3,9 +3,11 @@ pub mod gpg;
 pub mod op;
 
 use anyhow::{Context, Result};
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
@@ -154,6 +156,8 @@ pub trait Backend {
 }
 
 const EXTERNAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const EXTERNAL_COMMAND_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
+const EXTERNAL_COMMAND_STDERR_LIMIT: usize = 1024 * 1024;
 
 /// Run a password-manager subprocess with a hard upper bound on how long it
 /// may keep the resolver blocked. A hung CLI must not hang shell startup.
@@ -166,20 +170,117 @@ pub(crate) fn run_command_with_timeout(mut command: Command, context: &str) -> R
     wait_with_output_timeout(child, context)
 }
 
-pub(crate) fn wait_with_output_timeout(mut child: Child, context: &str) -> Result<Output> {
-    let started_at = Instant::now();
+pub(crate) fn wait_with_output_timeout(child: Child, context: &str) -> Result<Output> {
+    wait_with_output_timeout_limited(
+        child,
+        context,
+        EXTERNAL_COMMAND_TIMEOUT,
+        EXTERNAL_COMMAND_STDOUT_LIMIT,
+        EXTERNAL_COMMAND_STDERR_LIMIT,
+    )
+}
+
+enum PipeReadError {
+    LimitExceeded,
+    Io(io::Error),
+}
+
+enum PipeOutput {
+    Stdout(std::result::Result<Vec<u8>, PipeReadError>),
+    Stderr(std::result::Result<Vec<u8>, PipeReadError>),
+}
+
+fn read_pipe_limited(
+    mut pipe: impl Read,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, PipeReadError> {
+    let mut output = Vec::new();
+    let mut chunk = [0; 8192];
     loop {
-        if let Some(status) = child.try_wait().with_context(|| context.to_string())? {
-            let mut stdout = Vec::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_end(&mut stdout)
-                    .with_context(|| context.to_string())?;
+        let read = pipe.read(&mut chunk).map_err(PipeReadError::Io)?;
+        if read == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(read) > max_bytes {
+            return Err(PipeReadError::LimitExceeded);
+        }
+        output.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn wait_with_output_timeout_limited(
+    mut child: Child,
+    context: &str,
+    timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Result<Output> {
+    let (sender, receiver) = mpsc::channel();
+    let stdout_pipe = child.stdout.take().context("Child stdout was not piped")?;
+    let stderr_pipe = child.stderr.take().context("Child stderr was not piped")?;
+    let stdout_sender = sender.clone();
+    let stdout_reader = thread::spawn(move || {
+        let _ = stdout_sender.send(PipeOutput::Stdout(read_pipe_limited(
+            stdout_pipe,
+            stdout_limit,
+        )));
+    });
+    let stderr_reader = thread::spawn(move || {
+        let _ = sender.send(PipeOutput::Stderr(read_pipe_limited(
+            stderr_pipe,
+            stderr_limit,
+        )));
+    });
+
+    let started_at = Instant::now();
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(child_status)) => status = Some(child_status),
+                Ok(None) => {}
+                Err(error) => {
+                    terminate_child(&mut child);
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(error).with_context(|| context.to_string());
+                }
             }
-            let mut stderr = Vec::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_end(&mut stderr)
-                    .with_context(|| context.to_string())?;
+        }
+
+        while let Ok(output) = receiver.try_recv() {
+            match output {
+                PipeOutput::Stdout(Ok(bytes)) => stdout = Some(bytes),
+                PipeOutput::Stderr(Ok(bytes)) => stderr = Some(bytes),
+                PipeOutput::Stdout(Err(PipeReadError::LimitExceeded)) => {
+                    terminate_child(&mut child);
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    anyhow::bail!("{context} exceeded stdout output limit of {stdout_limit} bytes");
+                }
+                PipeOutput::Stderr(Err(PipeReadError::LimitExceeded)) => {
+                    terminate_child(&mut child);
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    anyhow::bail!("{context} exceeded stderr output limit of {stderr_limit} bytes");
+                }
+                PipeOutput::Stdout(Err(PipeReadError::Io(error)))
+                | PipeOutput::Stderr(Err(PipeReadError::Io(error))) => {
+                    terminate_child(&mut child);
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(error).with_context(|| context.to_string());
+                }
             }
+        }
+
+        if let (Some(status), Some(stdout), Some(stderr)) =
+            (status.take(), stdout.take(), stderr.take())
+        {
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             return Ok(Output {
                 status,
                 stdout,
@@ -187,17 +288,20 @@ pub(crate) fn wait_with_output_timeout(mut child: Child, context: &str) -> Resul
             });
         }
 
-        if started_at.elapsed() >= EXTERNAL_COMMAND_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!(
-                "{context} timed out after {} seconds",
-                EXTERNAL_COMMAND_TIMEOUT.as_secs()
-            );
+        if started_at.elapsed() >= timeout {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            anyhow::bail!("{context} timed out after {} seconds", timeout.as_secs());
         }
 
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Create a backend instance by name.
@@ -214,6 +318,23 @@ pub fn create_backend(name: &str) -> Result<Box<dyn Backend>> {
 mod tests {
     use super::*;
     use crate::config::{Config, Defaults, LogConfig, UpdateConfig};
+    use std::io::Write;
+
+    const PIPE_TEST_MODE_ENV: &str = "PW_ENV_PIPE_TEST_MODE";
+
+    fn spawn_pipe_test_child(mode: &str) -> Child {
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "backend::tests::command_output_pipe_child",
+                "--nocapture",
+            ])
+            .env(PIPE_TEST_MODE_ENV, mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
 
     fn make_config() -> Config {
         Config {
@@ -222,6 +343,118 @@ mod tests {
             updates: UpdateConfig::default(),
             projects: vec![],
         }
+    }
+
+    #[test]
+    fn command_output_pipe_child() {
+        let Ok(mode) = std::env::var(PIPE_TEST_MODE_ENV) else {
+            return;
+        };
+
+        match mode.as_str() {
+            "large" => {
+                let stderr = thread::spawn(|| {
+                    let mut stream = io::stderr().lock();
+                    stream.write_all(&vec![b'e'; 256 * 1024]).unwrap();
+                });
+                io::stdout()
+                    .lock()
+                    .write_all(&vec![b'o'; 256 * 1024])
+                    .unwrap();
+                stderr.join().unwrap();
+            }
+            "over-limit" => {
+                let _ = io::stdout()
+                    .lock()
+                    .write_all(&vec![b'o'; EXTERNAL_COMMAND_STDOUT_LIMIT + 1]);
+            }
+            "nonzero" => {
+                io::stdout().lock().write_all(b"partial output").unwrap();
+                io::stderr().lock().write_all(b"expected failure").unwrap();
+                panic!("child command failed");
+            }
+            "hang" => {
+                io::stdout().lock().write_all(b"partial-secret").unwrap();
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+            other => panic!("unknown pipe test mode: {other}"),
+        }
+    }
+
+    #[test]
+    fn wait_with_output_timeout_drains_large_stdout_and_stderr() {
+        let child = spawn_pipe_test_child("large");
+
+        let output = wait_with_output_timeout_limited(
+            child,
+            "large output test",
+            Duration::from_secs(10),
+            EXTERNAL_COMMAND_STDOUT_LIMIT,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stdout.len() >= 256 * 1024);
+        assert!(output.stderr.len() >= 256 * 1024);
+    }
+
+    #[test]
+    fn wait_with_output_timeout_rejects_over_limit_output_without_contents() {
+        let child = spawn_pipe_test_child("over-limit");
+
+        let error = wait_with_output_timeout_limited(
+            child,
+            "oversized output test",
+            Duration::from_secs(10),
+            1024,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("stdout output limit of 1024 bytes")
+        );
+        assert!(!error.to_string().contains("partial-secret"));
+    }
+
+    #[test]
+    fn wait_with_output_timeout_preserves_nonzero_child_status_and_output() {
+        let child = spawn_pipe_test_child("nonzero");
+
+        let output = wait_with_output_timeout_limited(
+            child,
+            "nonzero output test",
+            Duration::from_secs(10),
+            EXTERNAL_COMMAND_STDOUT_LIMIT,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+        )
+        .unwrap();
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("partial output"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("expected failure"));
+    }
+
+    #[test]
+    fn wait_with_output_timeout_kills_hung_child_without_exposing_partial_output() {
+        let child = spawn_pipe_test_child("hang");
+
+        let error = wait_with_output_timeout_limited(
+            child,
+            "hung output test",
+            Duration::from_millis(100),
+            EXTERNAL_COMMAND_STDOUT_LIMIT,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(!error.to_string().contains("partial-secret"));
     }
 
     #[test]
