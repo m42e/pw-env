@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -648,11 +648,17 @@ fn resolve_env_file_with_options(
         }
     }
 
-    // When source_all is enabled, include plaintext (non-secret) values in the output.
-    // Secret-resolved entries take precedence; plaintext values fill in the rest.
+    // When source_all is enabled, include plaintext values only for names without
+    // a managed declaration. A failed managed lookup must remain unresolved.
     if source_all {
+        let managed_keys = entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<BTreeSet<_>>();
         for entry in env_file.entries() {
-            if let EntryKind::Plaintext(value) = &entry.kind {
+            if let EntryKind::Plaintext(value) = &entry.kind
+                && !managed_keys.contains(entry.key.as_str())
+            {
                 resolved
                     .entry(entry.key.clone())
                     .or_insert_with(|| value.clone());
@@ -1302,6 +1308,49 @@ branch "broken"]
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn source_all_does_not_use_plaintext_duplicate_when_backend_lookup_fails() {
+        let temp = unique_subdir("source-all-duplicate-backend-failure");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            &env_path,
+            "API_KEY=op://vault/item/api-key\nAPI_KEY=plaintext-fallback\nPLAIN_VALUE=available\n",
+        )
+        .unwrap();
+
+        let env_file = EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                source_all: true,
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let op_script = "#!/bin/sh\nexit 1\n";
+
+        let (strict, partial) =
+            with_approval_and_mock_binaries(Some(op_script), None, None, &env_path, || {
+                (
+                    resolve_env_file_with_interaction(&env_file, &config, &temp, None),
+                    resolve_env_file_allow_missing(&env_file, &config, &temp, None),
+                )
+            });
+
+        let _ = fs::remove_dir_all(&temp);
+        let strict_error = strict.expect_err("strict resolution must reject the failed secret");
+        assert!(strict_error.to_string().contains("API_KEY"));
+        let partial = partial.expect("allow-missing should preserve independent values");
+        assert_eq!(partial.get("API_KEY"), None);
+        assert_eq!(
+            partial.get("PLAIN_VALUE").map(String::as_str),
+            Some("available")
+        );
+    }
+
     #[test]
     fn resolve_env_file_without_source_all_omits_plaintext_entries() {
         let temp = unique_subdir("resolve-no-source-all-plaintext");
@@ -1584,14 +1633,21 @@ branch "broken"]
         let temp = unique_subdir("resolve-op-ref");
         let env_path = temp.join(".env");
         fs::create_dir_all(&temp).unwrap();
-        fs::write(&env_path, "API_KEY=op://My Vault/my-item/field\n").unwrap();
+        fs::write(
+            &env_path,
+            "API_KEY=op://My Vault/my-item/field\nAPI_KEY=plaintext-fallback\nPLAIN_VALUE=available\n",
+        )
+        .unwrap();
 
         let op_script =
             "#!/bin/sh\nif [ \"$1\" = 'read' ]; then echo 'op-ref-secret'; else exit 1; fi\n";
 
         let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
         let config = Config {
-            defaults: crate::config::Defaults::default(),
+            defaults: crate::config::Defaults {
+                source_all: true,
+                ..crate::config::Defaults::default()
+            },
             log: crate::config::LogConfig::default(),
             updates: crate::config::UpdateConfig::default(),
             projects: vec![],
@@ -1607,6 +1663,10 @@ branch "broken"]
             resolved.get("API_KEY").map(String::as_str),
             Some("op-ref-secret"),
             "op:// reference should be forwarded to 'op read'"
+        );
+        assert_eq!(
+            resolved.get("PLAIN_VALUE").map(String::as_str),
+            Some("available")
         );
     }
 

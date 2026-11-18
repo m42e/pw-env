@@ -145,6 +145,9 @@ the child process alongside the secret values. Plaintext-only files also require
 values can affect shell startup and child-process behavior. The default is `false`, which means only backend-resolved
 entries are exported.
 
+When the same key has both a managed backend entry and a plaintext entry, the plaintext value does not substitute for
+the managed lookup if that lookup fails.
+
 When `[defaults.cache]` or `[cache]` is enabled, pw-env stores resolved secret values in the OS keyring when that
 secure store is available. If the keyring is unavailable, pw-env keeps resolving from the backend normally and simply
 skips secret-value caching for that run.
