@@ -30,7 +30,7 @@ Behavior:
   - Only prepares notarization secrets when --apple-id and --team-id are provided.
   - The app password is prompted unless --app-password-fd is supplied.
   - With --set-gh-secrets, uploads the prepared values as repository secrets.
-  - Without --set-gh-secrets, prints KEY=VALUE lines so you can inspect them.
+  - Without --set-gh-secrets, prints KEY=VALUE lines or writes them to --env-file.
   - Password values are never accepted as command-line arguments.
 EOF
 }
@@ -53,11 +53,120 @@ base64_no_wrap() {
   fail "unable to encode base64 on this system"
 }
 
-write_output() {
-  if [ -n "$ENV_FILE" ]; then
-    printf '%s\n' "$1" >> "$ENV_FILE"
-  else
-    printf '%s\n' "$1"
+write_secret_lines() {
+  printf 'APPLE_CERT_BASE64=%s\n' "$CERT_BASE64"
+  printf 'APPLE_CERT_PASSWORD=%s\n' "$CERT_PASSWORD"
+  printf 'APPLE_SIGNING_IDENTITY=%s\n' "$SIGNING_IDENTITY"
+
+  if [ "$HAS_NOTARIZATION" -eq 1 ]; then
+    printf 'APPLE_ID=%s\n' "$APPLE_ID"
+    printf 'APPLE_APP_PASSWORD=%s\n' "$APP_PASSWORD"
+    printf 'APPLE_TEAM_ID=%s\n' "$TEAM_ID"
+  fi
+}
+
+verify_safe_directory() {
+  local directory directory_mode directory_owner mode_value permissions sticky_bits current_uid os_name direct_directory
+
+  directory="$1"
+  current_uid=$(id -u) || fail "unable to determine current user"
+  os_name=$(uname -s) || fail "unable to determine operating system"
+  direct_directory=1
+
+  while :; do
+    if directory_mode=$(stat -f '%Lp' "$directory" 2>/dev/null); then
+      directory_owner=$(stat -f '%u' "$directory" 2>/dev/null) || fail "unable to inspect export directory"
+    else
+      directory_mode=$(stat -c '%a' "$directory" 2>/dev/null) || fail "unable to inspect export directory"
+      directory_owner=$(stat -c '%u' "$directory" 2>/dev/null) || fail "unable to inspect export directory"
+    fi
+    case "$directory_mode" in
+      *[!0-7]*|'') fail "unable to inspect export directory permissions" ;;
+    esac
+    mode_value=$((8#$directory_mode))
+    permissions=$((mode_value & 0777))
+    sticky_bits=$((mode_value & 01000))
+    if [ "$direct_directory" -eq 1 ]; then
+      if [ "$directory_owner" != "$current_uid" ] || [ $((permissions & 0022)) -ne 0 ]; then
+        fail "export directory must be owned by the current user and not writable by others"
+      fi
+    else
+      if [ "$directory_owner" != "$current_uid" ] && [ "$directory_owner" != 0 ]; then
+        fail "export directory ancestors must be owned by the current user or root"
+      fi
+      if [ $((permissions & 0022)) -ne 0 ] && [ "$sticky_bits" -eq 0 ]; then
+        fail "export directory ancestors must not be writable by others"
+      fi
+    fi
+    if [ "$os_name" = Darwin ] && ls -lde "$directory" | awk '/^[[:space:]]*[0-9]+:.*[[:space:]]allow[[:space:]].*(add_file|add_subdirectory|delete_child|delete|write|append|writeattr|writeextattr|writesecurity|chown)(,|[[:space:]])/ { unsafe = 1 } END { exit !unsafe }'; then
+      fail "export directories with access-control write grants are not supported"
+    fi
+    [ "$directory" = / ] && break
+    direct_directory=0
+    directory="${directory%/*}"
+    [ -n "$directory" ] || directory="/"
+  done
+}
+
+write_private_env_file() {
+  local output_path output_dir output_name resolved_dir temporary_dir temporary_file
+
+  case "$ENV_FILE" in
+    /*) output_path="$ENV_FILE" ;;
+    *) output_path="./$ENV_FILE" ;;
+  esac
+
+  if [ -L "$output_path" ]; then
+    fail "refusing symbolic-link export destination"
+  fi
+  if [ -e "$output_path" ] && [ ! -f "$output_path" ]; then
+    fail "export destination must be a regular file"
+  fi
+
+  output_dir="${output_path%/*}"
+  output_name="${output_path##*/}"
+  [ -n "$output_dir" ] || output_dir="/"
+  [ -n "$output_name" ] || fail "export destination must name a file"
+  [ -d "$output_dir" ] || fail "export directory does not exist"
+
+  resolved_dir=$(cd "$output_dir" && pwd -P) || fail "unable to resolve export directory"
+  verify_safe_directory "$resolved_dir"
+
+  output_path="$resolved_dir/$output_name"
+  if [ -L "$output_path" ]; then
+    fail "refusing symbolic-link export destination"
+  fi
+  if [ -e "$output_path" ] && [ ! -f "$output_path" ]; then
+    fail "export destination must be a regular file"
+  fi
+
+  temporary_dir=$(mktemp -d "$resolved_dir/.pw-env-secrets.XXXXXX") || fail "unable to create private export directory"
+  OUTPUT_TEMP_DIR="$temporary_dir"
+  if [ "$(uname -s)" = Darwin ]; then
+    chmod -N "$temporary_dir" || fail "unable to remove inherited export-directory access controls"
+  fi
+  chmod 700 "$temporary_dir" || fail "unable to secure temporary export directory"
+  temporary_file="$temporary_dir/secrets"
+  (umask 077; write_secret_lines > "$temporary_file") || fail "unable to write export file"
+  if [ "$(uname -s)" = Darwin ]; then
+    chmod -N "$temporary_file" || fail "unable to remove inherited export-file access controls"
+  fi
+  chmod 600 "$temporary_file" || fail "unable to secure export file"
+
+  if [ -L "$output_path" ]; then
+    fail "refusing symbolic-link export destination"
+  fi
+  if [ -e "$output_path" ] && [ ! -f "$output_path" ]; then
+    fail "export destination must be a regular file"
+  fi
+  mv -f "$temporary_file" "$output_path" || fail "unable to replace export file"
+  rmdir "$temporary_dir" || fail "unable to remove private export directory"
+  OUTPUT_TEMP_DIR=""
+}
+
+cleanup_temporary_output() {
+  if [ -n "${OUTPUT_TEMP_DIR:-}" ] && [ -d "$OUTPUT_TEMP_DIR" ]; then
+    rm -rf "$OUTPUT_TEMP_DIR"
   fi
 }
 
@@ -109,7 +218,9 @@ TEAM_ID=""
 REPO=""
 SET_GH_SECRETS=0
 ENV_FILE=""
+OUTPUT_TEMP_DIR=""
 SECRET_VALUE=""
+trap cleanup_temporary_output EXIT
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -191,10 +302,6 @@ if [ "$HAS_NOTARIZATION" -eq 1 ]; then
   APP_PASSWORD="$SECRET_VALUE"
 fi
 
-if [ -n "$ENV_FILE" ]; then
-  : > "$ENV_FILE"
-fi
-
 CERT_BASE64=$(base64_no_wrap < "$CERT_PATH")
 
 if [ "$SET_GH_SECRETS" -eq 1 ]; then
@@ -217,16 +324,9 @@ if [ "$SET_GH_SECRETS" -eq 1 ]; then
   exit 0
 fi
 
-write_output "APPLE_CERT_BASE64=$CERT_BASE64"
-write_output "APPLE_CERT_PASSWORD=$CERT_PASSWORD"
-write_output "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY"
-
-if [ "$HAS_NOTARIZATION" -eq 1 ]; then
-  write_output "APPLE_ID=$APPLE_ID"
-  write_output "APPLE_APP_PASSWORD=$APP_PASSWORD"
-  write_output "APPLE_TEAM_ID=$TEAM_ID"
-fi
-
 if [ -n "$ENV_FILE" ]; then
+  write_private_env_file
   echo "Wrote secrets to $ENV_FILE"
+else
+  write_secret_lines
 fi

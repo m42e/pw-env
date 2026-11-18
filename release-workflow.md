@@ -155,7 +155,7 @@ To inspect the generated values without uploading them, securely enter the certi
   --identity 'Developer ID Application: Example Corp (TEAMID1234)'
 ```
 
-To write the generated values to a local env file instead of stdout:
+To write the generated values to a local env file instead of stdout, use a private directory you own. The helper creates or replaces the file with mode 0600 and refuses a symbolic-link destination:
 
 ```bash
 ./scripts/setup-apple-signing-secrets.sh \
