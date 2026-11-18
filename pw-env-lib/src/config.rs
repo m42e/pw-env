@@ -12,6 +12,7 @@ pub use crate::file_io::{
 };
 
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
+const UNAPPROVED_PROJECT_OVERRIDE_COMMAND: &str = "\0";
 
 fn base_dir_from_env(
     env_value: Option<PathBuf>,
@@ -445,24 +446,34 @@ impl Config {
     {
         let mut config = Self::load()?;
 
-        if let Some((project_dir, override_path)) = Self::project_override_file(dir)
-            && let Some(local_override) =
-                ProjectDirectoryOverride::load_if_approved_with(&override_path, &mut approve)?
-        {
-            config.projects.push(ProjectOverride {
-                path: project_dir.to_string_lossy().into_owned(),
-                backend: local_override.backend,
-                search_parent_env: local_override.search_parent_env,
-                source_all: local_override.source_all,
-                warn_missing: local_override.warn_missing,
-                fallback_example_env: local_override.fallback_example_env,
-                cache: local_override.cache,
-                op: local_override.op,
-                bw: local_override.bw,
-                gpg: local_override.gpg,
-                item: local_override.item,
-                commands: local_override.commands,
-            });
+        if let Some((project_dir, override_path)) = Self::project_override_file(dir) {
+            let project_path = project_dir.to_string_lossy().into_owned();
+            match ProjectDirectoryOverride::load_if_approved_with(&override_path, &mut approve)? {
+                Some(local_override) => config.projects.push(ProjectOverride {
+                    path: project_path,
+                    backend: local_override.backend,
+                    search_parent_env: local_override.search_parent_env,
+                    source_all: local_override.source_all,
+                    warn_missing: local_override.warn_missing,
+                    fallback_example_env: local_override.fallback_example_env,
+                    cache: local_override.cache,
+                    op: local_override.op,
+                    bw: local_override.bw,
+                    gpg: local_override.gpg,
+                    item: local_override.item,
+                    commands: local_override.commands,
+                }),
+                None => {
+                    let mut blocked_override = config
+                        .project_for(&project_dir)
+                        .cloned()
+                        .unwrap_or_default();
+                    blocked_override.path = project_path;
+                    blocked_override.commands =
+                        vec![UNAPPROVED_PROJECT_OVERRIDE_COMMAND.to_string()];
+                    config.projects.push(blocked_override);
+                }
+            }
         }
 
         Ok(config)
@@ -734,6 +745,12 @@ impl Config {
         self.project_for(dir)
             .map(|project| project.commands.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn project_override_requires_approval(&self, dir: &Path) -> bool {
+        self.effective_commands(dir)
+            .iter()
+            .any(|command| command == UNAPPROVED_PROJECT_OVERRIDE_COMMAND)
     }
 
     pub fn effective_search_parent_env(&self, dir: &Path) -> bool {
@@ -2480,6 +2497,52 @@ backend = "op"
         let config = result.unwrap();
         assert_eq!(callback_calls, 1);
         assert_eq!(config.effective_backend(&test_dir), "gpg");
+    }
+
+    #[test]
+    fn unapproved_local_override_marks_automatic_environment_use_blocked() {
+        let _guard = crate::backend::MOCK_PATH_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let test_dir = unique_test_dir("load-for-dir-unapproved");
+        let project_path = test_dir.join("project");
+        let config_home = test_dir.join("config");
+        fs::create_dir_all(&project_path).unwrap();
+        let project_dir = project_path.canonicalize().unwrap();
+        fs::create_dir_all(config_home.join("pw-env")).unwrap();
+        fs::write(
+            project_dir.join(PROJECT_OVERRIDE_FILE_NAME),
+            "backend = \"gpg\"\ncommands = [\"cargo\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            config_home.join("pw-env").join("config.toml"),
+            format!(
+                "[defaults]\nbackend = \"bw\"\n\n[[projects]]\npath = \"{}\"\nbackend = \"op\"\nsource_all = true\ncommands = [\"git\"]\n",
+                project_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config_home) };
+        set_test_approval_store(&test_dir);
+        let blocked = Config::load_for_dir_with_approval(&project_dir, |_, _| Ok(false)).unwrap();
+        let approved = Config::load_for_dir_with_approval(&project_dir, |_, _| Ok(true)).unwrap();
+        match old_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        TEST_APPROVAL_STORE_PATH.with(|value| *value.borrow_mut() = None);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        assert!(blocked.project_override_requires_approval(&project_dir));
+        assert_eq!(blocked.effective_commands(&project_dir), ["\0"]);
+        assert_eq!(blocked.effective_backend(&project_dir), "op");
+        assert!(blocked.effective_source_all(&project_dir));
+        assert!(!approved.project_override_requires_approval(&project_dir));
+        assert_eq!(approved.effective_commands(&project_dir), ["cargo"]);
+        assert_eq!(approved.effective_backend(&project_dir), "gpg");
     }
 
     #[test]

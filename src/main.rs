@@ -431,7 +431,7 @@ fn prompt_project_override(path: &Path, previously_approved: bool) -> Result<boo
             "has not been approved yet"
         };
         eprintln!(
-            "pw-env: project override {} {}. Skipping it until you approve the current file contents in an interactive session.",
+            "pw-env: project override {} {}. Automatic environment loading is suspended until you approve or remove it.",
             path.display(),
             state
         );
@@ -450,7 +450,10 @@ fn prompt_project_override(path: &Path, previously_approved: bool) -> Result<boo
     let input = read_prompt_line()?;
     let approved = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
     if !approved {
-        eprintln!("Skipping project override: {}", path.display());
+        eprintln!(
+            "Skipping project override: {}. Automatic environment loading is suspended until you approve or remove it.",
+            path.display()
+        );
         return Ok(false);
     }
     Ok(true)
@@ -506,6 +509,12 @@ fn resolve_environment(
     interaction: Option<&dyn backend::ResolutionInteraction>,
     allow_missing: bool,
 ) -> Result<std::collections::BTreeMap<String, String>> {
+    if config.project_override_requires_approval(dir) {
+        anyhow::bail!(
+            "pw-env: project override is not approved; approve or remove it before using environment values"
+        );
+    }
+
     let entries = env_file.entries();
     let has_plaintext_values = entries
         .iter()
@@ -1038,6 +1047,13 @@ fn build_hook_output_with_interaction(
     path_var: Option<std::ffi::OsString>,
     interaction: Option<&dyn backend::ResolutionInteraction>,
 ) -> Result<String> {
+    if config.project_override_requires_approval(dir) {
+        debug!(
+            "Skipping automatic environment loading because the project override is not approved"
+        );
+        return Ok(String::new());
+    }
+
     let env_path = match find_env_path(dir, config) {
         Some(path) => path,
         None => {
@@ -2394,6 +2410,38 @@ mod tests {
         let result =
             build_hook_output(temp_dir.path(), output::ShellSyntax::Posix, &config, None).unwrap();
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn unapproved_project_override_clears_hook_state_and_blocks_exports() {
+        let temp_dir = TempDir::new().unwrap();
+        let canonical = temp_dir.path().canonicalize().unwrap();
+        let env_path = canonical.join(".env");
+        std::fs::write(&env_path, "API_KEY=plaintext-value\n").unwrap();
+        let config = config::Config {
+            defaults: config::Defaults::default(),
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig::default(),
+            projects: vec![config::ProjectOverride {
+                path: canonical.to_string_lossy().into_owned(),
+                commands: vec!["\0".to_string()],
+                ..config::ProjectOverride::default()
+            }],
+        };
+
+        let hook_output = build_hook_output(&canonical, output::ShellSyntax::Posix, &config, None)
+            .expect("hook should return an empty update for an unapproved override");
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let export_result = resolve_environment(&env_file, &config, &canonical, None, false);
+
+        assert_eq!(hook_output, "");
+        assert!(export_result.is_err());
+        assert!(
+            export_result
+                .unwrap_err()
+                .to_string()
+                .contains("not approved")
+        );
     }
 
     #[test]

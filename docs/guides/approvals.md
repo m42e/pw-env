@@ -25,8 +25,9 @@ pw-env approvals revoke .
 pw-env approvals list
 ```
 
-If the file changes after approval, pw-env prompts again in interactive sessions. In noninteractive sessions the changed
-override is skipped instead of being loaded silently.
+If the file changes after approval, pw-env prompts again in interactive sessions. When the current override is not
+approved, automatic environment loading is suspended until you approve or remove the file. Commands that request
+environment values fail closed while the override is unapproved.
 
 ## Secret-fetch approvals
 
