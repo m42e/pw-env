@@ -1140,8 +1140,10 @@ fn format_active_dir_tracking(active_dir: &Path, shell_syntax: output::ShellSynt
             format!("set -g __pw_env_active_dir '{escaped}'")
         }
         output::ShellSyntax::PowerShell => {
-            let escaped = active_dir.replace('\'', "''");
-            format!("$global:__pw_env_active_dir = '{escaped}'")
+            format!(
+                "$global:__pw_env_active_dir = {}",
+                output::powershell_string_expression(&active_dir)
+            )
         }
     }
 }
@@ -2574,6 +2576,19 @@ mod tests {
             format_active_dir_tracking(active_dir, output::ShellSyntax::Fish),
             expected
         );
+    }
+
+    #[test]
+    fn format_active_dir_tracking_powershell_encodes_path_as_data() {
+        let active_dir = Path::new("/tmp/project ‘; Write-Output INJECTED; ’");
+        let tracking = format_active_dir_tracking(active_dir, output::ShellSyntax::PowerShell);
+
+        assert!(tracking.starts_with(
+            "$global:__pw_env_active_dir = [System.Text.Encoding]::UTF8.GetString([byte[]]@("
+        ));
+        assert!(!tracking.contains("Write-Output"));
+        assert!(!tracking.contains('‘'));
+        assert!(!tracking.contains('’'));
     }
 
     #[test]

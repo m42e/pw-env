@@ -32,9 +32,12 @@ pub fn format_exports(vars: &BTreeMap<String, String>, shell: ShellSyntax) -> St
                 output.push_str(&format!("set -gx {key} '{escaped}'\n"));
             }
             ShellSyntax::PowerShell => {
-                // $env:KEY = 'value' with PowerShell single-quote escaping: ' -> ''
-                let escaped = powershell_escape_single_quote(value);
-                output.push_str(&format!("$env:{key} = '{escaped}'\n"));
+                // Keep data out of PowerShell source literals. PowerShell also treats
+                // typographic single quotes as delimiters, so emit only numeric bytes.
+                output.push_str(&format!(
+                    "$env:{key} = {}\n",
+                    powershell_string_expression(value)
+                ));
             }
         }
     }
@@ -141,6 +144,16 @@ fn powershell_escape_single_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+pub(crate) fn powershell_string_expression(value: &str) -> String {
+    let bytes = value
+        .as_bytes()
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[System.Text.Encoding]::UTF8.GetString([byte[]]@({bytes}))")
+}
+
 fn format_powershell_array(values: &[String]) -> String {
     if values.is_empty() {
         "@()".to_string()
@@ -244,7 +257,33 @@ mod tests {
         let mut vars = BTreeMap::new();
         vars.insert("DB_PASS".to_string(), "sec'ret".to_string());
         let output = format_exports(&vars, ShellSyntax::PowerShell);
-        assert!(output.contains("$env:DB_PASS = 'sec''ret'\n"));
+        assert!(output.contains(
+            "$env:DB_PASS = [System.Text.Encoding]::UTF8.GetString([byte[]]@(115, 101, 99, 39, 114, 101, 116))\n"
+        ));
+        assert!(!output.contains("sec'ret"));
+    }
+
+    #[test]
+    fn powershell_export_encodes_smart_quotes_and_shell_syntax_as_data() {
+        let value = "‘; Invoke-Expression 'Write-Output INJECTED'; ’";
+        let mut vars = BTreeMap::new();
+        vars.insert("VALUE".to_string(), value.to_string());
+
+        let output = format_exports(&vars, ShellSyntax::PowerShell);
+        assert!(output.starts_with(
+            "$env:VALUE = [System.Text.Encoding]::UTF8.GetString([byte[]]@(226, 128, 152"
+        ));
+        assert!(!output.contains(value));
+        assert!(!output.contains('‘'));
+        assert!(!output.contains('’'));
+    }
+
+    #[test]
+    fn powershell_string_expression_handles_empty_strings() {
+        assert_eq!(
+            powershell_string_expression(""),
+            "[System.Text.Encoding]::UTF8.GetString([byte[]]@())"
+        );
     }
 
     #[test]
