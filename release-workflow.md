@@ -126,28 +126,32 @@ That password becomes `APPLE_APP_PASSWORD`, and the Apple ID email becomes `APPL
 
 ## Helper Script
 
-Use the helper script to prepare the secrets or upload them directly with GitHub CLI:
+The helper prompts for passwords without echo. For automation, pass each password through an inherited file descriptor; never put a password in the command line:
 
 ```bash
+read -rsp 'Certificate export password: ' CERT_PASSWORD; printf '\n'
+read -rsp 'Apple app-specific password: ' APP_PASSWORD; printf '\n'
+exec 3<<<"$CERT_PASSWORD"
+exec 4<<<"$APP_PASSWORD"
 ./scripts/setup-apple-signing-secrets.sh \
   --cert ~/Certificates/developer-id-application.p12 \
-  --cert-password 'export-password' \
+  --cert-password-fd 3 \
   --identity 'Developer ID Application: Example Corp (TEAMID1234)' \
   --apple-id 'developer@example.com' \
-  --app-password 'abcd-efgh-ijkl-mnop' \
+  --app-password-fd 4 \
   --team-id 'TEAMID1234' \
   --repo m42e/pw-env \
   --set-gh-secrets
+unset CERT_PASSWORD APP_PASSWORD
 ```
 
-If you only want signing and not notarization yet, omit `--apple-id`, `--app-password`, and `--team-id`.
+If you only want signing and not notarization, omit the Apple ID, app-password descriptor, and team ID. Without an app-password descriptor, the helper prompts securely when notarization is configured.
 
-To inspect the generated values without uploading them:
+To inspect the generated values without uploading them, securely enter the certificate password at the prompt:
 
 ```bash
 ./scripts/setup-apple-signing-secrets.sh \
   --cert ~/Certificates/developer-id-application.p12 \
-  --cert-password 'export-password' \
   --identity 'Developer ID Application: Example Corp (TEAMID1234)'
 ```
 
@@ -156,7 +160,6 @@ To write the generated values to a local env file instead of stdout:
 ```bash
 ./scripts/setup-apple-signing-secrets.sh \
   --cert ~/Certificates/developer-id-application.p12 \
-  --cert-password 'export-password' \
   --identity 'Developer ID Application: Example Corp (TEAMID1234)' \
   --env-file .apple-signing-secrets.env
 ```
