@@ -267,10 +267,10 @@ function __pw_env_hook --on-variable PWD
         return
     end
 
-    set -l _pw_env_output (pw-env hook $current_dir --shell fish)
+    set -l _pw_env_output (pw-env hook $current_dir --shell fish | string collect)
     if test -n "$_pw_env_output"
         __pw_env_clear_state
-        eval $_pw_env_output
+        eval "$_pw_env_output"
         return
     end
 
@@ -434,7 +434,8 @@ mod tests {
         assert!(hook.contains("pw-env hook"));
         assert!(hook.contains("pw-env exec"));
         assert!(hook.contains("__pw_env_is_within_active_dir"));
-        assert!(hook.contains("eval $_pw_env_output"));
+        assert!(hook.contains("pw-env hook $current_dir --shell fish | string collect"));
+        assert!(hook.contains("eval \"$_pw_env_output\""));
     }
 
     #[test]
