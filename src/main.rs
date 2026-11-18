@@ -1707,7 +1707,9 @@ ttl_hours = 4
 # Default Bitwarden folder to search in
 # folder = "env-secrets"
 # Default Bitwarden organization
-# organization = ""
+# organization = "<organization-id>"
+# Default Bitwarden organization collection ID (requires organization)
+# collection = "<collection-id>"
 # Default item name — if set, keys are resolved as custom fields on this item
 # item = "project-env"
 # Minimum seconds between automatic `bw sync` calls (minimum and default: 3600)

@@ -262,6 +262,9 @@ pub struct BwConfig {
     pub folder: Option<String>,
     #[serde(default)]
     pub organization: Option<String>,
+    /// Collection ID used when reading or creating organization-owned items.
+    #[serde(default)]
+    pub collection: Option<String>,
     /// Item name to look up keys as fields (if set, keys are resolved as custom fields of this item)
     #[serde(default)]
     pub item: Option<String>,
@@ -278,6 +281,7 @@ impl Default for BwConfig {
         Self {
             folder: None,
             organization: None,
+            collection: None,
             item: None,
             sync_throttle_secs: default_bw_sync_throttle_secs(),
         }

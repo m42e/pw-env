@@ -43,7 +43,9 @@ ttl_hours = 4
 # Default Bitwarden folder to search in
 # folder = "env-secrets"
 # Default Bitwarden organization
-# organization = ""
+# organization = "<organization-id>"
+# Default Bitwarden organization collection ID (requires organization)
+# collection = "<collection-id>"
 # Default item name - if set, keys are resolved as custom fields on this item
 # item = "project-env"
 
@@ -99,12 +101,19 @@ check_interval_hours = 24
 | `[defaults.cache]` | `enabled`, `ttl_hours` | Enables OS-keyring caching of resolved secrets and sets the expiry window |
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings; `vault` may use a configured alias |
 | `[defaults.op.vault_aliases]` | `<alias> = <vault>` | Maps user-friendly 1Password vault aliases to real vault names; also applies to `op://<alias>/...` references |
-| `[defaults.bw]` | `folder`, `organization`, `item` | Default Bitwarden lookup settings |
+| `[defaults.bw]` | `folder`, `organization`, `collection`, `item` | Default Bitwarden lookup settings; organization items use an organization ID and optional collection ID |
 | `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
 | `[[projects]]` | `path`, `backend`, `search_parent_env`, `source_all`, `fallback_example_env`, `item`, `commands` | Per-path overrides; most specific path prefix wins |
 | `[projects.cache]`, `[projects.op]`, `[projects.bw]`, `[projects.gpg]` | backend-specific keys | Extra settings for the most recent `[[projects]]` block |
+
+Bitwarden `organization` and `collection` values are IDs from `bw list organizations` and
+`bw list org-collections --organizationid <organization-id>`. A collection requires an
+organization. Organization-scoped configuration cannot be combined with the personal
+vault `folder` setting. Reads are restricted to the configured organization and, when
+set, collection. New organization items require a collection; without one, reads and
+updates can still use existing items owned by the configured organization.
 
 ## Valid backend values
 

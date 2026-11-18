@@ -251,6 +251,7 @@ struct ConfigWizardState {
     op_item: Option<String>,
     bw_folder: Option<String>,
     bw_organization: Option<String>,
+    bw_collection: Option<String>,
     bw_item: Option<String>,
     bw_sync_throttle_secs: u64,
     gpg_file_pattern: String,
@@ -278,6 +279,7 @@ impl ConfigWizardState {
             op_item: config.defaults.op.item.clone(),
             bw_folder: config.defaults.bw.folder.clone(),
             bw_organization: config.defaults.bw.organization.clone(),
+            bw_collection: config.defaults.bw.collection.clone(),
             bw_item: config.defaults.bw.item.clone(),
             bw_sync_throttle_secs: config.defaults.bw.sync_throttle_secs,
             gpg_file_pattern: config.defaults.gpg.file_pattern.clone(),
@@ -312,6 +314,7 @@ impl ConfigWizardState {
                 bw: crate::config::BwConfig {
                     folder: self.bw_folder.clone(),
                     organization: self.bw_organization.clone(),
+                    collection: self.bw_collection.clone(),
                     item: self.bw_item.clone(),
                     sync_throttle_secs: self.bw_sync_throttle_secs,
                 },
@@ -381,6 +384,9 @@ impl ConfigWizardState {
         }
         if let Some(organization) = &self.bw_organization {
             lines.push(format!("organization = {}", quoted(organization)));
+        }
+        if let Some(collection) = &self.bw_collection {
+            lines.push(format!("collection = {}", quoted(collection)));
         }
         if let Some(item) = &self.bw_item {
             lines.push(format!("item = {}", quoted(item)));
@@ -663,6 +669,7 @@ enum FieldId {
     OpItem,
     BwFolder,
     BwOrganization,
+    BwCollection,
     BwItem,
     BwSyncThrottleSecs,
     GpgFilePattern,
@@ -673,7 +680,7 @@ enum FieldId {
     UpdateCheckIntervalHours,
 }
 
-const ALL_FIELDS: [FieldId; 20] = [
+const ALL_FIELDS: [FieldId; 21] = [
     FieldId::Backend,
     FieldId::SearchParentEnv,
     FieldId::SourceAll,
@@ -686,6 +693,7 @@ const ALL_FIELDS: [FieldId; 20] = [
     FieldId::OpItem,
     FieldId::BwFolder,
     FieldId::BwOrganization,
+    FieldId::BwCollection,
     FieldId::BwItem,
     FieldId::BwSyncThrottleSecs,
     FieldId::GpgFilePattern,
@@ -711,6 +719,7 @@ impl FieldId {
             Self::OpItem => "1Password item",
             Self::BwFolder => "Bitwarden folder",
             Self::BwOrganization => "Bitwarden organization",
+            Self::BwCollection => "Bitwarden collection",
             Self::BwItem => "Bitwarden item",
             Self::BwSyncThrottleSecs => "Bitwarden sync throttle",
             Self::GpgFilePattern => "GPG file pattern",
@@ -752,6 +761,9 @@ impl FieldId {
             }
             Self::BwFolder => "Optional Bitwarden folder to search by default.",
             Self::BwOrganization => "Optional Bitwarden organization identifier.",
+            Self::BwCollection => {
+                "Optional Bitwarden organization collection ID; requires an organization ID."
+            }
             Self::BwItem => {
                 "Optional Bitwarden item name. When set, keys resolve as custom fields on this item."
             }
@@ -778,7 +790,11 @@ impl FieldId {
                 Self::OpVault | Self::OpAccount | Self::OpItem,
                 BackendChoice::Op
             ) | (
-                Self::BwFolder | Self::BwOrganization | Self::BwItem | Self::BwSyncThrottleSecs,
+                Self::BwFolder
+                    | Self::BwOrganization
+                    | Self::BwCollection
+                    | Self::BwItem
+                    | Self::BwSyncThrottleSecs,
                 BackendChoice::Bw,
             ) | (
                 Self::GpgFilePattern | Self::GpgRecipient,
@@ -791,6 +807,7 @@ impl FieldId {
                 | Self::OpItem
                 | Self::BwFolder
                 | Self::BwOrganization
+                | Self::BwCollection
                 | Self::BwItem
                 | Self::BwSyncThrottleSecs
                 | Self::GpgFilePattern
@@ -812,6 +829,7 @@ impl FieldId {
             Self::OpItem => option_display(&state.op_item),
             Self::BwFolder => option_display(&state.bw_folder),
             Self::BwOrganization => option_display(&state.bw_organization),
+            Self::BwCollection => option_display(&state.bw_collection),
             Self::BwItem => option_display(&state.bw_item),
             Self::BwSyncThrottleSecs => state.bw_sync_throttle_secs.to_string(),
             Self::GpgFilePattern => state.gpg_file_pattern.clone(),
@@ -832,6 +850,7 @@ impl FieldId {
                 | Self::OpItem
                 | Self::BwFolder
                 | Self::BwOrganization
+                | Self::BwCollection
                 | Self::BwItem
                 | Self::BwSyncThrottleSecs
                 | Self::GpgFilePattern
@@ -849,6 +868,7 @@ impl FieldId {
             Self::OpItem => state.op_item.clone().unwrap_or_default(),
             Self::BwFolder => state.bw_folder.clone().unwrap_or_default(),
             Self::BwOrganization => state.bw_organization.clone().unwrap_or_default(),
+            Self::BwCollection => state.bw_collection.clone().unwrap_or_default(),
             Self::BwItem => state.bw_item.clone().unwrap_or_default(),
             Self::BwSyncThrottleSecs => state.bw_sync_throttle_secs.to_string(),
             Self::GpgFilePattern => state.gpg_file_pattern.clone(),
@@ -883,6 +903,7 @@ impl FieldId {
             Self::OpItem => state.op_item = optional_string(buffer),
             Self::BwFolder => state.bw_folder = optional_string(buffer),
             Self::BwOrganization => state.bw_organization = optional_string(buffer),
+            Self::BwCollection => state.bw_collection = optional_string(buffer),
             Self::BwItem => state.bw_item = optional_string(buffer),
             Self::BwSyncThrottleSecs => {
                 state.bw_sync_throttle_secs = parse_u64(self.label(), buffer)?;
@@ -1080,8 +1101,9 @@ mod tests {
                     item: Some("shared-env".to_string()),
                 },
                 bw: BwConfig {
-                    folder: Some("env".to_string()),
+                    folder: None,
                     organization: Some("acme".to_string()),
+                    collection: Some("collection-id".to_string()),
                     item: Some("app".to_string()),
                     sync_throttle_secs: 7200,
                 },
@@ -1127,8 +1149,12 @@ mod tests {
         );
         assert_eq!(round_trip.defaults.op.account.as_deref(), Some("team"));
         assert_eq!(round_trip.defaults.op.item.as_deref(), Some("shared-env"));
-        assert_eq!(round_trip.defaults.bw.folder.as_deref(), Some("env"));
+        assert_eq!(round_trip.defaults.bw.folder, None);
         assert_eq!(round_trip.defaults.bw.organization.as_deref(), Some("acme"));
+        assert_eq!(
+            round_trip.defaults.bw.collection.as_deref(),
+            Some("collection-id")
+        );
         assert_eq!(round_trip.defaults.bw.item.as_deref(), Some("app"));
         assert_eq!(round_trip.defaults.bw.sync_throttle_secs, 7200);
         assert_eq!(round_trip.defaults.gpg.file_pattern, ".secrets.gpg");
@@ -1160,8 +1186,9 @@ mod tests {
             op_vault_aliases: BTreeMap::new(),
             op_account: None,
             op_item: None,
-            bw_folder: Some("secrets".to_string()),
-            bw_organization: None,
+            bw_folder: None,
+            bw_organization: Some("org-id".to_string()),
+            bw_collection: Some("collection-id".to_string()),
             bw_item: Some("api".to_string()),
             bw_sync_throttle_secs: 5400,
             gpg_file_pattern: ".team.gpg".to_string(),
@@ -1181,7 +1208,8 @@ mod tests {
 
         assert!(rendered.contains("backend = \"gpg\""));
         assert!(rendered.contains("warn_missing = true"));
-        assert!(rendered.contains("folder = \"secrets\""));
+        assert!(rendered.contains("organization = \"org-id\""));
+        assert!(rendered.contains("collection = \"collection-id\""));
         assert!(rendered.contains("sync_throttle_secs = 5400"));
         assert!(rendered.contains("file_pattern = \".team.gpg\""));
         assert!(rendered.contains("recipient = \"dev@example.com\""));
@@ -1399,6 +1427,9 @@ mod tests {
         FieldId::BwOrganization
             .apply_edit(&mut state, " acme ")
             .unwrap();
+        FieldId::BwCollection
+            .apply_edit(&mut state, " collection-id ")
+            .unwrap();
         FieldId::BwItem.apply_edit(&mut state, " api ").unwrap();
         FieldId::GpgRecipient
             .apply_edit(&mut state, " ops@example.com ")
@@ -1407,6 +1438,7 @@ mod tests {
         assert_eq!(state.op_item.as_deref(), Some("deploy"));
         assert_eq!(state.bw_folder.as_deref(), Some("env"));
         assert_eq!(state.bw_organization.as_deref(), Some("acme"));
+        assert_eq!(state.bw_collection.as_deref(), Some("collection-id"));
         assert_eq!(state.bw_item.as_deref(), Some("api"));
         assert_eq!(state.gpg_recipient.as_deref(), Some("ops@example.com"));
     }

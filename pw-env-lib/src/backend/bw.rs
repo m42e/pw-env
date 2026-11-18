@@ -24,6 +24,13 @@ const SYNC_STATE_FILE_NAME: &str = "bitwarden-sync-state.json";
 const MIN_SYNC_THROTTLE_SECS: u64 = 3600;
 const DEFAULT_SYNC_THROTTLE_SECS: u64 = MIN_SYNC_THROTTLE_SECS;
 
+#[derive(Debug, Clone, Default, Eq, Hash, PartialEq)]
+struct BwScope {
+    organization_id: Option<String>,
+    collection_id: Option<String>,
+    folder_id: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct FolderIdCacheStore {
     #[serde(default)]
@@ -164,6 +171,160 @@ impl SyncStateStore {
 pub struct BwBackend;
 
 impl BwBackend {
+    fn validate_scope_settings(
+        bw_config: &crate::config::BwConfig,
+        folder_override: Option<&str>,
+    ) -> Result<()> {
+        let folder = folder_override.or(bw_config.folder.as_deref());
+        if let Some(organization_id) = bw_config.organization.as_deref()
+            && organization_id.trim().is_empty()
+        {
+            bail!("Bitwarden organization ID cannot be empty");
+        }
+        if let Some(collection_id) = bw_config.collection.as_deref()
+            && collection_id.trim().is_empty()
+        {
+            bail!("Bitwarden collection ID cannot be empty");
+        }
+        if bw_config.collection.is_some() && bw_config.organization.is_none() {
+            bail!("Bitwarden collection ID requires an organization ID");
+        }
+        if bw_config.organization.is_some() && folder.is_some() {
+            bail!(
+                "Bitwarden organization scope cannot be combined with the personal vault folder setting"
+            );
+        }
+        Ok(())
+    }
+
+    fn resolve_scope_with(
+        bw_config: &crate::config::BwConfig,
+        folder_override: Option<&str>,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<BwScope> {
+        Self::validate_scope_settings(bw_config, folder_override)?;
+        let organization_id = bw_config.organization.clone();
+        let collection_id = bw_config.collection.clone();
+        let folder_id = folder_override
+            .or(bw_config.folder.as_deref())
+            .map(|folder| Self::resolve_required_folder_id_with(folder, interaction))
+            .transpose()?;
+
+        if let (Some(organization_id), Some(collection_id)) =
+            (organization_id.as_deref(), collection_id.as_deref())
+        {
+            Self::ensure_collection_in_organization_with(
+                organization_id,
+                collection_id,
+                interaction,
+            )?;
+        }
+
+        Ok(BwScope {
+            organization_id,
+            collection_id,
+            folder_id,
+        })
+    }
+
+    fn ensure_collection_in_organization_with(
+        organization_id: &str,
+        collection_id: &str,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<()> {
+        let collection_json = Self::run_bw_with(
+            &[
+                "list",
+                "org-collections",
+                "--organizationid",
+                organization_id,
+            ],
+            interaction,
+        )?;
+        let collections: Vec<serde_json::Value> = serde_json::from_str(&collection_json)
+            .context("Failed to parse Bitwarden organization collections JSON")?;
+        let collection_matches = collections.iter().any(|collection| {
+            collection.get("id").and_then(|id| id.as_str()) == Some(collection_id)
+                && collection.get("organizationId").and_then(|id| id.as_str())
+                    == Some(organization_id)
+        });
+        if !collection_matches {
+            bail!(
+                "Bitwarden collection '{collection_id}' is not available in organization '{organization_id}'"
+            );
+        }
+        Ok(())
+    }
+
+    fn item_matches_scope(item: &serde_json::Value, scope: &BwScope) -> bool {
+        if let Some(organization_id) = scope.organization_id.as_deref()
+            && item.get("organizationId").and_then(|id| id.as_str()) != Some(organization_id)
+        {
+            return false;
+        }
+        if let Some(collection_id) = scope.collection_id.as_deref()
+            && !item
+                .get("collectionIds")
+                .and_then(|ids| ids.as_array())
+                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(collection_id)))
+        {
+            return false;
+        }
+        if let Some(folder_id) = scope.folder_id.as_deref()
+            && item.get("folderId").and_then(|id| id.as_str()) != Some(folder_id)
+        {
+            return false;
+        }
+        true
+    }
+
+    fn ensure_item_in_scope(
+        item: &serde_json::Value,
+        item_name: &str,
+        scope: &BwScope,
+    ) -> Result<()> {
+        if let Some(organization_id) = scope.organization_id.as_deref()
+            && item.get("organizationId").and_then(|id| id.as_str()) != Some(organization_id)
+        {
+            bail!("Bitwarden item '{item_name}' is not owned by the requested organization");
+        }
+        if let Some(collection_id) = scope.collection_id.as_deref()
+            && !item
+                .get("collectionIds")
+                .and_then(|ids| ids.as_array())
+                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(collection_id)))
+        {
+            bail!("Bitwarden item '{item_name}' is not in the requested collection");
+        }
+        Self::ensure_item_in_folder(item, item_name, scope.folder_id.as_deref())
+    }
+
+    fn list_items_with_scope(
+        scope: &BwScope,
+        search: Option<&str>,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut args = vec!["list".to_string(), "items".to_string()];
+        if let Some(collection_id) = scope.collection_id.as_deref() {
+            args.extend(["--collectionid".to_string(), collection_id.to_string()]);
+        } else if let Some(organization_id) = scope.organization_id.as_deref() {
+            args.extend(["--organizationid".to_string(), organization_id.to_string()]);
+        } else if let Some(folder_id) = scope.folder_id.as_deref() {
+            args.extend(["--folderid".to_string(), folder_id.to_string()]);
+        }
+        if let Some(search) = search {
+            args.extend(["--search".to_string(), search.to_string()]);
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let items_json = Self::run_bw_with(&args, interaction)?;
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&items_json).context("Failed to parse bw list items JSON")?;
+        Ok(items
+            .into_iter()
+            .filter(|item| Self::item_matches_scope(item, scope))
+            .collect())
+    }
+
     fn effective_sync_throttle_secs() -> u64 {
         SYNC_THROTTLE_OVERRIDE_SECS
             .lock()
@@ -811,21 +972,29 @@ impl BwBackend {
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
-        Self::disambiguate_items_with(key, repository, folder_id, project, None)
+        let scope = BwScope {
+            folder_id: folder_id.map(ToOwned::to_owned),
+            ..BwScope::default()
+        };
+        Self::disambiguate_items_with(key, repository, &scope, project, None)
     }
 
     fn disambiguate_items_with(
         key: &str,
         repository: Option<&str>,
-        folder_id: Option<&str>,
+        scope: &BwScope,
         project: Option<&str>,
         interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<String> {
-        let search_json = Self::run_bw_with(&["list", "items", "--search", key], interaction)?;
-        let items: Vec<serde_json::Value> =
-            serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
+        let items = Self::list_items_with_scope(scope, Some(key), interaction)?;
 
-        Self::disambiguate_items_from_list(key, &items, repository, folder_id, project)
+        Self::disambiguate_items_from_list(
+            key,
+            &items,
+            repository,
+            scope.folder_id.as_deref(),
+            project,
+        )
     }
 
     #[cfg(test)]
@@ -869,6 +1038,18 @@ impl BwBackend {
             bail!("Bitwarden item '{item_name}' is not in the requested folder");
         }
         Ok(())
+    }
+
+    fn get_item_with_scope(
+        selector: &str,
+        scope: &BwScope,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<serde_json::Value> {
+        let item_json = Self::run_bw_with(&["get", "item", selector], interaction)?;
+        let item: serde_json::Value =
+            serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
+        Self::ensure_item_in_scope(&item, selector, scope)?;
+        Ok(item)
     }
 
     fn select_item_from_list<'a>(
@@ -969,17 +1150,12 @@ impl BwBackend {
         item_name: &str,
         field_name: &str,
         repository: Option<&str>,
-        folder_id: Option<&str>,
+        scope: &BwScope,
         project: Option<&str>,
         interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<String> {
-        let Some(item) = Self::resolve_reference_item_with(
-            item_name,
-            repository,
-            folder_id,
-            project,
-            interaction,
-        )?
+        let Some(item) =
+            Self::resolve_reference_item_with(item_name, repository, scope, project, interaction)?
         else {
             return Ok(String::new());
         };
@@ -990,17 +1166,19 @@ impl BwBackend {
     fn resolve_reference_item_with(
         item_name: &str,
         repository: Option<&str>,
-        folder_id: Option<&str>,
+        scope: &BwScope,
         project: Option<&str>,
         interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<Option<serde_json::Value>> {
-        let search_json =
-            Self::run_bw_with(&["list", "items", "--search", item_name], interaction)?;
-        let items: Vec<serde_json::Value> =
-            serde_json::from_str(&search_json).context("Failed to parse bw list items JSON")?;
+        let items = Self::list_items_with_scope(scope, Some(item_name), interaction)?;
 
-        let Some(item) =
-            Self::select_item_from_list(item_name, &items, repository, folder_id, project)?
+        let Some(item) = Self::select_item_from_list(
+            item_name,
+            &items,
+            repository,
+            scope.folder_id.as_deref(),
+            project,
+        )?
         else {
             return Ok(None);
         };
@@ -1012,7 +1190,7 @@ impl BwBackend {
         let item_json = Self::run_bw_with(&["get", "item", item_identifier], interaction)?;
         let item: serde_json::Value =
             serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
-        Self::ensure_item_in_folder(&item, item_name, folder_id)?;
+        Self::ensure_item_in_scope(&item, item_name, scope)?;
         Ok(Some(item))
     }
 
@@ -1105,7 +1283,7 @@ impl BwBackend {
         // --- Handle bw:// references: group by item name, one fetch per unique item ---
         if !ref_entries.is_empty() {
             let mut reference_item_cache: HashMap<
-                (Option<String>, String),
+                (BwScope, String),
                 std::result::Result<Option<serde_json::Value>, String>,
             > = HashMap::new();
 
@@ -1113,23 +1291,20 @@ impl BwBackend {
                 if let Some((reference_folder, item_name, field_name)) =
                     Self::parse_bw_reference(ref_str)
                 {
-                    let folder_id = Self::resolve_reference_folder_id_with(
-                        reference_folder,
-                        bw_config.folder.as_deref(),
-                        ctx.interaction,
-                    );
+                    let scope =
+                        Self::resolve_scope_with(bw_config, reference_folder, ctx.interaction);
                     results.insert(
                         env_key.to_string(),
-                        match folder_id {
-                            Ok(folder_id) => {
-                                let cache_key = (folder_id.clone(), item_name.to_string());
-                                let folder_id_for_lookup = folder_id.clone();
+                        match scope {
+                            Ok(scope) => {
+                                let cache_key = (scope.clone(), item_name.to_string());
+                                let scope_for_lookup = scope.clone();
                                 let cached_item =
                                     reference_item_cache.entry(cache_key).or_insert_with(|| {
                                         Self::resolve_reference_item_with(
                                             item_name,
                                             ctx.repository.as_deref(),
-                                            folder_id_for_lookup.as_deref(),
+                                            &scope_for_lookup,
                                             ctx.project.as_deref(),
                                             ctx.interaction,
                                         )
@@ -1166,71 +1341,29 @@ impl BwBackend {
                     "Batch resolving {} keys as fields on Bitwarden item '{item_name}'",
                     key_entries.len()
                 );
-                let folder_id = match bw_config.folder.as_deref() {
-                    Some(folder) => {
-                        match Self::resolve_required_folder_id_with(folder, ctx.interaction) {
-                            Ok(folder_id) => Some(folder_id),
-                            Err(error) => {
-                                let message = error.to_string();
-                                for key in &key_entries {
-                                    results.insert(
-                                        key.to_string(),
-                                        Err(anyhow::anyhow!(message.clone())),
-                                    );
-                                }
-                                return results;
-                            }
+                let scope = match Self::resolve_scope_with(bw_config, None, ctx.interaction) {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        let message = error.to_string();
+                        for key in &key_entries {
+                            results.insert(key.to_string(), Err(anyhow::anyhow!(message.clone())));
                         }
+                        return results;
                     }
-                    None => None,
                 };
-                match Self::run_bw_with(&["get", "item", item_name], ctx.interaction) {
-                    Ok(item_json) => {
-                        let item: std::result::Result<serde_json::Value, _> =
-                            serde_json::from_str(&item_json);
-                        match item {
-                            Ok(item_val) => {
-                                if let Err(error) = Self::ensure_item_in_folder(
-                                    &item_val,
-                                    item_name,
-                                    folder_id.as_deref(),
-                                ) {
-                                    let message = error.to_string();
-                                    for key in &key_entries {
-                                        results.insert(
-                                            key.to_string(),
-                                            Err(anyhow::anyhow!(message.clone())),
-                                        );
-                                    }
-                                } else {
-                                    for key in &key_entries {
-                                        results.insert(
-                                            key.to_string(),
-                                            Self::extract_field_from_value(&item_val, key),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                for key in &key_entries {
-                                    results.insert(
-                                        key.to_string(),
-                                        Err(anyhow::anyhow!(
-                                            "Failed to parse Bitwarden item JSON: {e}"
-                                        )),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
+                match Self::get_item_with_scope(item_name, &scope, ctx.interaction) {
+                    Ok(item) => {
                         for key in &key_entries {
                             results.insert(
                                 key.to_string(),
-                                Err(anyhow::anyhow!(
-                                    "Failed to fetch Bitwarden item '{item_name}': {e}"
-                                )),
+                                Self::extract_field_from_value(&item, key),
                             );
+                        }
+                    }
+                    Err(error) => {
+                        for key in &key_entries {
+                            results
+                                .insert(key.to_string(), Err(anyhow::anyhow!(error.to_string())));
                         }
                     }
                 }
@@ -1240,29 +1373,19 @@ impl BwBackend {
                     "Batch resolving {} keys via Bitwarden item list",
                     key_entries.len()
                 );
-                let folder_id: Option<String> = match bw_config.folder.as_deref() {
-                    Some(folder) => {
-                        match Self::resolve_required_folder_id_with(folder, ctx.interaction) {
-                            Ok(folder_id) => Some(folder_id),
-                            Err(error) => {
-                                let message = error.to_string();
-                                for key in &key_entries {
-                                    results.insert(
-                                        key.to_string(),
-                                        Err(anyhow::anyhow!(message.clone())),
-                                    );
-                                }
-                                return results;
-                            }
+                let scope = match Self::resolve_scope_with(bw_config, None, ctx.interaction) {
+                    Ok(scope) => scope,
+                    Err(error) => {
+                        let message = error.to_string();
+                        for key in &key_entries {
+                            results.insert(key.to_string(), Err(anyhow::anyhow!(message.clone())));
                         }
+                        return results;
                     }
-                    None => None,
                 };
 
-                match Self::run_bw_with(&["list", "items"], ctx.interaction) {
-                    Ok(items_json) => {
-                        let all_items: Vec<serde_json::Value> =
-                            serde_json::from_str(&items_json).unwrap_or_default();
+                match Self::list_items_with_scope(&scope, None, ctx.interaction) {
+                    Ok(all_items) => {
                         for key in &key_entries {
                             results.insert(
                                 key.to_string(),
@@ -1270,7 +1393,7 @@ impl BwBackend {
                                     key,
                                     &all_items,
                                     ctx.repository.as_deref(),
-                                    folder_id.as_deref(),
+                                    scope.folder_id.as_deref(),
                                     ctx.project.as_deref(),
                                 ),
                             );
@@ -1301,16 +1424,12 @@ impl BwBackend {
         {
             if let Some((reference_folder, item, field)) = Self::parse_bw_reference(ref_str) {
                 debug!("Resolving Bitwarden reference: {ref_str}");
-                let folder_id = Self::resolve_reference_folder_id_with(
-                    reference_folder,
-                    bw_config.folder.as_deref(),
-                    ctx.interaction,
-                )?;
+                let scope = Self::resolve_scope_with(bw_config, reference_folder, ctx.interaction)?;
                 return Self::resolve_reference_field_with(
                     item,
                     field,
                     ctx.repository.as_deref(),
-                    folder_id.as_deref(),
+                    &scope,
                     ctx.project.as_deref(),
                     ctx.interaction,
                 );
@@ -1325,30 +1444,19 @@ impl BwBackend {
         if let Some(item) = ctx.config.effective_item(ctx.dir) {
             // Look up key as a custom field on the configured item
             debug!("Resolving key '{key}' as field on Bitwarden item '{item}'");
-            let folder_id = bw_config
-                .folder
-                .as_deref()
-                .map(|folder| Self::resolve_required_folder_id_with(folder, ctx.interaction))
-                .transpose()?;
-            let item_json = Self::run_bw_with(&["get", "item", item], ctx.interaction)?;
-            let item_value: serde_json::Value =
-                serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
-            Self::ensure_item_in_folder(&item_value, item, folder_id.as_deref())?;
-            Self::extract_field_from_item(&item_json, key)
+            let scope = Self::resolve_scope_with(bw_config, None, ctx.interaction)?;
+            let item_value = Self::get_item_with_scope(item, &scope, ctx.interaction)?;
+            Self::extract_field_from_value(&item_value, key)
         } else {
             // Look up the key as a password item using list + exact-name filter
             // (`bw get password` and `bw get item` do substring matching, which
             // can return the wrong entry when item names are similar.)
             debug!("Resolving key '{key}' as Bitwarden item password");
-            let folder_id: Option<String> = bw_config
-                .folder
-                .as_deref()
-                .map(|folder| Self::resolve_required_folder_id_with(folder, ctx.interaction))
-                .transpose()?;
+            let scope = Self::resolve_scope_with(bw_config, None, ctx.interaction)?;
             Self::disambiguate_items_with(
                 key,
                 ctx.repository.as_deref(),
-                folder_id.as_deref(),
+                &scope,
                 ctx.project.as_deref(),
                 ctx.interaction,
             )
@@ -1379,74 +1487,79 @@ impl Backend for BwBackend {
         debug!(key, "Storing secret in Bitwarden");
         let bw_config = ctx.config.effective_bw(ctx.dir);
         let metadata_fields = Self::migration_metadata_fields(ctx);
+        let scope = Self::resolve_scope_with(bw_config, None, None)?;
 
         if let Some(item_name) = ctx.config.effective_item(ctx.dir) {
-            // Try to get existing item and add a custom field
             debug!("Storing key '{key}' as custom field on Bitwarden item '{item_name}'");
-            let item_result = Self::run_bw(&["get", "item", item_name]);
-            if let Ok(item_json) = item_result {
-                let mut item: serde_json::Value = serde_json::from_str(&item_json)?;
-                Self::upsert_custom_field(&mut item, key, value, 1);
-                for field in &metadata_fields {
-                    if let (Some(name), Some(field_value), Some(field_type)) = (
-                        field.get("name").and_then(|field_name| field_name.as_str()),
-                        field
-                            .get("value")
-                            .and_then(|field_value| field_value.as_str()),
-                        field.get("type").and_then(|field_type| field_type.as_u64()),
-                    ) {
-                        Self::upsert_custom_field(&mut item, name, field_value, field_type as u8);
-                    }
+            let item_json = Self::run_bw_with(&["get", "item", item_name], None)?;
+            let mut item: serde_json::Value =
+                serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
+            Self::ensure_item_in_scope(&item, item_name, &scope)?;
+            Self::upsert_custom_field(&mut item, key, value, 1);
+            for field in &metadata_fields {
+                if let (Some(name), Some(field_value), Some(field_type)) = (
+                    field.get("name").and_then(|field_name| field_name.as_str()),
+                    field
+                        .get("value")
+                        .and_then(|field_value| field_value.as_str()),
+                    field.get("type").and_then(|field_type| field_type.as_u64()),
+                ) {
+                    Self::upsert_custom_field(&mut item, name, field_value, field_type as u8);
                 }
-                let encoded = serde_json::to_string(&item)?;
-                // bw edit item expects base64-encoded JSON on stdin, but we use a simpler approach
-                let mut cmd = Self::bw_command()?;
-                cmd.args(["edit", "item", item_name]);
-                cmd.stdin(std::process::Stdio::piped());
-                cmd.stdout(std::process::Stdio::piped());
-                cmd.stderr(std::process::Stdio::piped());
-                let started_at = Instant::now();
-                let mut child = cmd.spawn()?;
-                if let Some(mut stdin) = child.stdin.take() {
-                    use std::io::Write;
-                    // bw expects base64-encoded JSON
-                    let encoded_b64 = base64_encode(encoded.as_bytes());
-                    stdin.write_all(encoded_b64.as_bytes())?;
-                }
-                let output = child.wait_with_output()?;
-                Self::log_action_timing(
-                    &format!("bw edit item {item_name}"),
-                    started_at,
-                    output.status.success(),
-                );
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    bail!("bw edit failed: {stderr}");
-                }
-                info!(
-                    key,
-                    item_name, "Updated custom field on existing Bitwarden item"
-                );
-                return Ok(());
             }
+            let encoded = serde_json::to_string(&item)?;
+            let mut cmd = Self::bw_command()?;
+            cmd.args(["edit", "item", item_name]);
+            cmd.stdin(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+            let started_at = Instant::now();
+            let mut child = cmd.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let encoded_b64 = base64_encode(encoded.as_bytes());
+                stdin.write_all(encoded_b64.as_bytes())?;
+            }
+            let output = child.wait_with_output()?;
+            Self::log_action_timing(
+                &format!("bw edit item {item_name}"),
+                started_at,
+                output.status.success(),
+            );
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("bw edit failed: {stderr}");
+            }
+            info!(
+                key,
+                item_name, "Updated custom field on existing Bitwarden item"
+            );
+            return Ok(());
         }
 
         // Create a new login item
         debug!("Creating new Bitwarden item for key '{key}'");
-        let folder_id: Option<String> = bw_config
-            .folder
-            .as_deref()
-            .map(|folder| Self::resolve_required_folder_id_with(folder, None))
-            .transpose()?;
-        let item_template = serde_json::json!({
+        if scope.organization_id.is_some() && scope.collection_id.is_none() {
+            bail!(
+                "Creating a Bitwarden item in an organization requires a configured collection ID"
+            );
+        }
+        let mut item_template = serde_json::json!({
             "type": 1,
             "name": key,
             "login": {
                 "password": value
             },
-            "folderId": folder_id,
+            "folderId": scope.folder_id,
             "fields": metadata_fields
         });
+        if let (Some(organization_id), Some(collection_id)) = (
+            scope.organization_id.as_deref(),
+            scope.collection_id.as_deref(),
+        ) {
+            item_template["organizationId"] = serde_json::json!(organization_id);
+            item_template["collectionIds"] = serde_json::json!([collection_id]);
+        }
         let encoded = serde_json::to_string(&item_template)?;
         let encoded_b64 = base64_encode(encoded.as_bytes());
 
@@ -2179,6 +2292,226 @@ exit 1
     }
 
     #[test]
+    fn validate_scope_settings_requires_organization_for_collection_and_separates_folders() {
+        let collection_without_org = BwConfig {
+            collection: Some("collection-1".to_string()),
+            ..BwConfig::default()
+        };
+        assert!(
+            BwBackend::validate_scope_settings(&collection_without_org, None)
+                .unwrap_err()
+                .to_string()
+                .contains("requires an organization ID")
+        );
+
+        let mixed_personal_and_org = BwConfig {
+            folder: Some("Personal".to_string()),
+            organization: Some("organization-1".to_string()),
+            ..BwConfig::default()
+        };
+        assert!(
+            BwBackend::validate_scope_settings(&mixed_personal_and_org, None)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be combined")
+        );
+    }
+
+    #[test]
+    fn ensure_collection_in_organization_requires_exact_owner_id() {
+        for collections in [
+            r#"[{"id":"collection-1"}]"#,
+            r#"[{"id":"collection-1","organizationId":"organization-2"}]"#,
+        ] {
+            let script = format!("#!/bin/sh\necho '{}'\n", collections);
+            with_mock_bw(&script, || {
+                let error = BwBackend::ensure_collection_in_organization_with(
+                    "organization-1",
+                    "collection-1",
+                    None,
+                )
+                .expect_err("collection must report the requested organization ID");
+                assert!(error.to_string().contains("not available"));
+            });
+        }
+    }
+
+    #[test]
+    fn list_items_with_scope_filters_by_organization_and_collection() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let items = r#"[
+            {"id":"right","organizationId":"org-1","collectionIds":["coll-1"]},
+            {"id":"wrong-org","organizationId":"org-2","collectionIds":["coll-1"]},
+            {"id":"wrong-coll","organizationId":"org-1","collectionIds":["coll-2"]},
+            {"id":"personal","organizationId":null,"collectionIds":[]}
+        ]"#;
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho '{}'\n",
+            call_log.display(),
+            items.replace('\n', "")
+        );
+
+        with_mock_bw(&script, || {
+            let scope = BwScope {
+                organization_id: Some("org-1".to_string()),
+                collection_id: Some("coll-1".to_string()),
+                ..BwScope::default()
+            };
+            let result = BwBackend::list_items_with_scope(&scope, None, None).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(
+                result[0].get("id").and_then(|id| id.as_str()),
+                Some("right")
+            );
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(
+                calls
+                    .lines()
+                    .any(|line| line == "list items --collectionid coll-1")
+            );
+        });
+    }
+
+    #[test]
+    fn organization_item_creation_requires_and_uses_valid_collection() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let payload_path = state_dir.path().join("create-payload.b64");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"org-collections\" ]; then echo '[{{\"id\":\"coll-1\",\"organizationId\":\"org-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"create\" ] && [ \"$2\" = \"item\" ]; then cat > '{}'; echo created; exit 0; fi\nexit 1\n",
+            call_log.display(),
+            payload_path.display()
+        );
+        with_mock_bw(&script, || {
+            BwBackend::set_test_sync_state_path(Some(state_dir.path().join("sync.json")));
+            SyncStateStore {
+                last_sync_unix_secs: BwBackend::current_unix_secs(),
+            }
+            .save()
+            .unwrap();
+            let config = Config {
+                defaults: Defaults {
+                    backend: "bw".to_string(),
+                    bw: BwConfig {
+                        organization: Some("org-1".to_string()),
+                        collection: Some("coll-1".to_string()),
+                        ..BwConfig::default()
+                    },
+                    ..Defaults::default()
+                },
+                ..Config::default()
+            };
+            let ctx = StoreContext {
+                dir: Path::new("/tmp/project"),
+                config: &config,
+                project: None,
+                repository: None,
+            };
+
+            BwBackend.store("NEW_KEY", "new-secret", &ctx).unwrap();
+
+            let expected = serde_json::json!({
+                "type": 1,
+                "name": "NEW_KEY",
+                "login": {"password": "new-secret"},
+                "folderId": null,
+                "organizationId": "org-1",
+                "collectionIds": ["coll-1"],
+                "fields": BwBackend::migration_metadata_fields(&ctx)
+            });
+            let expected = base64_encode(serde_json::to_string(&expected).unwrap().as_bytes());
+            assert_eq!(std::fs::read_to_string(payload_path).unwrap(), expected);
+            assert_eq!(
+                std::fs::read_to_string(call_log)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                vec!["list org-collections --organizationid org-1", "create item"]
+            );
+        });
+    }
+
+    #[test]
+    fn organization_creation_without_collection_fails_before_create() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n",
+            call_log.display()
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    organization: Some("org-1".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_bw(&script, || {
+            let error = BwBackend
+                .store("NEW_KEY", "new-secret", &ctx)
+                .expect_err("organization creation requires a collection");
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires a configured collection ID")
+            );
+            assert!(!call_log.exists(), "must fail before any CLI call");
+        });
+    }
+
+    #[test]
+    fn organization_scoped_store_rejects_foreign_item_before_edit() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"sync\" ]; then exit 0; fi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"org-collections\" ]; then echo '[{{\"id\":\"coll-1\",\"organizationId\":\"org-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"foreign-id\",\"name\":\"shared-env\",\"organizationId\":\"org-2\",\"collectionIds\":[\"coll-1\"],\"fields\":[]}}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
+            call_log.display()
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    organization: Some("org-1".to_string()),
+                    collection: Some("coll-1".to_string()),
+                    item: Some("shared-env".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_bw(&script, || {
+            BwBackend::set_test_sync_state_path(Some(state_dir.path().join("sync.json")));
+            let error = BwBackend
+                .store("API_KEY", "new-secret", &ctx)
+                .expect_err("foreign organization item must not be edited");
+            assert!(error.to_string().contains("not owned"), "{error}");
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(!calls.lines().any(|line| line.starts_with("edit item")));
+            assert!(!calls.lines().any(|line| line == "create item"));
+        });
+    }
+
+    #[test]
     fn select_item_from_list_errors_when_no_exact_name() {
         let items = vec![serde_json::json!({"name":"OTHER_KEY"})];
         let result = BwBackend::select_item_from_list("MY_KEY", &items, None, None, None);
@@ -2451,7 +2784,7 @@ exit 1
         })
         .to_string();
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"sync\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ] && [ \"$3\" = \"--search\" ] && [ \"$4\" = \"my-item\" ]; then\n  echo '{}'\n  exit 0\nfi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item-1\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"sync\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  echo '{}'\n  exit 0\nfi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item-1\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
             call_log.display(),
             items_json,
             item_json
@@ -2491,10 +2824,10 @@ exit 1
             let log = std::fs::read_to_string(&call_log).unwrap();
             assert_eq!(
                 log.lines()
-                    .filter(|line| *line == "list items --search my-item")
+                    .filter(|line| *line == "list items --folderid folder-abc --search my-item")
                     .count(),
                 1,
-                "expected one list-items search for repeated bw:// item references"
+                "expected one scoped list-items search for repeated bw:// item references"
             );
             assert_eq!(
                 log.lines()
