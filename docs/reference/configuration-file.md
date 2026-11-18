@@ -1,6 +1,7 @@
 # Configuration file
 
-The main config file lives at `~/.config/pw-env/config.toml` unless `XDG_CONFIG_HOME` overrides that location.
+The main config file lives at `~/.config/pw-env/config.toml` unless an absolute `XDG_CONFIG_HOME` overrides that
+location. Empty or relative XDG directory values are ignored. State files use `XDG_STATE_HOME` under the same rule.
 
 If you prefer to build the file interactively, run `pw-env config-wizard`. The command opens a terminal UI with the
 questions on the left and the generated TOML on the right, then saves the result to the standard config path.

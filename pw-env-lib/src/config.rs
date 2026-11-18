@@ -18,15 +18,28 @@ fn base_dir_from_env(
     home_dir: Option<PathBuf>,
     fallback_components: &[&str],
 ) -> PathBuf {
-    let has_env_override = env_value.is_some();
-    let mut path = env_value.unwrap_or_else(|| home_dir.unwrap_or_else(|| PathBuf::from("~")));
-    if !has_env_override {
-        for component in fallback_components {
-            path.push(component);
-        }
+    if let Some(path) = env_value.filter(|path| path.is_absolute()) {
+        return path;
     }
 
+    let mut path = home_dir
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(filesystem_root);
+    for component in fallback_components {
+        path.push(component);
+    }
     path
+}
+
+fn filesystem_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from("C:\\")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/")
+    }
 }
 
 pub fn config_dir() -> PathBuf {
@@ -2135,6 +2148,33 @@ backend = "op"
         let path = base_dir_from_env(None, Some(PathBuf::from("/tmp/home")), &[".config"]);
 
         assert_eq!(path, PathBuf::from("/tmp/home/.config"));
+    }
+
+    #[test]
+    fn base_dir_from_env_ignores_empty_and_relative_overrides() {
+        for override_path in [PathBuf::new(), PathBuf::from(".pw-env-state")] {
+            let path = base_dir_from_env(
+                Some(override_path),
+                Some(PathBuf::from("/tmp/home")),
+                &[".local", "state"],
+            );
+
+            assert_eq!(path, PathBuf::from("/tmp/home/.local/state"));
+            assert!(path.is_absolute());
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn base_dir_from_env_uses_absolute_root_if_home_is_unavailable() {
+        let path = base_dir_from_env(
+            Some(PathBuf::from("relative-state")),
+            Some(PathBuf::from("relative-home")),
+            &[".local", "state"],
+        );
+
+        assert_eq!(path, PathBuf::from("/.local/state"));
+        assert!(path.is_absolute());
     }
 
     #[test]
