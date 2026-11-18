@@ -76,10 +76,6 @@ __pw_env_define_command_wrapper() {
 __pw_env_hook() {
     local current_dir="$PWD"
 
-    if __pw_env_is_within_active_dir "$current_dir" && [ ! -f ".env" ]; then
-        return
-    fi
-
     local _pw_env_output
     _pw_env_output="$(pw-env hook "$current_dir" --shell bash)"
     if [ -n "$_pw_env_output" ]; then
@@ -174,10 +170,6 @@ __pw_env_define_command_wrapper() {
 __pw_env_hook() {
     local current_dir="$PWD"
 
-    if __pw_env_is_within_active_dir "$current_dir" && [[ ! -f ".env" ]]; then
-        return
-    fi
-
     local _pw_env_output
     _pw_env_output="$(pw-env hook "$current_dir" --shell zsh)"
     if [[ -n "$_pw_env_output" ]]; then
@@ -262,10 +254,6 @@ end
 
 function __pw_env_hook --on-variable PWD
     set -l current_dir $PWD
-
-    if __pw_env_is_within_active_dir $current_dir; and not test -f ".env"
-        return
-    end
 
     set -l _pw_env_output (pw-env hook $current_dir --shell fish | string collect)
     if test -n "$_pw_env_output"
@@ -353,10 +341,6 @@ pw-env exec --dir `$PWD -- $cmd @args
 function __pw_env_hook {
     $currentLocation = (Get-Location).Path
 
-    if ((__pw_env_is_within_active_dir $currentLocation) -and -not (Test-Path -Path ".env")) {
-        return
-    }
-
     $hookOutput = pw-env hook $currentLocation --shell powershell
     if (-not [string]::IsNullOrWhiteSpace($hookOutput)) {
         __pw_env_clear_state
@@ -413,18 +397,31 @@ mod tests {
     }
 
     #[test]
-    fn test_posix_hooks_keep_state_for_nested_dirs() {
-        let bash_hook = generate_hook("bash");
-        let zsh_hook = generate_hook("zsh");
+    fn hooks_recheck_policy_after_each_directory_change() {
+        let hooks = [
+            ("bash", "pw-env hook \"$current_dir\" --shell bash"),
+            ("zsh", "pw-env hook \"$current_dir\" --shell zsh"),
+            (
+                "fish",
+                "pw-env hook $current_dir --shell fish | string collect",
+            ),
+            (
+                "powershell",
+                "pw-env hook $currentLocation --shell powershell",
+            ),
+        ];
 
-        assert!(bash_hook.contains(
-            "if __pw_env_is_within_active_dir \"$current_dir\" && [ ! -f \".env\" ]; then"
-        ));
-        assert!(zsh_hook.contains(
-            "if __pw_env_is_within_active_dir \"$current_dir\" && [[ ! -f \".env\" ]]; then"
-        ));
-        assert!(bash_hook.contains("eval \"$_pw_env_output\""));
-        assert!(zsh_hook.contains("eval \"$_pw_env_output\""));
+        for (shell, invocation) in hooks {
+            let hook = generate_hook(shell);
+            assert!(
+                hook.contains(invocation),
+                "{shell} must recheck the current directory"
+            );
+            assert!(!hook.contains("&& [ ! -f \".env\" ]"));
+            assert!(!hook.contains("&& [[ ! -f \".env\" ]]"));
+            assert!(!hook.contains("and not test -f \".env\""));
+            assert!(!hook.contains("-and -not (Test-Path -Path \".env\")"));
+        }
     }
 
     #[test]
