@@ -50,7 +50,7 @@ ttl_hours = 4
 # item = "project-env"
 
 [defaults.gpg]
-# Default encrypted file name to look for
+# Project-relative GPG file path; paths that escape the project directory are rejected.
 file_pattern = ".env.gpg"
 # GPG recipient for encrypting (required for `pw-env migrate` with GPG backend)
 # recipient = "your-email@example.com"
@@ -102,7 +102,7 @@ check_interval_hours = 24
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings; `vault` may use a configured alias |
 | `[defaults.op.vault_aliases]` | `<alias> = <vault>` | Maps user-friendly 1Password vault aliases to real vault names; also applies to `op://<alias>/...` references |
 | `[defaults.bw]` | `folder`, `organization`, `collection`, `item` | Default Bitwarden lookup settings; organization items use an organization ID and optional collection ID |
-| `[defaults.gpg]` | `file_pattern`, `recipient` | GPG file matching and encryption settings |
+| `[defaults.gpg]` | `file_pattern`, `recipient` | Project-relative GPG file path and encryption settings; paths that escape the project are rejected |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
 | `[[projects]]` | `path`, `backend`, `search_parent_env`, `source_all`, `fallback_example_env`, `item`, `commands` | Per-path overrides; most specific path prefix wins |

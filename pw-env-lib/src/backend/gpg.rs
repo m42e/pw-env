@@ -14,34 +14,53 @@ use super::{
 
 pub struct GpgBackend;
 
-struct GpgOutputLocation {
+struct GpgFileLocation {
     parent: Dir,
     file_name: PathBuf,
     display_path: PathBuf,
 }
 
-impl GpgOutputLocation {
-    fn from_path(path: &Path) -> Result<Self> {
-        let parent_path = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .map(PathBuf::from)
-            .context("GPG output path must name a file")?;
-        let parent = Dir::open_ambient_dir(parent_path, cap_std::ambient_authority())
-            .with_context(|| {
-                format!(
-                    "Failed to open GPG output directory {}",
-                    parent_path.display()
-                )
-            })?;
-        Ok(Self {
-            parent,
-            file_name,
-            display_path: path.to_path_buf(),
+impl GpgFileLocation {
+    fn open(&self) -> Result<cap_std::fs::File> {
+        self.parent.open(&self.file_name).with_context(|| {
+            format!(
+                "Failed to open GPG encrypted file {}",
+                self.display_path.display()
+            )
         })
+    }
+
+    fn open_optional(&self) -> Result<Option<cap_std::fs::File>> {
+        match self.parent.open(&self.file_name) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match self.parent.symlink_metadata(&self.file_name) {
+                    Err(metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        Ok(None)
+                    }
+                    Ok(_) => Err(error).with_context(|| {
+                        format!(
+                            "Configured GPG file exists but cannot be opened safely: {}",
+                            self.display_path.display()
+                        )
+                    }),
+                    Err(metadata_error) => Err(metadata_error).with_context(|| {
+                        format!(
+                            "Failed to inspect configured GPG file {}",
+                            self.display_path.display()
+                        )
+                    }),
+                }
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "Failed to open GPG encrypted file {}",
+                    self.display_path.display()
+                )
+            }),
+        }
     }
 
     fn replace_atomically(&self, contents: &[u8], owner_uid: u32) -> Result<()> {
@@ -441,18 +460,173 @@ struct StoredSecret {
 }
 
 impl GpgBackend {
+    fn relative_gpg_path(pattern: &str) -> Result<PathBuf> {
+        Self::normalize_relative_gpg_path(Path::new(pattern))
+    }
+
+    fn normalize_relative_gpg_path(input: &Path) -> Result<PathBuf> {
+        use std::path::Component;
+
+        let mut path = PathBuf::new();
+        for component in input.components() {
+            match component {
+                Component::Normal(name) => path.push(name),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    bail!(
+                        "GPG file_pattern must be a project-relative path without parent components"
+                    )
+                }
+            }
+        }
+        if path.as_os_str().is_empty() || path.file_name().is_none() {
+            bail!("GPG file_pattern must name a file inside the project directory");
+        }
+        Ok(path)
+    }
+
+    fn gpg_file_location(
+        ctx_dir: &Path,
+        config: &crate::config::Config,
+    ) -> Result<GpgFileLocation> {
+        let gpg_config = config.effective_gpg(ctx_dir);
+        let relative_path = Self::relative_gpg_path(&gpg_config.file_pattern)?;
+        let project_root = std::fs::canonicalize(ctx_dir).with_context(|| {
+            format!("Failed to resolve project directory {}", ctx_dir.display())
+        })?;
+        let project_dir = Dir::open_ambient_dir(&project_root, cap_std::ambient_authority())
+            .with_context(|| {
+                format!(
+                    "Failed to open project directory {}",
+                    project_root.display()
+                )
+            })?;
+
+        // cap-std canonicalizes relative to the directory capability, so this
+        // path is project-relative and cannot escape the opened project root.
+        match project_dir.canonicalize(&relative_path) {
+            Ok(resolved_relative) => {
+                let resolved_relative = Self::normalize_relative_gpg_path(&resolved_relative)?;
+                let resolved_name = resolved_relative
+                    .file_name()
+                    .map(PathBuf::from)
+                    .context("Resolved GPG path does not name a file")?;
+                let resolved_parent_relative = resolved_relative
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty());
+                let resolved_parent = match resolved_parent_relative {
+                    Some(parent) => project_dir.open_dir(parent).with_context(|| {
+                        format!(
+                            "GPG file_pattern '{}' resolves outside the project directory",
+                            gpg_config.file_pattern
+                        )
+                    })?,
+                    None => project_dir
+                        .try_clone()
+                        .context("Failed to clone project directory")?,
+                };
+                Ok(GpgFileLocation {
+                    parent: resolved_parent,
+                    file_name: resolved_name,
+                    display_path: project_root.join(resolved_relative),
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let configured_name = relative_path
+                    .file_name()
+                    .map(PathBuf::from)
+                    .context("GPG file_pattern must name a file inside the project directory")?;
+                match project_dir.symlink_metadata(&relative_path) {
+                    Err(metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        let relative_parent = relative_path
+                            .parent()
+                            .filter(|parent| !parent.as_os_str().is_empty());
+                        let (parent, parent_relative) = match relative_parent {
+                            Some(parent) => {
+                                let canonical_parent = project_dir
+                                    .canonicalize(parent)
+                                    .with_context(|| {
+                                        format!(
+                                            "GPG file_pattern '{}' has a parent outside the project directory",
+                                            gpg_config.file_pattern
+                                        )
+                                    })?;
+                                let canonical_parent = if canonical_parent.as_os_str().is_empty() {
+                                    PathBuf::from(".")
+                                } else {
+                                    canonical_parent
+                                };
+                                let parent = project_dir
+                                    .open_dir(&canonical_parent)
+                                    .with_context(|| {
+                                        format!(
+                                            "GPG file_pattern '{}' has a parent outside the project directory",
+                                            gpg_config.file_pattern
+                                        )
+                                    })?;
+                                (parent, canonical_parent)
+                            }
+                            None => (
+                                project_dir
+                                    .try_clone()
+                                    .context("Failed to clone project directory")?,
+                                PathBuf::from("."),
+                            ),
+                        };
+                        let display_parent = if parent_relative == Path::new(".") {
+                            project_root.clone()
+                        } else {
+                            project_root.join(parent_relative)
+                        };
+                        Ok(GpgFileLocation {
+                            parent,
+                            file_name: configured_name.clone(),
+                            display_path: display_parent.join(configured_name),
+                        })
+                    }
+                    Ok(_) => Err(error).with_context(|| {
+                        format!(
+                            "Configured GPG file exists but cannot be resolved safely: {}",
+                            relative_path.display()
+                        )
+                    }),
+                    Err(metadata_error) => Err(metadata_error).with_context(|| {
+                        format!(
+                            "Failed to inspect configured GPG file {}",
+                            relative_path.display()
+                        )
+                    }),
+                }
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "Failed to resolve configured GPG file {}",
+                    gpg_config.file_pattern
+                )
+            }),
+        }
+    }
+
+    pub(crate) fn validated_store_path(
+        ctx_dir: &Path,
+        config: &crate::config::Config,
+    ) -> Result<PathBuf> {
+        Ok(Self::gpg_file_location(ctx_dir, config)?.display_path)
+    }
+
     fn metadata_comment(name: &str, value: &str) -> String {
         format!("# pw-env: {name}={value}")
     }
 
-    /// Decrypt a GPG file and return its contents entirely in memory.
-    fn decrypt_file(path: &Path) -> Result<String> {
-        debug!("Decrypting GPG file: {}", path.display());
+    /// Decrypt an already-opened GPG file so path changes cannot redirect GPG's input.
+    fn decrypt_file(file: cap_std::fs::File, display_path: &Path) -> Result<String> {
+        debug!("Decrypting GPG file: {}", display_path.display());
         let mut command = Command::new("gpg");
         command
             .args(["--decrypt", "--batch", "--quiet"])
-            .arg(path)
-            .stdin(std::process::Stdio::null());
+            .stdin(Stdio::from(file.into_std()));
         let output = super::run_command_with_timeout(
             command,
             "Failed to execute `gpg`. Is GnuPG installed?",
@@ -529,53 +703,19 @@ impl GpgBackend {
         map
     }
 
-    /// Find the GPG file path for the given directory and config.
-    /// Validates that file_pattern does not escape the project directory.
-    fn gpg_file_path(ctx_dir: &std::path::Path, config: &crate::config::Config) -> PathBuf {
-        let gpg_config = config.effective_gpg(ctx_dir);
-        let joined = ctx_dir.join(&gpg_config.file_pattern);
-        // Normalize the path and verify it stays within the project directory.
-        // If canonicalize fails (file doesn't exist yet), fall through to the
-        // component-based check.
-        if let Ok(canonical) = joined.canonicalize() {
-            if let Ok(canonical_dir) = ctx_dir.canonicalize()
-                && !canonical.starts_with(&canonical_dir)
-            {
-                tracing::warn!(
-                    "GPG file_pattern '{}' escapes the project directory; falling back to default",
-                    gpg_config.file_pattern
-                );
-                return ctx_dir.join(".env.gpg");
-            }
-        } else {
-            // File doesn't exist yet — check for path traversal components
-            if gpg_config.file_pattern.contains("..") {
-                tracing::warn!(
-                    "GPG file_pattern '{}' contains path traversal; falling back to default",
-                    gpg_config.file_pattern
-                );
-                return ctx_dir.join(".env.gpg");
-            }
-        }
-        joined
-    }
-
     /// Decrypt and parse the GPG env file, returning all key-value pairs.
     fn load_all(ctx: &ResolveContext) -> Result<HashMap<String, String>> {
-        let path = Self::gpg_file_path(ctx.dir, ctx.config);
-        if !path.exists() {
-            bail!("GPG encrypted file not found: {}", path.display());
-        }
-        let content = Self::decrypt_file(&path)?;
+        let location = Self::gpg_file_location(ctx.dir, ctx.config)?;
+        let file = location.open()?;
+        let content = Self::decrypt_file(file, &location.display_path)?;
         Ok(Self::parse_env_content(&content))
     }
 
+    #[cfg(all(test, unix))]
     fn load_all_stored_secrets(ctx: &ResolveContext) -> Result<BTreeMap<String, StoredSecret>> {
-        let path = Self::gpg_file_path(ctx.dir, ctx.config);
-        if !path.exists() {
-            bail!("GPG encrypted file not found: {}", path.display());
-        }
-        let content = Self::decrypt_file(&path)?;
+        let location = Self::gpg_file_location(ctx.dir, ctx.config)?;
+        let file = location.open()?;
+        let content = Self::decrypt_file(file, &location.display_path)?;
         Ok(Self::parse_stored_secrets(&content))
     }
 
@@ -608,7 +748,7 @@ impl GpgBackend {
     }
 
     /// Encrypt to an anonymous descriptor, then publish from a private sibling directory.
-    fn encrypt_to_file(content: &str, location: &GpgOutputLocation, recipient: &str) -> Result<()> {
+    fn encrypt_to_file(content: &str, location: &GpgFileLocation, recipient: &str) -> Result<()> {
         debug!(
             "Encrypting content to GPG file: {}",
             location.display_path.display()
@@ -678,23 +818,16 @@ impl Backend for GpgBackend {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("GPG recipient must be configured to store secrets"))?;
 
-        let path = Self::gpg_file_path(ctx.dir, ctx.config);
-        let output_location = GpgOutputLocation::from_path(&path)?;
+        let location = Self::gpg_file_location(ctx.dir, ctx.config)?;
 
-        // Load existing content (or start empty)
-        let resolve_ctx = ResolveContext {
-            dir: ctx.dir,
-            config: ctx.config,
-            project: None,
-            repository: None,
-            interaction: None,
-        };
-        let mut existing = if path
-            .try_exists()
+        // Load the existing store from one already-open, project-confined handle.
+        let mut existing = if let Some(file) = location
+            .open_optional()
             .context("Failed to check the existing GPG secret store")?
         {
-            Self::load_all_stored_secrets(&resolve_ctx)
-                .context("Refusing to overwrite an unreadable GPG secret store")?
+            let content = Self::decrypt_file(file, &location.display_path)
+                .context("Refusing to overwrite an unreadable GPG secret store")?;
+            Self::parse_stored_secrets(&content)
         } else {
             BTreeMap::new()
         };
@@ -711,7 +844,7 @@ impl Backend for GpgBackend {
 
         let content = Self::serialize_stored_secrets(&existing);
 
-        Self::encrypt_to_file(&content, &output_location, recipient)?;
+        Self::encrypt_to_file(&content, &location, recipient)?;
         Ok(())
     }
 
@@ -849,25 +982,31 @@ mod tests {
     }
 
     #[test]
-    fn test_gpg_file_path() {
+    fn gpg_file_location_uses_default_pattern() {
         let config = Config {
             defaults: Defaults::default(),
             log: LogConfig::default(),
             updates: UpdateConfig::default(),
             projects: vec![],
         };
-        let dir = std::path::Path::new("/some/dir");
-        let path = GpgBackend::gpg_file_path(dir, &config);
-        assert_eq!(path, PathBuf::from("/some/dir/.env.gpg"));
+        let dir = tempfile::TempDir::new().unwrap();
+        let location = GpgBackend::gpg_file_location(dir.path(), &config).unwrap();
+        assert_eq!(
+            location.display_path,
+            dir.path().canonicalize().unwrap().join(".env.gpg")
+        );
+        assert_eq!(
+            GpgBackend::validated_store_path(dir.path(), &config).unwrap(),
+            location.display_path
+        );
     }
 
     #[test]
-    fn test_gpg_file_path_keeps_existing_path_within_project_dir() {
+    fn gpg_file_location_opens_contained_nested_file() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let nested = temp_dir.path().join("secrets").join("custom.gpg");
         std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
         std::fs::write(&nested, "ciphertext").unwrap();
-
         let config = Config {
             defaults: Defaults {
                 gpg: crate::config::GpgConfig {
@@ -881,19 +1020,51 @@ mod tests {
             projects: vec![],
         };
 
-        let path = GpgBackend::gpg_file_path(temp_dir.path(), &config);
-        assert_eq!(path, nested);
+        let location = GpgBackend::gpg_file_location(temp_dir.path(), &config).unwrap();
+        assert_eq!(
+            location.display_path,
+            std::fs::canonicalize(&nested).unwrap()
+        );
+        assert!(location.open().is_ok());
     }
 
     #[test]
-    fn test_gpg_file_path_falls_back_when_existing_path_escapes_project_dir() {
+    fn gpg_file_location_preserves_contained_file_symlink_target() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let nested = temp_dir.path().join("secrets").join("custom.gpg");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "ciphertext").unwrap();
+        std::os::unix::fs::symlink("secrets/custom.gpg", temp_dir.path().join("alias.gpg"))
+            .unwrap();
+        let config = Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    file_pattern: "alias.gpg".to_string(),
+                    recipient: None,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let location = GpgBackend::gpg_file_location(temp_dir.path(), &config).unwrap();
+        assert_eq!(
+            location.display_path,
+            std::fs::canonicalize(&nested).unwrap()
+        );
+        assert!(location.open().is_ok());
+    }
+
+    #[test]
+    fn gpg_file_location_rejects_external_file_symlink_even_with_default_present() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let outside_dir = tempfile::TempDir::new().unwrap();
         let outside_file = outside_dir.path().join("outside.gpg");
-        let linked_path = temp_dir.path().join("linked.gpg");
         std::fs::write(&outside_file, "ciphertext").unwrap();
-        std::os::unix::fs::symlink(&outside_file, &linked_path).unwrap();
-
+        std::fs::write(temp_dir.path().join(".env.gpg"), "default ciphertext").unwrap();
+        std::os::unix::fs::symlink(&outside_file, temp_dir.path().join("linked.gpg")).unwrap();
         let config = Config {
             defaults: Defaults {
                 gpg: crate::config::GpgConfig {
@@ -907,8 +1078,40 @@ mod tests {
             projects: vec![],
         };
 
-        let path = GpgBackend::gpg_file_path(temp_dir.path(), &config);
-        assert_eq!(path, temp_dir.path().join(".env.gpg"));
+        assert!(GpgBackend::gpg_file_location(temp_dir.path(), &config).is_err());
+    }
+
+    #[test]
+    fn gpg_file_location_rejects_escaping_parent_symlink_for_missing_leaf() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join(".env.gpg"), "default ciphertext").unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), temp_dir.path().join("linked-dir")).unwrap();
+        let config = Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    file_pattern: "linked-dir/new.gpg".to_string(),
+                    recipient: Some("test@example.com".to_string()),
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        assert!(GpgBackend::gpg_file_location(temp_dir.path(), &config).is_err());
+        assert!(!outside_dir.path().join("new.gpg").exists());
+    }
+
+    #[test]
+    fn relative_gpg_path_rejects_absolute_and_parent_components() {
+        assert!(GpgBackend::relative_gpg_path("../../etc/shadow.gpg").is_err());
+        assert!(GpgBackend::relative_gpg_path("/tmp/secrets.gpg").is_err());
+        assert_eq!(
+            GpgBackend::relative_gpg_path("./secrets/custom.gpg").unwrap(),
+            PathBuf::from("secrets/custom.gpg")
+        );
     }
 
     #[test]
@@ -1072,7 +1275,7 @@ PLAIN=value
         let script_path = dir.path().join("gpg");
         // Script echoes the preset decrypt output when --decrypt is given; exits 0 for anything else
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\nprintf '%s' '{}'\nelse\nfor arg do\n  [ \"$arg\" != \"--output\" ] || exit 91\ndone\ncat\nfi\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\n[ \"$#\" -eq 3 ] || exit 92\nprintf '%s' '{}'\nelse\nfor arg do\n  [ \"$arg\" != \"--output\" ] || exit 91\ndone\ncat\nfi\nexit 0\n",
             decrypt_output.replace('\'', "'\\''")
         );
         std::fs::write(&script_path, &script).unwrap();
@@ -1269,12 +1472,19 @@ PLAIN=value
     fn encrypt_to_file_writes_content_with_mock_gpg() {
         with_mock_gpg("", || {
             let temp_dir = tempfile::TempDir::new().unwrap();
-            let path = temp_dir.path().join(".env.gpg");
-
-            let location = GpgOutputLocation::from_path(&path).unwrap();
+            let config = Config {
+                defaults: Defaults::default(),
+                log: LogConfig::default(),
+                updates: UpdateConfig::default(),
+                projects: vec![],
+            };
+            let location = GpgBackend::gpg_file_location(temp_dir.path(), &config).unwrap();
             GpgBackend::encrypt_to_file("KEY=value\n", &location, "test@example.com").unwrap();
 
-            assert_eq!(std::fs::read_to_string(path).unwrap(), "KEY=value\n");
+            assert_eq!(
+                std::fs::read_to_string(location.display_path).unwrap(),
+                "KEY=value\n"
+            );
         });
     }
 
@@ -1302,11 +1512,14 @@ PLAIN=value
     fn store_creates_new_file_with_mock_gpg() {
         with_mock_gpg("", || {
             let temp_dir = tempfile::TempDir::new().unwrap();
+            let gpg_dir = temp_dir.path().join("secrets");
+            std::fs::create_dir(&gpg_dir).unwrap();
+            let gpg_file = gpg_dir.join("custom.gpg");
             let config = Config {
                 defaults: Defaults {
                     gpg: crate::config::GpgConfig {
                         recipient: Some("test@example.com".to_string()),
-                        file_pattern: ".env.gpg".to_string(),
+                        file_pattern: "secrets/custom.gpg".to_string(),
                     },
                     ..Defaults::default()
                 },
@@ -1320,9 +1533,9 @@ PLAIN=value
                 project: None,
                 repository: None,
             };
-            // No .env.gpg file exists yet — store should create it via mock gpg encrypt
-            let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
-            assert!(result.is_ok(), "store failed: {:?}", result);
+            // A new file under a verified nested directory can be initialized.
+            GpgBackend.store("NEW_KEY", "new-value", &ctx).unwrap();
+            assert!(gpg_file.exists());
         });
     }
 
@@ -1488,7 +1701,8 @@ API_KEY=secret\n";
     }
 
     #[test]
-    fn test_gpg_file_path_rejects_traversal() {
+    fn gpg_file_location_rejects_traversal_without_fallback() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
         let config = Config {
             defaults: Defaults {
                 gpg: crate::config::GpgConfig {
@@ -1501,14 +1715,30 @@ API_KEY=secret\n";
             updates: UpdateConfig::default(),
             projects: vec![],
         };
-        let dir = std::path::Path::new("/some/dir");
-        let path = GpgBackend::gpg_file_path(dir, &config);
-        // Should fall back to default rather than allowing traversal
-        assert_eq!(path, PathBuf::from("/some/dir/.env.gpg"));
+        assert!(GpgBackend::gpg_file_location(temp_dir.path(), &config).is_err());
     }
 
     #[test]
-    fn test_gpg_file_path_allows_safe_pattern() {
+    fn gpg_file_location_rejects_absolute_pattern() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    file_pattern: temp_dir.path().join("secrets.gpg").display().to_string(),
+                    recipient: None,
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        };
+        assert!(GpgBackend::gpg_file_location(temp_dir.path(), &config).is_err());
+    }
+
+    #[test]
+    fn gpg_file_location_allows_safe_pattern() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
         let config = Config {
             defaults: Defaults {
                 gpg: crate::config::GpgConfig {
@@ -1521,9 +1751,11 @@ API_KEY=secret\n";
             updates: UpdateConfig::default(),
             projects: vec![],
         };
-        let dir = std::path::Path::new("/some/dir");
-        let path = GpgBackend::gpg_file_path(dir, &config);
-        assert_eq!(path, PathBuf::from("/some/dir/secrets.gpg"));
+        let location = GpgBackend::gpg_file_location(temp_dir.path(), &config).unwrap();
+        assert_eq!(
+            location.display_path,
+            temp_dir.path().canonicalize().unwrap().join("secrets.gpg")
+        );
     }
 
     #[test]
