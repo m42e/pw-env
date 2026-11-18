@@ -1040,7 +1040,7 @@ impl ApprovedSecretFetches {
     }
 
     fn path() -> Option<PathBuf> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(p) = TEST_SECRET_FETCH_STORE_PATH.with(|v| v.borrow().clone()) {
             return Some(p);
         }
@@ -1198,6 +1198,11 @@ fn resolve_project_override_target(path: &Path) -> Result<PathBuf> {
     candidate
         .canonicalize()
         .with_context(|| format!("Failed to resolve {}", candidate.display()))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_secret_fetch_store_path(path: Option<PathBuf>) {
+    TEST_SECRET_FETCH_STORE_PATH.with(|value| *value.borrow_mut() = path);
 }
 
 #[cfg(any(test, feature = "test-support"))]

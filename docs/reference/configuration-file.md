@@ -141,8 +141,9 @@ pw-env stops at the highest ancestor git root.
 
 When `source_all` is `true`, pw-env exports all entries from the `.env` file — not just the ones resolved from a
 backend. Entries with plaintext values (e.g. `LOG_LEVEL=debug`) are included in the shell exports or injected into
-the child process alongside the secret values. The default is `false`, which means only backend-resolved entries are
-exported.
+the child process alongside the secret values. Plaintext-only files also require approval before export, because their
+values can affect shell startup and child-process behavior. The default is `false`, which means only backend-resolved
+entries are exported.
 
 When `[defaults.cache]` or `[cache]` is enabled, pw-env stores resolved secret values in the OS keyring when that
 secure store is available. If the keyring is unavailable, pw-env keeps resolving from the backend normally and simply

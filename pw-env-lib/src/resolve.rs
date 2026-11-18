@@ -322,6 +322,14 @@ fn resolve_env_file_with_options(
     // When source_all is enabled but there are no resolvable (secret) entries,
     // skip backend resolution and just return the plaintext values.
     if entries.is_empty() {
+        let has_plaintext_values = env_file
+            .entries()
+            .iter()
+            .any(|entry| matches!(&entry.kind, EntryKind::Plaintext(_)));
+        if source_all && has_plaintext_values {
+            Config::ensure_secret_fetch_approved(env_file)?;
+        }
+
         debug!("No resolvable entries found; returning plaintext values via source_all");
         for entry in env_file.entries() {
             if let EntryKind::Plaintext(value) = &entry.kind {
@@ -1269,7 +1277,22 @@ branch "broken"]
             updates: crate::config::UpdateConfig::default(),
             projects: vec![],
         };
+        crate::config::set_test_secret_fetch_store_path(Some(
+            temp.join("approved-secret-fetches.json"),
+        ));
+
+        let unapproved = resolve_env_file(&env_file, &config, &temp);
+        Config::ensure_secret_fetch_approved_with(&env_file, |_| {
+            Ok(Some(crate::config::SecretFetchApprovalMode::CurrentEnvHash))
+        })
+        .unwrap();
         let result = resolve_env_file(&env_file, &config, &temp);
+        crate::config::set_test_secret_fetch_store_path(None);
+
+        assert!(
+            unapproved.is_err(),
+            "source_all must not export plaintext from an unapproved file"
+        );
         let _ = fs::remove_dir_all(&temp);
         let resolved = result.unwrap();
         assert_eq!(resolved.get("LOG_LEVEL").map(String::as_str), Some("debug"));

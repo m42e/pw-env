@@ -461,20 +461,20 @@ fn prompt_secret_fetch(
 ) -> Result<Option<config::SecretFetchApprovalMode>> {
     if !prompt_stdin_is_terminal() {
         let state = if request.previously_approved {
-            "changed since its last approved .env contents"
+            "changed since its last approved contents"
         } else {
-            "has not been approved yet"
+            "has not been approved"
         };
         anyhow::bail!(
-            "pw-env: credential fetching for project {} with {} {}. Re-run in an interactive session to approve this environment-file hash or allow the whole project.",
-            request.project_path.display(),
+            "pw-env: environment file {} for project {} {}. Re-run in an interactive session to approve this environment-file hash or allow the whole project.",
             request.env_path.display(),
+            request.project_path.display(),
             state,
         );
     }
 
     eprintln!(
-        "Credential fetch approval required for project {}",
+        "Environment-file approval required for project {}",
         request.project_path.display()
     );
     eprintln!("Environment file: {}", request.env_path.display());
@@ -482,13 +482,13 @@ fn prompt_secret_fetch(
         eprintln!("This environment file changed since the last approved version.");
     } else {
         eprintln!(
-            "This environment file can trigger secret lookups from your configured password backend."
+            "This file can trigger backend lookups or export values, depending on project settings."
         );
     }
     eprintln!(
-        "Approve the current environment-file hash only, or allow any future environment-file changes in this project."
+        "Approval applies to the current file contents, or you can allow future environment-file changes in this project."
     );
-    eprint!("Approve secret fetching? [y] current hash / [a]ll project changes / [N] no ");
+    eprint!("Approve this environment file? [y] current hash / [a]ll project changes / [N] no ");
     io::stderr().flush()?;
 
     let input = read_prompt_line()?;
@@ -506,7 +506,13 @@ fn resolve_environment(
     interaction: Option<&dyn backend::ResolutionInteraction>,
     allow_missing: bool,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    if !env_file.resolvable_entries().is_empty() {
+    let entries = env_file.entries();
+    let has_plaintext_values = entries
+        .iter()
+        .any(|entry| matches!(&entry.kind, env_file::EntryKind::Plaintext(_)));
+    let has_managed_entries = !env_file.resolvable_entries().is_empty();
+    let exports_plaintext = config.effective_source_all(dir) && has_plaintext_values;
+    if has_managed_entries || exports_plaintext {
         config::Config::ensure_secret_fetch_approved_with(env_file, prompt_secret_fetch)?;
     }
     if allow_missing {
@@ -1845,6 +1851,40 @@ mod tests {
         let result = with_mock_prompt_io(true, "n\n", || prompt_secret_fetch(&request));
 
         assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn source_all_plaintext_requires_environment_file_approval() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "PROMPT_COMMAND=echo injected\n").unwrap();
+        let env_file = env_file::EnvFile::parse(&env_path).unwrap();
+        let config = config::Config {
+            defaults: config::Defaults {
+                source_all: true,
+                ..config::Defaults::default()
+            },
+            log: config::LogConfig::default(),
+            updates: config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        config::set_test_secret_fetch_store_path(Some(
+            temp_dir.path().join("approved-secret-fetches.json"),
+        ));
+
+        let denied = with_mock_prompt_io(false, "", || {
+            resolve_environment(&env_file, &config, temp_dir.path(), None, false)
+        });
+        let approved = with_mock_prompt_io(true, "y\n", || {
+            resolve_environment(&env_file, &config, temp_dir.path(), None, false)
+        });
+        config::set_test_secret_fetch_store_path(None);
+
+        assert!(denied.is_err(), "noninteractive export must fail closed");
+        assert_eq!(
+            approved.unwrap().get("PROMPT_COMMAND").map(String::as_str),
+            Some("echo injected")
+        );
     }
 
     #[test]

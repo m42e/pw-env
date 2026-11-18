@@ -7,7 +7,7 @@ pw-env keeps two different trust boundaries separate.
 | Approval | Controls | Default scope |
 | --- | --- | --- |
 | Project override approval | Whether `.pw-env.toml` may change the effective config | The exact file content hash |
-| Secret-fetch approval | Whether a project `.env` may trigger backend lookups | The exact `.env` hash for the project |
+| Secret-fetch approval | Whether a project `.env` may trigger backend lookups or export plaintext values with `source_all` | The exact `.env` hash for the project |
 
 ## Project-local overrides
 
@@ -31,7 +31,8 @@ override is skipped instead of being loaded silently.
 ## Secret-fetch approvals
 
 Before pw-env resolves empty values or explicit backend references from `.env`, it checks whether the project is
-approved to fetch secrets.
+approved to fetch secrets. The same approval also protects plaintext-only files when `source_all` is enabled, because
+those values can affect the shell or child-process environment.
 
 By default, approval is tied to the current `.env` hash. That keeps a reviewed `.env` file approved while still forcing
 a fresh approval when the file changes.
@@ -52,7 +53,7 @@ Use `--project-wide` only when you want future `.env` changes in the same projec
 
 1. Review `.pw-env.toml` like any other project config change.
 2. Approve the local override with `pw-env approvals approve .`.
-3. Approve secret fetching with `pw-env approvals approve-fetch .`.
+3. Approve `.env` use with `pw-env approvals approve-fetch .`.
 4. Revisit the approval when `.env` or `.pw-env.toml` changes.
 
 ## Where approval state lives
