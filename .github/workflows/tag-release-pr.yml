@@ -27,41 +27,52 @@ jobs:
         run: |
           version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           library_version=$(grep '^version' pw-env-lib/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cargo.toml does not contain a numeric release version"
+            exit 1
+          fi
           if [ "$library_version" != "$version" ]; then
-            echo "::error::Library version $library_version does not match CLI version $version"
+            echo "::error::Library version does not match CLI version"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
       - name: Verify branch name matches version
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          branch="${{ github.event.pull_request.head.ref }}"
-          expected="release/v${{ steps.version.outputs.version }}"
-          if [ "$branch" != "$expected" ]; then
-            echo "::error::Branch $branch does not match expected $expected"
+          expected="release/v$RELEASE_VERSION"
+          if [ "$RELEASE_BRANCH" != "$expected" ]; then
+            echo "::error::Release branch does not match the version in Cargo.toml"
             exit 1
           fi
 
       - name: Verify tag does not exist
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
-            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists"
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release tag already exists"
             exit 1
           fi
 
       - name: Create and push tag
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
+          git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
 
       - name: Dispatch release workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh workflow run release.yml --field tag="${{ steps.version.outputs.tag }}"
+          gh workflow run release.yml --field tag="$RELEASE_TAG"
 
   cleanup:
     name: Delete closed release branch
@@ -77,10 +88,11 @@ jobs:
           fetch-depth: 0
 
       - name: Delete release branch
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          branch="${{ github.event.pull_request.head.ref }}"
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            git push origin --delete "$branch"
+          if git ls-remote --exit-code --heads origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
+            git push origin --delete "$RELEASE_BRANCH"
           else
-            echo "Branch $branch already deleted"
+            echo "Release branch already deleted"
           fi

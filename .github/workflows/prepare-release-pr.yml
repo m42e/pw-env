@@ -16,22 +16,28 @@ jobs:
   prepare:
     name: Prepare release v${{ inputs.version }}
     runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
         with:
           fetch-depth: 0
 
       - name: Validate version format
+        id: validated_version
         run: |
-          if ! echo "${{ inputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Version must be in semver format (e.g. 1.2.3)"
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must be in numeric release format (e.g. 1.2.3)"
             exit 1
           fi
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check tag does not exist
+        env:
+          RELEASE_TAG: v${{ steps.validated_version.outputs.version }}
         run: |
-          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::Tag v${{ inputs.version }} already exists"
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release tag already exists"
             exit 1
           fi
 
@@ -57,9 +63,8 @@ jobs:
 
       - name: Update version in Cargo.toml
         run: |
-          version="${{ inputs.version }}"
-          library_requirement=$(printf '%s' "$version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-          sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml pw-env-lib/Cargo.toml
+          library_requirement=$(printf '%s' "$RELEASE_VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+          sed -i "s/^version = \".*\"/version = \"$RELEASE_VERSION\"/" Cargo.toml pw-env-lib/Cargo.toml
           sed -i -E "s|pw-env-lib = \{ version = \"[0-9]+\.[0-9]+\"|pw-env-lib = { version = \"${library_requirement}\"|" Cargo.toml
           cargo check --quiet 2>/dev/null || cargo update
 
@@ -70,12 +75,14 @@ jobs:
         uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # pin: v4.7.1
         with:
           config: .github/cliff.toml
-          args: --tag "v${{ inputs.version }}" --unreleased --strip header
+          args: --tag "v${{ steps.validated_version.outputs.version }}" --unreleased --strip header
         env:
-          OUTPUT: release-notes/v${{ inputs.version }}.md
+          OUTPUT: release-notes/v${{ steps.validated_version.outputs.version }}.md
 
       - name: Format release notes with rumdl
-        run: ~/.local/bin/rumdl fmt "release-notes/v${{ inputs.version }}.md"
+        env:
+          RELEASE_VERSION: ${{ steps.validated_version.outputs.version }}
+        run: ~/.local/bin/rumdl fmt "release-notes/v$RELEASE_VERSION.md"
 
       - name: Refresh screencast
         run: ./scripts/render-config-flow-screencast.sh --update-docs
@@ -84,24 +91,25 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin: v7.0.1
         with:
           name: release-notes
-          path: release-notes/v${{ inputs.version }}.md
+          path: release-notes/v${{ steps.validated_version.outputs.version }}.md
 
       - name: Create release branch and open PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.validated_version.outputs.version }}
         run: |
-          branch="release/v${{ inputs.version }}"
+          branch="release/v$RELEASE_VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
           git add Cargo.toml pw-env-lib/Cargo.toml Cargo.lock docs/pw-env-config-init-migrate-auto-load.gif release-notes/
-          git commit -m "chore: prepare release v${{ inputs.version }}"
+          git commit -m "chore: prepare release v$RELEASE_VERSION"
           git push origin "$branch" --force
           gh pr create \
             --base main \
             --head "$branch" \
-            --title "Release v${{ inputs.version }}" \
-            --body "Automated release preparation for **v${{ inputs.version }}**.
+            --title "Release v$RELEASE_VERSION" \
+            --body "Automated release preparation for **v$RELEASE_VERSION**.
 
           ## Checklist
           - [ ] Version bump looks correct
