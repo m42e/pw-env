@@ -27,7 +27,8 @@ Options:
 
 Environment:
   INSTALL_DIR          Overrides the destination directory.
-  GITHUB_TOKEN         Optional token for GitHub API requests.
+  GITHUB_TOKEN         Optional token for GitHub API requests. Authenticated latest-release
+                       lookup requires curl; wget is used anonymously when no token is set.
 EOF
 }
 
@@ -41,14 +42,17 @@ need_cmd() {
 }
 
 download_text() {
-  url="$1"
+  local url="$1"
 
   if command -v curl >/dev/null 2>&1; then
     if [ -n "${GITHUB_TOKEN:-}" ]; then
-      curl -fsSL \
+      case "$GITHUB_TOKEN" in
+        *[!A-Za-z0-9._~+/=-]*) fail "GITHUB_TOKEN contains characters that cannot be sent safely" ;;
+      esac
+      printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" | curl -fsSL \
+        -H @- \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
-        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
         "$url"
     else
       curl -fsSL \
@@ -61,17 +65,12 @@ download_text() {
 
   if command -v wget >/dev/null 2>&1; then
     if [ -n "${GITHUB_TOKEN:-}" ]; then
-      wget -qO- \
-        --header="Accept: application/vnd.github+json" \
-        --header="X-GitHub-Api-Version: 2022-11-28" \
-        --header="Authorization: Bearer ${GITHUB_TOKEN}" \
-        "$url"
-    else
-      wget -qO- \
-        --header="Accept: application/vnd.github+json" \
-        --header="X-GitHub-Api-Version: 2022-11-28" \
-        "$url"
+      fail "authenticated metadata lookup requires curl for safe token handling"
     fi
+    wget -qO- \
+      --header="Accept: application/vnd.github+json" \
+      --header="X-GitHub-Api-Version: 2022-11-28" \
+      "$url"
     return
   fi
 
