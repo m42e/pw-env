@@ -42,10 +42,12 @@ pub enum EnvLine {
 }
 
 /// Parsed .env file.
+#[derive(Debug)]
 pub struct EnvFile {
     path: PathBuf,
     project_path: PathBuf,
     lines: Vec<EnvLine>,
+    source_contents: String,
     content_hash: String,
     protection: FileProtectionSnapshot,
 }
@@ -167,6 +169,7 @@ impl EnvFile {
             path: canonical_path,
             project_path,
             lines,
+            source_contents: contents,
             content_hash,
             protection,
         })
@@ -185,6 +188,18 @@ impl EnvFile {
     /// Return the SHA-256 hash of the exact contents used to parse this snapshot.
     pub fn content_hash(&self) -> &str {
         &self.content_hash
+    }
+
+    /// Append a managed key using the exact source snapshot parsed by this
+    /// instance, refusing to overwrite a file that changed in the meantime.
+    pub fn append_with_key_value(&self, key: &str, value: &str) -> Result<()> {
+        let mut output = self.source_contents.clone();
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&format!("{key}={value}\n"));
+        atomic_write_file_with_protection(&self.path, output.as_bytes(), &self.protection)
+            .with_context(|| format!("Failed to append to .env file: {}", self.path.display()))
     }
 
     /// Return the preserved source lines without allowing callers to mutate them.
@@ -710,6 +725,7 @@ mod tests {
                     kind: EntryKind::Plaintext("debug".to_string()),
                 }),
             ],
+            source_contents: String::new(),
             content_hash: String::new(),
             protection: FileProtectionSnapshot::test_default(),
         };
@@ -744,6 +760,7 @@ mod tests {
                     kind: EntryKind::Plaintext("Qx9Lpm7_aB2Nz8VwK4rTy1Hu".to_string()),
                 }),
             ],
+            source_contents: String::new(),
             content_hash: String::new(),
             protection: FileProtectionSnapshot::test_default(),
         };

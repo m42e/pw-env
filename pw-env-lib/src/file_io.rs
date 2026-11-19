@@ -646,4 +646,60 @@ mod tests {
             "KEEP=unmigrated-secret\nAPI_KEY=\n"
         );
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn add_append_preserves_private_dacl_under_broader_parent_acl() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join(".env");
+        fs::write(&path, "EXISTING_KEY=\n").unwrap();
+
+        let owner = std::env::var("USERNAME").expect("Windows tests need a user name");
+        let users = "*S-1-5-32-545:(OI)(CI)(RX)";
+        let output = std::process::Command::new("icacls")
+            .args([
+                directory.path().as_os_str(),
+                std::ffi::OsStr::new("/grant"),
+                std::ffi::OsStr::new(users),
+            ])
+            .output()
+            .expect("icacls must be available on Windows");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new("icacls")
+            .arg(&path)
+            .args(["/inheritance:r", "/grant:r"])
+            .arg(format!("{owner}:(F)"))
+            .output()
+            .expect("icacls must be available on Windows");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let source = open_regular_file_nofollow(&path).unwrap();
+        let (source_dacl, source_len, _, source_protected) = windows_dacl(&source).unwrap();
+        assert!(source_protected, "test source ACL should be protected");
+        let env_file = crate::env_file::EnvFile::parse(&path).unwrap();
+
+        env_file
+            .append_with_key_value("API_KEY", "op://vault/item/password")
+            .unwrap();
+
+        let replacement = open_regular_file_nofollow(&path).unwrap();
+        let (replacement_dacl, replacement_len, _, replacement_protected) =
+            windows_dacl(&replacement).unwrap();
+        let words = source_len.div_ceil(std::mem::size_of::<u64>());
+        assert_eq!(replacement_len, source_len);
+        assert_eq!(replacement_dacl[..words], source_dacl[..words]);
+        assert!(replacement_protected);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "EXISTING_KEY=\nAPI_KEY=op://vault/item/password\n"
+        );
+    }
 }

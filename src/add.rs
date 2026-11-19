@@ -75,7 +75,8 @@ pub fn add_entry_with_interaction(
     }
 
     let url = backend.reference_url(key, &store_ctx);
-    let env_message = apply_env_entry_update(env_update, key, url.as_deref())?;
+    let env_message =
+        apply_env_entry_update_after_store(env_update, key, url.as_deref(), backend.name())?;
 
     eprintln!("Stored {key} in {}.", backend.name());
     eprintln!("{env_message}");
@@ -87,11 +88,11 @@ fn uses_bitwarden_backend(backend_name: &str) -> bool {
     backend_name == "bw"
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum EnvEntryUpdate {
     Create(PathBuf),
-    Append(PathBuf),
-    AlreadyManaged(PathBuf),
+    Append(env_file::EnvFile),
+    AlreadyManaged(env_file::EnvFile),
 }
 
 fn validate_key(key: &str) -> Result<()> {
@@ -195,7 +196,7 @@ fn plan_env_entry_update(dir: &Path, config: &Config, key: &str) -> Result<EnvEn
         .find(|entry| entry.key == key)
     {
         match &existing_entry.kind {
-            EntryKind::Empty => return Ok(EnvEntryUpdate::AlreadyManaged(env_path)),
+            EntryKind::Empty => return Ok(EnvEntryUpdate::AlreadyManaged(env_file)),
             EntryKind::OpReference(_) | EntryKind::BwReference(_) => {
                 bail!(
                     "{key} already exists in {} as an explicit backend reference. Clear that value first if you want pw-env add to manage it via the default backend.",
@@ -211,7 +212,7 @@ fn plan_env_entry_update(dir: &Path, config: &Config, key: &str) -> Result<EnvEn
         }
     }
 
-    Ok(EnvEntryUpdate::Append(env_path))
+    Ok(EnvEntryUpdate::Append(env_file))
 }
 
 fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) -> Result<String> {
@@ -236,16 +237,10 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
                 ))
             }
         }
-        EnvEntryUpdate::Append(path) => {
+        EnvEntryUpdate::Append(env_file) => {
             let entry_value = url.unwrap_or("");
-            let mut contents = std::fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            if !contents.is_empty() && !contents.ends_with('\n') {
-                contents.push('\n');
-            }
-            contents.push_str(&format!("{key}={entry_value}\n"));
-            crate::config::atomic_write_file(&path, contents.as_bytes(), false)
-                .with_context(|| format!("Failed to update {}", path.display()))?;
+            env_file.append_with_key_value(key, entry_value)?;
+            let path = env_file.path();
             if url.is_some() {
                 Ok(format!(
                     "Added a managed entry for {key} to {}.",
@@ -258,9 +253,9 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
                 ))
             }
         }
-        EnvEntryUpdate::AlreadyManaged(path) => {
+        EnvEntryUpdate::AlreadyManaged(env_file) => {
+            let path = env_file.path();
             if let Some(url) = url {
-                let env_file = env_file::EnvFile::parse(&path)?;
                 env_file.rewrite_with_key_value(key, url)?;
                 Ok(format!(
                     "Updated {} to write the backend URL for {key}.",
@@ -274,6 +269,19 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
             }
         }
     }
+}
+
+fn apply_env_entry_update_after_store(
+    update: EnvEntryUpdate,
+    key: &str,
+    url: Option<&str>,
+    backend_name: &str,
+) -> Result<String> {
+    apply_env_entry_update(update, key, url).with_context(|| {
+        format!(
+            "Secret '{key}' was stored and verified in {backend_name}, but the environment file was not updated; resolve that file conflict before retrying to avoid creating another vault item"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -352,7 +360,10 @@ mod tests {
     fn plan_env_entry_update_creates_new_env_when_missing() {
         let temp_dir = TempDir::new().unwrap();
         let result = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
-        assert_eq!(result, EnvEntryUpdate::Create(temp_dir.path().join(".env")));
+        assert!(matches!(
+            result,
+            EnvEntryUpdate::Create(path) if path == temp_dir.path().join(".env")
+        ));
     }
 
     #[test]
@@ -362,7 +373,11 @@ mod tests {
         std::fs::write(&env_path, "API_KEY=\n").unwrap();
 
         let result = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
-        assert_eq!(result, EnvEntryUpdate::AlreadyManaged(env_path));
+        assert!(matches!(
+            result,
+            EnvEntryUpdate::AlreadyManaged(env_file)
+                if env_file.path() == env_path.canonicalize().unwrap()
+        ));
     }
 
     #[test]
@@ -381,7 +396,8 @@ mod tests {
         let env_path = temp_dir.path().join(".env");
         std::fs::write(&env_path, "EXISTING_KEY=").unwrap();
 
-        apply_env_entry_update(EnvEntryUpdate::Append(env_path.clone()), "API_KEY", None).unwrap();
+        let update = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
+        apply_env_entry_update(update, "API_KEY", None).unwrap();
 
         let contents = std::fs::read_to_string(env_path).unwrap();
         assert_eq!(contents, "EXISTING_KEY=\nAPI_KEY=\n");
@@ -393,10 +409,80 @@ mod tests {
         let env_path = temp_dir.path().join(".env");
         std::fs::write(&env_path, "").unwrap();
 
-        apply_env_entry_update(EnvEntryUpdate::Append(env_path.clone()), "API_KEY", None).unwrap();
+        let update = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
+        apply_env_entry_update(update, "API_KEY", None).unwrap();
 
         let contents = std::fs::read_to_string(env_path).unwrap();
         assert_eq!(contents, "API_KEY=\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_env_entry_update_preserves_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "EXISTING_KEY=\n").unwrap();
+        std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let update = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
+        apply_env_entry_update(update, "API_KEY", None).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&env_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_to_string(env_path).unwrap(),
+            "EXISTING_KEY=\nAPI_KEY=\n"
+        );
+    }
+
+    #[test]
+    fn apply_env_entry_update_does_not_copy_replacement_file_contents() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        let displaced = temp_dir.path().join(".env.original");
+        std::fs::write(&env_path, "EXISTING_KEY=\n").unwrap();
+        let update = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
+
+        std::fs::rename(&env_path, &displaced).unwrap();
+        std::fs::write(&env_path, "EXTERNAL=do-not-copy\n").unwrap();
+        let error = apply_env_entry_update_after_store(
+            update,
+            "API_KEY",
+            Some("op://vault/item/password"),
+            "1Password",
+        )
+        .expect_err("replacement after planning must be reported as a conflict");
+
+        assert!(format!("{error:#}").contains("changed after it was read"));
+        assert!(format!("{error:#}").contains("stored and verified in 1Password"));
+        assert!(format!("{error:#}").contains("avoid creating another vault item"));
+        assert_eq!(
+            std::fs::read_to_string(&env_path).unwrap(),
+            "EXTERNAL=do-not-copy\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(displaced).unwrap(),
+            "EXISTING_KEY=\n"
+        );
+    }
+
+    #[test]
+    fn apply_env_entry_update_rejects_in_place_change_after_planning() {
+        let temp_dir = TempDir::new().unwrap();
+        let env_path = temp_dir.path().join(".env");
+        std::fs::write(&env_path, "EXISTING_KEY=\n").unwrap();
+        let update = plan_env_entry_update(temp_dir.path(), &Config::default(), "API_KEY").unwrap();
+
+        std::fs::write(&env_path, "CHANGED=keep\n").unwrap();
+        let error = apply_env_entry_update(update, "API_KEY", None)
+            .expect_err("contents modified after planning must be rejected");
+
+        assert!(format!("{error:#}").contains("changed after it was read"));
+        assert_eq!(std::fs::read_to_string(env_path).unwrap(), "CHANGED=keep\n");
     }
 
     #[test]
@@ -422,7 +508,7 @@ mod tests {
         std::fs::write(&env_path, "EXISTING_KEY=\n").unwrap();
 
         apply_env_entry_update(
-            EnvEntryUpdate::Append(env_path.clone()),
+            EnvEntryUpdate::Append(env_file::EnvFile::parse(&env_path).unwrap()),
             "API_KEY",
             Some("op://vault/item/password"),
         )
@@ -442,7 +528,7 @@ mod tests {
         std::fs::write(&env_path, "API_KEY=\n").unwrap();
 
         apply_env_entry_update(
-            EnvEntryUpdate::AlreadyManaged(env_path.clone()),
+            EnvEntryUpdate::AlreadyManaged(env_file::EnvFile::parse(&env_path).unwrap()),
             "API_KEY",
             Some("op://vault/item/password"),
         )
@@ -459,7 +545,7 @@ mod tests {
         std::fs::write(&env_path, "API_KEY=\n").unwrap();
 
         apply_env_entry_update(
-            EnvEntryUpdate::AlreadyManaged(env_path.clone()),
+            EnvEntryUpdate::AlreadyManaged(env_file::EnvFile::parse(&env_path).unwrap()),
             "API_KEY",
             None,
         )
