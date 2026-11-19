@@ -2301,6 +2301,7 @@ dependencies = [
  "cap-std",
  "dirs",
  "keyring",
+ "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",

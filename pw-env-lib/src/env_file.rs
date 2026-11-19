@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use tracing::debug;
+
+use crate::file_io::{
+    FileProtectionSnapshot, atomic_write_file_with_protection, open_regular_file_nofollow,
+};
 
 /// Classification of a .env entry's value.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +47,7 @@ pub struct EnvFile {
     project_path: PathBuf,
     lines: Vec<EnvLine>,
     content_hash: String,
+    protection: FileProtectionSnapshot,
 }
 
 impl EnvFile {
@@ -92,20 +97,26 @@ impl EnvFile {
 
     /// Parse a .env file, classifying each entry.
     pub fn parse(path: &Path) -> Result<Self> {
-        if path.is_symlink() {
-            anyhow::bail!(
-                "Refusing to read .env symlink at {}. Use a regular file.",
-                path.display()
-            );
-        }
-        let canonical_path = path
+        let file_name = path.file_name().ok_or_else(|| {
+            anyhow::anyhow!("Environment path has no file name: {}", path.display())
+        })?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let canonical_path = parent
             .canonicalize()
-            .with_context(|| format!("Failed to resolve .env file: {}", path.display()))?;
+            .with_context(|| format!("Failed to resolve .env directory: {}", parent.display()))?
+            .join(file_name);
         debug!("Parsing .env file: {}", canonical_path.display());
-        let contents = std::fs::read_to_string(&canonical_path)
+        let mut file = open_regular_file_nofollow(&canonical_path)
+            .with_context(|| format!("Failed to read .env file: {}", path.display()))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
             .with_context(|| format!("Failed to read .env file: {}", path.display()))?;
         let digest = Sha256::digest(contents.as_bytes());
         let content_hash = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        let protection = FileProtectionSnapshot::capture(&file, contents.as_bytes())?;
         let project_path = project_path_for_env_file(&canonical_path)?;
         let reader = BufReader::new(contents.as_bytes());
         let mut lines = Vec::new();
@@ -157,6 +168,7 @@ impl EnvFile {
             project_path,
             lines,
             content_hash,
+            protection,
         })
     }
 
@@ -261,7 +273,7 @@ impl EnvFile {
                 }
             }
         }
-        crate::config::atomic_write_file(&self.path, output.as_bytes(), false)
+        atomic_write_file_with_protection(&self.path, output.as_bytes(), &self.protection)
             .with_context(|| format!("Failed to rewrite .env file: {}", self.path.display()))?;
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())
@@ -295,7 +307,7 @@ impl EnvFile {
                 }
             }
         }
-        crate::config::atomic_write_file(&self.path, output.as_bytes(), false)
+        atomic_write_file_with_protection(&self.path, output.as_bytes(), &self.protection)
             .with_context(|| format!("Failed to rewrite .env file: {}", self.path.display()))?;
         debug!("Rewrote .env file: {}", self.path.display());
         Ok(())
@@ -699,6 +711,7 @@ mod tests {
                 }),
             ],
             content_hash: String::new(),
+            protection: FileProtectionSnapshot::test_default(),
         };
 
         let detected: Vec<&str> = env_file
@@ -732,6 +745,7 @@ mod tests {
                 }),
             ],
             content_hash: String::new(),
+            protection: FileProtectionSnapshot::test_default(),
         };
 
         let reviewed = std::collections::BTreeSet::from([match &env_file.lines[0] {
