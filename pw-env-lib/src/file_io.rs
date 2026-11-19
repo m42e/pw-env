@@ -102,9 +102,16 @@ impl FileProtectionSnapshot {
         {
             let (dacl, dacl_len, dacl_present, dacl_protected) = windows_dacl(file)?;
             let dacl_words = dacl_len.div_ceil(std::mem::size_of::<u64>());
+            let expected_dacl = if destination {
+                self.dacl.clone()
+            } else {
+                // Windows clears INHERITED_ACE when a copied inherited DACL
+                // becomes explicit on a protected staging file.
+                self.explicit_dacl()?
+            };
             let dacl_matches = dacl_len == self.dacl_len
                 && (!destination || dacl_present == self.dacl_present)
-                && dacl[..dacl_words] == self.dacl[..dacl_words];
+                && dacl[..dacl_words] == expected_dacl[..dacl_words];
             // The staged file's DACL is protected from later inheritance by a
             // broader parent. The source's protection state is still checked
             // before publication so a concurrent ACL edit is detected.
@@ -118,6 +125,30 @@ impl FileProtectionSnapshot {
     }
 
     #[cfg(windows)]
+    fn explicit_dacl(&self) -> Result<Vec<u64>> {
+        use windows_sys::Win32::Security::{ACE_HEADER, ACL, GetAce, INHERITED_ACE};
+
+        let mut dacl = self.dacl.clone();
+        if self.dacl_len == 0 {
+            return Ok(dacl);
+        }
+
+        let acl = dacl.as_mut_ptr().cast::<ACL>();
+        let ace_count = unsafe { (*acl).AceCount };
+        for index in 0..ace_count {
+            let mut ace = std::ptr::null_mut();
+            let found = unsafe { GetAce(acl, u32::from(index), &mut ace) };
+            if found == 0 || ace.is_null() {
+                anyhow::bail!("Failed to inspect Windows environment file DACL entry");
+            }
+            unsafe {
+                (*ace.cast::<ACE_HEADER>()).AceFlags &= !(INHERITED_ACE as u8);
+            }
+        }
+        Ok(dacl)
+    }
+
+    #[cfg(windows)]
     fn apply_windows_dacl(&self, file: &File) -> Result<()> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
@@ -126,10 +157,11 @@ impl FileProtectionSnapshot {
             ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
         };
 
+        let explicit_dacl = self.explicit_dacl()?;
         let dacl = if self.dacl_len == 0 {
             std::ptr::null()
         } else {
-            self.dacl.as_ptr().cast::<ACL>()
+            explicit_dacl.as_ptr().cast::<ACL>()
         };
         let status = unsafe {
             SetSecurityInfo(
@@ -484,10 +516,10 @@ fn file_mode(metadata: fs::Metadata) -> u32 {
 mod tests {
     #[cfg(any(unix, windows))]
     use super::open_regular_file_nofollow;
-    #[cfg(windows)]
-    use super::windows_dacl;
     #[cfg(unix)]
     use super::{FileProtectionSnapshot, atomic_write_file_with_protection_before_publish};
+    #[cfg(windows)]
+    use super::{FileProtectionSnapshot, windows_dacl};
     use std::fs;
     use tempfile::TempDir;
 
@@ -718,6 +750,7 @@ mod tests {
     fn migration_rewrite_accepts_an_ordinary_inherited_dacl() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join(".env");
+        let original = b"KEEP=unmigrated-secret\nAPI_KEY=migrated-secret\n";
         let users = "*S-1-5-32-545:(OI)(CI)(RX)";
         let output = std::process::Command::new("icacls")
             .args([
@@ -732,13 +765,19 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        fs::write(&path, "KEEP=unmigrated-secret\nAPI_KEY=migrated-secret\n").unwrap();
+        fs::write(&path, original).unwrap();
 
         let source = open_regular_file_nofollow(&path).unwrap();
         let (source_dacl, source_len, _, source_protected) = windows_dacl(&source).unwrap();
+        let protection = FileProtectionSnapshot::capture(&source, original).unwrap();
+        let expected_dacl = protection.explicit_dacl().unwrap();
         assert!(
             !source_protected,
             "source should use its parent's inherited DACL"
+        );
+        assert_ne!(
+            source_dacl, expected_dacl,
+            "fixture should contain inherited ACE markers"
         );
         let env_file = crate::env_file::EnvFile::parse(&path).unwrap();
 
@@ -749,7 +788,7 @@ mod tests {
             windows_dacl(&replacement).unwrap();
         let words = source_len.div_ceil(std::mem::size_of::<u64>());
         assert_eq!(replacement_len, source_len);
-        assert_eq!(replacement_dacl[..words], source_dacl[..words]);
+        assert_eq!(replacement_dacl[..words], expected_dacl[..words]);
         assert!(replacement_protected);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
