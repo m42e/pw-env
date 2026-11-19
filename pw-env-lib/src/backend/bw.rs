@@ -1487,6 +1487,13 @@ impl Backend for BwBackend {
         debug!(key, "Storing secret in Bitwarden");
         let bw_config = ctx.config.effective_bw(ctx.dir);
         let metadata_fields = Self::migration_metadata_fields(ctx);
+        if ctx.config.effective_item(ctx.dir).is_some()
+            && (key.eq_ignore_ascii_case("password") || key.eq_ignore_ascii_case("username"))
+        {
+            bail!(
+                "Bitwarden custom field '{key}' conflicts with a built-in login field; use a different environment key"
+            );
+        }
         let scope = Self::resolve_scope_with(bw_config, None, None)?;
 
         if let Some(item_name) = ctx.config.effective_item(ctx.dir) {
@@ -3585,6 +3592,81 @@ exit 1
             let calls = std::fs::read_to_string(call_log).unwrap();
             assert!(calls.lines().any(|line| line == "edit item item-1"));
             assert!(!calls.lines().any(|line| line == "edit item shared"));
+        });
+    }
+
+    #[test]
+    fn backend_store_rejects_builtin_login_field_names_for_shared_items_before_cli() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexit 1\n",
+            call_log.display()
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    item: Some("shared".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_bw(&script, || {
+            for key in ["password", "username", "PASSWORD", "USERNAME"] {
+                let error = BwBackend
+                    .store(key, "narrow-secret", &ctx)
+                    .expect_err("shared-item login field collisions must be rejected");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("conflicts with a built-in login field")
+                );
+            }
+            assert!(
+                !call_log.exists(),
+                "rejected keys must not invoke Bitwarden CLI"
+            );
+        });
+    }
+
+    #[test]
+    fn backend_store_keeps_password_item_mode_available_without_shared_item() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"create\" ] && [ \"$2\" = \"item\" ]; then cat >/dev/null; exit 0; fi\nexit 1\n",
+            call_log.display()
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_bw(&script, || {
+            BwBackend
+                .store("password", "primary-login-secret", &ctx)
+                .unwrap();
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(calls.lines().any(|line| line == "create item"));
         });
     }
 
