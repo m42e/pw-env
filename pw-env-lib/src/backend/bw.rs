@@ -1084,12 +1084,7 @@ impl BwBackend {
                 repository,
                 scope.folder_id.as_deref(),
                 project,
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Bitwarden item title '{selector}' is ambiguous in the requested scope"
-                )
-            })?;
+            )?;
             (selected.clone(), Some(selector.to_string()))
         };
 
@@ -1123,7 +1118,7 @@ impl BwBackend {
         repository: Option<&str>,
         folder_id: Option<&str>,
         project: Option<&str>,
-    ) -> Result<Option<&'a serde_json::Value>> {
+    ) -> Result<&'a serde_json::Value> {
         debug!(
             key,
             item_count = items.len(),
@@ -1156,7 +1151,7 @@ impl BwBackend {
         }
 
         if matching.len() == 1 {
-            return Ok(Some(matching[0]));
+            return Ok(matching[0]);
         }
 
         // Multiple matches — try narrowing by repository
@@ -1177,7 +1172,7 @@ impl BwBackend {
             }
             if matching.len() == 1 {
                 debug!("Disambiguated Bitwarden item by repository field '{repository}'");
-                return Ok(Some(matching[0]));
+                return Ok(matching[0]);
             }
         }
 
@@ -1197,18 +1192,14 @@ impl BwBackend {
             }
             if matching.len() == 1 {
                 debug!("Disambiguated Bitwarden item by project field '{proj}'");
-                return Ok(Some(matching[0]));
+                return Ok(matching[0]);
             }
         }
 
-        warn!(
-            "Multiple Bitwarden items found for '{key}' — could not disambiguate, leaving value blank"
-        );
-        eprintln!(
-            "pw-env: multiple Bitwarden items found for '{key}'. \
-             Add a 'repository' or 'project' field, or configure defaults.bw.folder to disambiguate."
-        );
-        Ok(None)
+        warn!("Multiple Bitwarden items found for '{key}' — selection is ambiguous");
+        bail!(
+            "Multiple Bitwarden items found for '{key}'. Add a 'repository' or 'project' field, or configure defaults.bw.folder to disambiguate."
+        )
     }
 
     fn resolve_reference_field_with(
@@ -1219,11 +1210,8 @@ impl BwBackend {
         project: Option<&str>,
         interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<String> {
-        let Some(item) =
-            Self::resolve_reference_item_with(item_name, repository, scope, project, interaction)?
-        else {
-            return Ok(String::new());
-        };
+        let item =
+            Self::resolve_reference_item_with(item_name, repository, scope, project, interaction)?;
 
         Self::extract_field_from_value(&item, field_name)
     }
@@ -1234,19 +1222,16 @@ impl BwBackend {
         scope: &BwScope,
         project: Option<&str>,
         interaction: Option<&dyn ResolutionInteraction>,
-    ) -> Result<Option<serde_json::Value>> {
+    ) -> Result<serde_json::Value> {
         let items = Self::list_items_with_scope(scope, Some(item_name), interaction)?;
 
-        let Some(item) = Self::select_item_from_list(
+        let item = Self::select_item_from_list(
             item_name,
             &items,
             repository,
             scope.folder_id.as_deref(),
             project,
-        )?
-        else {
-            return Ok(None);
-        };
+        )?;
 
         let item_identifier = item
             .get("id")
@@ -1265,7 +1250,7 @@ impl BwBackend {
         {
             bail!("Bitwarden item identity changed during lookup");
         }
-        Ok(Some(item))
+        Ok(item)
     }
 
     /// Core disambiguation logic that works on a pre-fetched list of items.
@@ -1277,10 +1262,7 @@ impl BwBackend {
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<String> {
-        let Some(item) = Self::select_item_from_list(key, items, repository, folder_id, project)?
-        else {
-            return Ok(String::new());
-        };
+        let item = Self::select_item_from_list(key, items, repository, folder_id, project)?;
 
         Self::extract_field_from_value(item, "password")
     }
@@ -1358,7 +1340,7 @@ impl BwBackend {
         if !ref_entries.is_empty() {
             let mut reference_item_cache: HashMap<
                 (BwScope, String),
-                std::result::Result<Option<serde_json::Value>, String>,
+                std::result::Result<serde_json::Value, String>,
             > = HashMap::new();
 
             for (env_key, ref_str) in &ref_entries {
@@ -1386,10 +1368,7 @@ impl BwBackend {
                                     });
 
                                 match cached_item.as_ref() {
-                                    Ok(Some(item)) => {
-                                        Self::extract_field_from_value(item, field_name)
-                                    }
-                                    Ok(None) => Ok(String::new()),
+                                    Ok(item) => Self::extract_field_from_value(item, field_name),
                                     Err(error) => Err(anyhow::anyhow!(error.clone())),
                                 }
                             }
@@ -2670,7 +2649,6 @@ exit 1
             None,
             None,
         )
-        .unwrap()
         .unwrap();
 
         assert_eq!(
@@ -3030,6 +3008,52 @@ exit 1
                 1,
                 "expected one get-item fetch for repeated bw:// item references"
             );
+        });
+    }
+
+    #[test]
+    fn resolve_batch_keeps_ambiguous_items_as_errors() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let items_json = serde_json::json!([
+            {"id":"db-1","name":"DB_KEY","login":{"password":"db-one"},"fields":[]},
+            {"id":"db-2","name":"DB_KEY","login":{"password":"db-two"},"fields":[]},
+            {"id":"ref-1","name":"shared","fields":[{"name":"API_KEY","value":"ref-one"}]},
+            {"id":"ref-2","name":"shared","fields":[{"name":"API_KEY","value":"ref-two"}]}
+        ]);
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\necho 'unexpected command' >&2\nexit 1\n",
+            call_log.display(),
+            items_json
+        );
+        let config = Config::default();
+        let ctx = make_resolve_context(&config, Path::new("/tmp"));
+
+        with_mock_bw(&script, || {
+            let results = BwBackend::resolve_batch(
+                &[("DB_KEY", None), ("API_KEY", Some("bw://shared/API_KEY"))],
+                &ctx,
+            );
+            for key in ["DB_KEY", "API_KEY"] {
+                let error = results
+                    .get(key)
+                    .expect("every requested key should have a batch result")
+                    .as_ref()
+                    .expect_err("ambiguous item selection must remain unresolved");
+                assert!(error.to_string().contains("Multiple Bitwarden items found"));
+            }
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(!calls.lines().any(|line| line.starts_with("get item")));
+        });
+    }
+
+    #[test]
+    fn unique_item_with_empty_password_is_still_a_successful_empty_value() {
+        let items_json = r#"[{"id":"db-1","name":"DB_KEY","login":{"password":""},"fields":[]}]"#;
+        let script = format!("#!/bin/sh\necho '{}'\n", items_json);
+        with_mock_bw(&script, || {
+            let result = BwBackend::disambiguate_items("DB_KEY", None, None, None).unwrap();
+            assert_eq!(result, "");
         });
     }
 
@@ -3399,8 +3423,8 @@ exit 1
     }
 
     #[test]
-    fn disambiguate_items_returns_empty_when_ambiguous() {
-        // Two items, same folder, same project (or no project) — cannot disambiguate
+    fn disambiguate_items_errors_when_ambiguous() {
+        // Two items, same folder, same project (or no project) must remain unresolved.
         let items_json = r#"[
             {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"pw1"},"fields":[]},
             {"name":"DB_PASS","folderId":"folder-abc","login":{"password":"pw2"},"fields":[]}
@@ -3409,7 +3433,13 @@ exit 1
         with_mock_bw(&script, || {
             let result =
                 BwBackend::disambiguate_items("DB_PASS", None, Some("folder-abc"), Some("myapp"));
-            assert_eq!(result.unwrap(), "", "should return empty when ambiguous");
+            assert!(
+                result
+                    .expect_err("ambiguous Bitwarden items must be an error")
+                    .to_string()
+                    .contains("Multiple Bitwarden items found"),
+                "ambiguity must not become an empty value"
+            );
         });
     }
 
