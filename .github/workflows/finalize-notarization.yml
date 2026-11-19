@@ -3,12 +3,6 @@ name: Finalize macOS Notarization
 on:
   schedule:
     - cron: "17 * * * *"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Optional tag to poll (for example v1.2.3)"
-        required: false
-        type: string
 
 permissions:
   actions: write
@@ -28,7 +22,6 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      SELECTED_TAG: ${{ inputs.tag || '' }}
       MACOS_NOTARIZATION_SECRETS_PRESENT: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
     steps:
       - name: Skip when notarization secrets are unavailable
@@ -45,14 +38,11 @@ jobs:
 
           echo '## macOS notarization poll' >> "$GITHUB_STEP_SUMMARY"
 
-          artifact_prefix='notarization-'
-          if [ -n "$SELECTED_TAG" ]; then
-            artifact_prefix="notarization-$SELECTED_TAG-"
-          fi
-
+          repository_id=$(gh api "repos/$GH_REPO" --jq '.id')
+          release_workflow_id=$(gh api "repos/$GH_REPO/actions/workflows/release.yml" --jq '.id')
           artifacts_file="$RUNNER_TEMP/notarization-artifacts.txt"
           gh api "repos/$GH_REPO/actions/artifacts" --paginate \
-            --jq ".artifacts[] | select((.expired | not) and (.name | startswith(\"$artifact_prefix\"))) | @base64" \
+            --jq '.artifacts[] | select((.expired | not) and (.name | startswith("notarization-"))) | @base64' \
             > "$artifacts_file"
 
           artifact_count=$(grep -c '.' "$artifacts_file" || true)
@@ -62,10 +52,10 @@ jobs:
           failed_count=0
           skipped_count=0
 
-          echo "Artifact prefix: $artifact_prefix"
+          echo "Artifact prefix: notarization-"
           echo "Found $artifact_count pending notarization artifact(s)."
-          echo "::notice title=Scan::Found $artifact_count pending notarization artifact(s) for prefix $artifact_prefix"
-          printf '%s\n' "- Artifact prefix: $artifact_prefix" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Scan::Found $artifact_count pending notarization artifact(s) for prefix notarization-"
+          printf '%s\n' "- Artifact prefix: notarization-" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "- Pending notarization artifacts found: $artifact_count" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$artifact_count" -eq 0 ]; then
@@ -74,6 +64,27 @@ jobs:
             printf '%s\n' '- No pending notarization artifacts found.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
+          resolve_tag_commit() {
+            local tag="$1"
+            local ref_data object_type object_sha tag_data
+            if ! ref_data=$(gh api "repos/$GH_REPO/git/ref/tags/$tag"); then
+              return 1
+            fi
+            object_type=$(jq -r '.object.type // empty' <<< "$ref_data")
+            object_sha=$(jq -r '.object.sha // empty' <<< "$ref_data")
+            for _ in 1 2 3 4 5; do
+              [ "$object_type" = "tag" ] || break
+              if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]] || \
+                 ! tag_data=$(gh api "repos/$GH_REPO/git/tags/$object_sha"); then
+                return 1
+              fi
+              object_type=$(jq -r '.object.type // empty' <<< "$tag_data")
+              object_sha=$(jq -r '.object.sha // empty' <<< "$tag_data")
+            done
+            [ "$object_type" = "commit" ] || return 1
+            printf '%s\n' "$object_sha"
+          }
 
           while IFS= read -r encoded_artifact; do
             [ -n "$encoded_artifact" ] || continue
@@ -94,30 +105,125 @@ jobs:
               continue
             fi
 
+            if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+              echo "::warning title=Skipped::$artifact_name has an invalid workflow run ID."
+              printf '%s\n' "- Skipped $artifact_name because its workflow run ID was invalid." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
+              continue
+            fi
+
+            if ! source_run=$(gh api "repos/$GH_REPO/actions/runs/$run_id"); then
+              echo "::warning title=Skipped::$artifact_name source workflow run could not be loaded."
+              printf '%s\n' "- Skipped $artifact_name because its source run could not be loaded." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
+              continue
+            fi
+
+            artifact_run_branch=$(jq -r '.workflow_run.head_branch // empty' <<< "$artifact_json")
+            artifact_run_sha=$(jq -r '.workflow_run.head_sha // empty' <<< "$artifact_json")
+            if ! jq -e \
+              --arg repository_id "$repository_id" \
+              --arg workflow_id "$release_workflow_id" \
+              --arg run_branch "$artifact_run_branch" \
+              --arg run_sha "$artifact_run_sha" \
+              '(.repository.id | tostring) == $repository_id and
+               (.head_repository.id | tostring) == $repository_id and
+               (.workflow_id | tostring) == $workflow_id and
+               (.path | split("@")[0]) == ".github/workflows/release.yml" and
+               .event == "push" and .status == "completed" and .conclusion == "success" and
+               .head_branch == $run_branch and .head_sha == $run_sha and
+               (.head_branch | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' \
+              <<< "$source_run" >/dev/null; then
+              echo "::warning title=Skipped::$artifact_name did not come from a successful same-repository release tag run."
+              printf '%s\n' "- Skipped $artifact_name because its source run was not an approved release run." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
+              continue
+            fi
+
+            source_tag=$(jq -r '.head_branch' <<< "$source_run")
+            source_sha=$(jq -r '.head_sha' <<< "$source_run")
+            if ! tag_object_sha=$(resolve_tag_commit "$source_tag") || \
+               [ "$tag_object_sha" != "$source_sha" ]; then
+              echo "::warning title=Skipped::$artifact_name source run SHA no longer matches tag $source_tag."
+              printf '%s\n' "- Skipped $artifact_name because its source run SHA did not match the current tag." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
+              continue
+            fi
+
             workdir=$(mktemp -d)
             artifact_dir="$workdir/artifact"
             mkdir -p "$artifact_dir"
-            gh run download "$run_id" -R "$GH_REPO" -n "$artifact_name" -D "$artifact_dir"
-
-            metadata_file=$(find "$artifact_dir" -name '*.json' -print -quit)
-            if [ -z "$metadata_file" ]; then
-              echo "::warning title=Skipped::$artifact_name did not contain a metadata JSON file and will be deleted."
-              echo "Artifact $artifact_name does not contain notarization metadata; deleting it."
-              printf '%s\n' "- Deleted $artifact_name because it did not contain a metadata JSON file." >> "$GITHUB_STEP_SUMMARY"
-              gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"
+            if ! gh run download "$run_id" -R "$GH_REPO" -n "$artifact_name" -D "$artifact_dir"; then
+              echo "::warning title=Skipped::$artifact_name could not be downloaded from the approved release run."
+              printf '%s\n' "- Skipped $artifact_name because it could not be downloaded." >> "$GITHUB_STEP_SUMMARY"
               skipped_count=$((skipped_count + 1))
               rm -rf "$workdir"
               continue
             fi
 
-            tag=$(jq -r '.tag' "$metadata_file")
-            checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            target=$(jq -r '.target' "$metadata_file")
-            binary=$(jq -r '.binary' "$metadata_file")
-            archive=$(jq -r '.archive' "$metadata_file")
-            asset_name=$(jq -r '.asset_name' "$metadata_file")
-            submission_id=$(jq -r '.submission_id' "$metadata_file")
+            metadata_files=()
+            while IFS= read -r -d '' metadata_path; do
+              metadata_files+=("$metadata_path")
+            done < <(find "$artifact_dir" -type f -name '*.json' -print0)
+            if [ "${#metadata_files[@]}" -ne 1 ]; then
+              echo "::warning title=Skipped::$artifact_name did not contain exactly one metadata JSON file."
+              printf '%s\n' "- Skipped $artifact_name because it did not contain exactly one metadata JSON file." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
+              rm -rf "$workdir"
+              continue
+            fi
+
+            metadata_file=${metadata_files[0]}
+
+            if ! jq -e 'type == "object"' "$metadata_file" >/dev/null; then
+              echo "::warning title=Skipped::$artifact_name contains malformed metadata."
+              printf '%s\n' "- Skipped $artifact_name because its metadata was malformed." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
+              rm -rf "$workdir"
+              continue
+            fi
+
+            tag=$(jq -r '.tag // empty' "$metadata_file")
+            metadata_ref=$(jq -r '.ref // empty' "$metadata_file")
+            metadata_sha=$(jq -r '.commit_sha // empty' "$metadata_file")
+            target=$(jq -r '.target // empty' "$metadata_file")
+            binary=$(jq -r '.binary // empty' "$metadata_file")
+            binary_sha256=$(jq -r '.binary_sha256 // empty' "$metadata_file")
+            archive=$(jq -r '.archive // empty' "$metadata_file")
+            archive_sha256=$(jq -r '.archive_sha256 // empty' "$metadata_file")
+            asset_name=$(jq -r '.asset_name // empty' "$metadata_file")
+            submission_id=$(jq -r '.submission_id // empty' "$metadata_file")
             submitted_at=$(jq -r '.submitted_at // "unknown"' "$metadata_file")
+
+            case "$target" in
+              x86_64-apple-darwin|aarch64-apple-darwin) ;;
+              *)
+                echo "::warning title=Skipped::$artifact_name has an unsupported notarization target."
+                printf '%s\n' "- Skipped $artifact_name because its target was unsupported." >> "$GITHUB_STEP_SUMMARY"
+                skipped_count=$((skipped_count + 1))
+                rm -rf "$workdir"
+                continue
+                ;;
+            esac
+
+            expected_asset_name="pw-env-$source_tag-$target.tar.gz"
+            if [ "$tag" != "$source_tag" ] || \
+               [ "$metadata_ref" != "refs/tags/$source_tag" ] || \
+               [ "$metadata_sha" != "$source_sha" ] || \
+               [ "$artifact_name" != "notarization-$source_tag-$target" ] || \
+               [ "$binary" != "pw-env" ] || [ "$archive" != "tar.gz" ] || \
+               [[ ! "$binary_sha256" =~ ^[[:xdigit:]]{64}$ ]] || \
+               [[ ! "$archive_sha256" =~ ^[[:xdigit:]]{64}$ ]] || \
+               [ "$asset_name" != "$expected_asset_name" ] || \
+               [[ ! "$submission_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+              echo "::warning title=Skipped::$artifact_name metadata did not match the trusted release record."
+              printf '%s\n' "- Skipped $artifact_name because its metadata did not match the trusted release record." >> "$GITHUB_STEP_SUMMARY"
+              skipped_count=$((skipped_count + 1))
+              rm -rf "$workdir"
+              continue
+            fi
+
+            checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             response_file="$workdir/${target}-notary-info.json"
             asset_dir="$workdir/${target}"
             package_dir="$asset_dir/package"
@@ -126,11 +232,25 @@ jobs:
 
             echo "Processing tag=$tag target=$target asset=$asset_name submission_id=$submission_id submitted_at=$submitted_at"
 
-            xcrun notarytool info "$submission_id" \
+            if ! xcrun notarytool info "$submission_id" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_APP_PASSWORD" \
               --team-id "$APPLE_TEAM_ID" \
-              --output-format json > "$response_file"
+              --output-format json > "$response_file"; then
+              echo "::warning title=Retry::$tag $target Apple status query failed; keeping artifact for retry."
+              printf '%s\n' "- $tag $target: Apple status query failed; will retry." >> "$GITHUB_STEP_SUMMARY"
+              failed_count=$((failed_count + 1))
+              rm -rf "$workdir"
+              continue
+            fi
+
+            if ! jq -e 'type == "object"' "$response_file" >/dev/null; then
+              echo "::warning title=Retry::$tag $target Apple returned malformed status data; keeping artifact for retry."
+              printf '%s\n' "- $tag $target: Apple returned malformed status data; will retry." >> "$GITHUB_STEP_SUMMARY"
+              failed_count=$((failed_count + 1))
+              rm -rf "$workdir"
+              continue
+            fi
 
             status=$(jq -r '.status // "Unknown"' "$response_file")
             status_summary=$(jq -r '.statusSummary // empty' "$response_file")
@@ -154,12 +274,33 @@ jobs:
                   continue
                 fi
 
+                actual_archive_sha256=$(shasum -a 256 "$asset_path" | awk '{print $1}')
+                if [ "$actual_archive_sha256" != "$archive_sha256" ]; then
+                  echo "::warning title=Failed::$tag $target release archive digest does not match the trusted release record."
+                  printf '%s\n' "- $tag $target: release archive digest did not match; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                  failed_count=$((failed_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                fi
+
                 case "$archive" in
                   tar.gz)
-                    tar -xzf "$asset_path" -C "$package_dir"
+                    if ! tar -xzf "$asset_path" -C "$package_dir"; then
+                      echo "::warning title=Failed::$tag $target release archive could not be extracted."
+                      printf '%s\n' "- $tag $target: release archive could not be extracted; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                      failed_count=$((failed_count + 1))
+                      rm -rf "$workdir"
+                      continue
+                    fi
                     ;;
                   zip)
-                    ditto -x -k "$asset_path" "$package_dir"
+                    if ! ditto -x -k "$asset_path" "$package_dir"; then
+                      echo "::warning title=Failed::$tag $target release archive could not be extracted."
+                      printf '%s\n' "- $tag $target: release archive could not be extracted; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                      failed_count=$((failed_count + 1))
+                      rm -rf "$workdir"
+                      continue
+                    fi
                     ;;
                   *)
                     echo "::warning title=Failed::$tag $target has unsupported archive format $archive."
@@ -182,6 +323,15 @@ jobs:
                   continue
                 fi
 
+                actual_binary_sha256=$(shasum -a 256 "$binary_path" | awk '{print $1}')
+                if [ "$actual_binary_sha256" != "$binary_sha256" ]; then
+                  echo "::warning title=Failed::$tag $target package binary digest does not match the submitted binary."
+                  printf '%s\n' "- $tag $target: package binary digest did not match the notarized binary; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                  failed_count=$((failed_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                fi
+
                 stapler_exit=0
                 xcrun stapler staple "$binary_path" || stapler_exit=$?
                 if [ "$stapler_exit" -eq 73 ]; then
@@ -191,6 +341,16 @@ jobs:
                   echo "::notice title=Accepted::$tag $target is a standalone binary; stapling not applicable (notarization verified online by GateKeeper)."
                   echo "Standalone binary $tag $target; skipping staple (Error 73 expected)."
                   printf '%s\n' "- $tag $target: notarization accepted; stapling skipped (standalone binary)." >> "$GITHUB_STEP_SUMMARY"
+                  if ! gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$artifact_id"; then
+                    echo "::warning title=Retry::$tag $target was accepted but its metadata artifact could not be removed."
+                    printf '%s\n' "- $tag $target: accepted; metadata artifact cleanup will retry." >> "$GITHUB_STEP_SUMMARY"
+                    failed_count=$((failed_count + 1))
+                    rm -rf "$workdir"
+                    continue
+                  fi
+                  accepted_count=$((accepted_count + 1))
+                  rm -rf "$workdir"
+                  continue
                 elif [ "$stapler_exit" -ne 0 ]; then
                   echo "::warning title=Failed::$tag $target stapling failed with exit code $stapler_exit."
                   echo "Stapling failed for $tag $target with exit code $stapler_exit"
@@ -200,15 +360,51 @@ jobs:
                   rm -rf "$workdir"
                   continue
                 else
-                  xcrun stapler validate "$binary_path"
+                  if ! xcrun stapler validate "$binary_path"; then
+                    echo "::warning title=Failed::$tag $target stapled binary failed validation."
+                    printf '%s\n' "- $tag $target: stapled binary failed validation; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                    failed_count=$((failed_count + 1))
+                    rm -rf "$workdir"
+                    continue
+                  fi
+                fi
+
+                checksums_path="$asset_dir/SHA256SUMS"
+                if ! gh release download "$tag" -R "$GH_REPO" --pattern SHA256SUMS --dir "$asset_dir"; then
+                  echo "::warning title=Failed::$tag $target checksum asset could not be downloaded; keeping artifact for retry."
+                  printf '%s\n' "- $tag $target: checksum asset could not be downloaded; will retry." >> "$GITHUB_STEP_SUMMARY"
+                  failed_count=$((failed_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                fi
+                checksum_entries=$(awk -v name="$asset_name" '$2 == name { print $1 }' "$checksums_path")
+                if [ "$(printf '%s\n' "$checksum_entries" | grep -c . || true)" -ne 1 ] || \
+                   [ "$checksum_entries" != "$archive_sha256" ]; then
+                  echo "::warning title=Failed::$tag $target checksum record does not match the trusted archive."
+                  printf '%s\n' "- $tag $target: checksum record did not match the original archive; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                  failed_count=$((failed_count + 1))
+                  rm -rf "$workdir"
+                  continue
                 fi
 
                 case "$archive" in
                   tar.gz)
                     if [ -f "$package_dir/LICENSE" ]; then
-                      tar -czf "$asset_path" -C "$package_dir" "$binary" LICENSE
+                      if ! tar -czf "$asset_path" -C "$package_dir" "$binary" LICENSE; then
+                        echo "::warning title=Failed::$tag $target stapled package could not be created."
+                        printf '%s\n' "- $tag $target: stapled package could not be created; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                        failed_count=$((failed_count + 1))
+                        rm -rf "$workdir"
+                        continue
+                      fi
                     else
-                      tar -czf "$asset_path" -C "$package_dir" "$binary"
+                      if ! tar -czf "$asset_path" -C "$package_dir" "$binary"; then
+                        echo "::warning title=Failed::$tag $target stapled package could not be created."
+                        printf '%s\n' "- $tag $target: stapled package could not be created; keeping artifact for review." >> "$GITHUB_STEP_SUMMARY"
+                        failed_count=$((failed_count + 1))
+                        rm -rf "$workdir"
+                        continue
+                      fi
                     fi
                     ;;
                   zip)
@@ -222,9 +418,23 @@ jobs:
                     ;;
                 esac
 
-                if ! gh release upload "$tag" -R "$GH_REPO" "$asset_path" --clobber; then
+                replacement_archive_sha256=$(shasum -a 256 "$asset_path" | awk '{print $1}')
+                updated_checksums_path="$workdir/SHA256SUMS"
+                awk -v name="$asset_name" '$2 != name { print }' "$checksums_path" > "$updated_checksums_path"
+                printf '%s  %s\n' "$replacement_archive_sha256" "$asset_name" >> "$updated_checksums_path"
+
+                if ! current_tag_sha=$(resolve_tag_commit "$tag") || \
+                   [ "$current_tag_sha" != "$source_sha" ]; then
+                  echo "::warning title=Skipped::$tag tag no longer points to this release run's commit."
+                  printf '%s\n' "- $tag $target: tag no longer pointed to this run commit before publishing; keeping artifact." >> "$GITHUB_STEP_SUMMARY"
+                  skipped_count=$((skipped_count + 1))
+                  rm -rf "$workdir"
+                  continue
+                fi
+
+                if ! gh release upload "$tag" -R "$GH_REPO" "$asset_path" "$updated_checksums_path" --clobber; then
                   echo "::warning title=Failed::$tag $target release upload failed; keeping artifact for retry."
-                  echo "Release upload failed for $tag $target; keeping artifact for retry."
+                  echo "Release asset/checksum upload failed for $tag $target; keeping artifact for retry."
                   printf '%s\n' "- $tag $target: release upload failed; will retry." >> "$GITHUB_STEP_SUMMARY"
                   failed_count=$((failed_count + 1))
                   rm -rf "$workdir"

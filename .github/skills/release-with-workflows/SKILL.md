@@ -13,7 +13,7 @@ The repository publishes releases through a PR-driven workflow:
 
 1. Dispatch `prepare-release-pr.yml` with a semver version like `0.2.2`.
 2. Review and merge the generated `release/v<version>` PR.
-3. `tag-release-pr.yml` creates tag `v<version>` and dispatches `release.yml`.
+3. `tag-release-pr.yml` creates tag `v<version>` with a repository-scoped GitHub App token; that tag push starts `release.yml`.
 
 ## When to Use
 
@@ -32,7 +32,15 @@ The repository publishes releases through a PR-driven workflow:
 ### Use the PR-driven workflow by default
 
 - The repository's preferred release path is `prepare-release-pr.yml` followed by `tag-release-pr.yml` and `release.yml`.
-- Only switch to a manual tag-driven release if the user explicitly requests it.
+- `release.yml` accepts only a successful tag push for an exact `refs/tags/vN.N.N` ref and verifies that the current tag still points to the workflow run's commit before building.
+- `finalize-notarization.yml` runs on its schedule and accepts only artifacts from a successful same-repository `release.yml` push run whose SHA still matches the current tag.
+
+### Configure the release App and tag ruleset
+
+- Set repository secrets `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY` for a GitHub App installed on this repository.
+- Give the App only repository `Contents: write` permission. The tag workflow mints an installation token scoped to this repository.
+- Protect `refs/tags/v*` with a repository ruleset that limits creation, updates, and deletion to authorized release maintainers and the release App. Tag creator restrictions are a repository setting and cannot be enforced in workflow code.
+- Keep the app private key in the repository secret; do not put it in workflow files or logs.
 
 ### Choose signing and notarization behavior
 
@@ -55,7 +63,7 @@ The repository publishes releases through a PR-driven workflow:
 3. Complete the trigger that starts publishing.
    - Merge the release PR into `main` after review and CI pass.
    - Confirm `tag-release-pr.yml` runs on the merged PR.
-   - Confirm it creates tag `v<version>` and dispatches `release.yml`.
+   - Confirm it creates tag `v<version>` and the tag push starts `release.yml`.
 
 4. Monitor the publish workflow.
    - Confirm `release.yml` runs for tag `v<version>`.

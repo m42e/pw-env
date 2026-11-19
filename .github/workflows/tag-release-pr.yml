@@ -5,8 +5,7 @@ on:
     types: [closed]
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 jobs:
   tag:
@@ -15,12 +14,24 @@ jobs:
     if: >-
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'release/v') &&
       contains(github.event.pull_request.labels.*.name, 'release')
     steps:
+      - name: Create repository-scoped release token
+        id: release-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # pin: v3.3.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          token: ${{ steps.release-token.outputs.token }}
 
       - name: Read version from Cargo.toml
         id: version
@@ -67,16 +78,11 @@ jobs:
           git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
           git push origin "$RELEASE_TAG"
 
-      - name: Dispatch release workflow
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          gh workflow run release.yml --field tag="$RELEASE_TAG"
-
   cleanup:
     name: Delete closed release branch
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: >-
       github.event.pull_request.merged != true &&
       github.event.pull_request.base.ref == 'main' &&

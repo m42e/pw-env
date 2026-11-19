@@ -8,6 +8,9 @@ description: 'Use when the task involves creating, preparing, reviewing, tagging
 - For release work in this repository, prefer the PR-driven workflow over manual local tagging.
 - Start by using `.github/workflows/prepare-release-pr.yml` with a semver version without a leading `v`.
 - Treat the generated `release/v<version>` pull request as the review gate for version bumps and release notes.
-- After merge, expect `.github/workflows/tag-release-pr.yml` to create `v<version>` and dispatch `.github/workflows/release.yml`.
+- After merge, expect `.github/workflows/tag-release-pr.yml` to create `v<version>` with a repository-scoped GitHub App token. The tag push starts `.github/workflows/release.yml`.
+- The release workflow accepts only a `push` event for an exact `refs/tags/vN.N.N` ref and verifies that the current tag still points to the run commit before building.
+- Configure repository secrets `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`. The installed App needs only repository `Contents: write`; the workflow scopes its installation token to this repository.
+- Protect `refs/tags/v*` with a repository ruleset that limits tag creation, updates, and deletion to authorized release maintainers and the release App. The code cannot enforce repository ruleset membership.
 - Verify the publish workflow finishes successfully and that the GitHub release contains the expected artifacts.
 - Only fall back to `./scripts/release.sh` and manual tag pushing if the user explicitly requests the manual path.
