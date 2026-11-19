@@ -292,7 +292,7 @@ fn atomic_write_file_with_protection_before_publish(
     before_publish: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     verify_snapshot_destination(path, protection)?;
-    let (mut file, temporary_path) = create_temporary_file(path, true)?;
+    let (mut file, temporary_path) = create_temporary_file_with_dacl_access(path)?;
     let result = (|| {
         protection.apply_to(&file)?;
         if !protection.matches_access_controls(&file, false)? {
@@ -388,13 +388,34 @@ fn create_temporary_file(path: &Path, private: bool) -> Result<(File, PathBuf)> 
     create_temporary_file_with_nonce(path, private, nonce)
 }
 
+/// Create a private sibling file whose handle can have its DACL set before
+/// any snapshot contents are copied into it.
+fn create_temporary_file_with_dacl_access(path: &Path) -> Result<(File, PathBuf)> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    create_temporary_file_with_nonce_and_dacl_access(path, true, nonce, true)
+}
+
 pub(crate) fn create_temporary_file_with_nonce(
     path: &Path,
     private: bool,
     nonce: u128,
 ) -> Result<(File, PathBuf)> {
+    create_temporary_file_with_nonce_and_dacl_access(path, private, nonce, false)
+}
+
+fn create_temporary_file_with_nonce_and_dacl_access(
+    path: &Path,
+    private: bool,
+    nonce: u128,
+    dacl_access: bool,
+) -> Result<(File, PathBuf)> {
     #[cfg(not(unix))]
     let _ = private;
+    #[cfg(not(windows))]
+    let _ = dacl_access;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -425,6 +446,15 @@ pub(crate) fn create_temporary_file_with_nonce(
             } else {
                 existing_mode.unwrap_or(0o666)
             });
+        }
+        #[cfg(windows)]
+        if dacl_access {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.access_mode(
+                windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE
+                    | windows_sys::Win32::Storage::FileSystem::WRITE_DAC,
+            );
         }
 
         match options.open(&temporary_path) {
