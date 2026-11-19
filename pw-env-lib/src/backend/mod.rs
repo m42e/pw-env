@@ -490,6 +490,11 @@ mod tests {
     }
 
     #[test]
+    fn external_command_stdout_limit_is_sixteen_mib() {
+        assert_eq!(EXTERNAL_COMMAND_STDOUT_LIMIT, 16_777_216);
+    }
+
+    #[test]
     fn read_pipe_limited_stops_on_the_first_eof() {
         struct EofThenError(usize);
 
