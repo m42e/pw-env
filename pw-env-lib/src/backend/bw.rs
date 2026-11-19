@@ -1052,6 +1052,71 @@ impl BwBackend {
         Ok(item)
     }
 
+    fn get_shared_item_with(
+        selector: &str,
+        repository: Option<&str>,
+        scope: &BwScope,
+        project: Option<&str>,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<serde_json::Value> {
+        let items = Self::list_items_with_scope(scope, None, interaction)?;
+        let id_matches: Vec<&serde_json::Value> = items
+            .iter()
+            .filter(|item| item.get("id").and_then(|id| id.as_str()) == Some(selector))
+            .collect();
+
+        let (selected, expected_name) = if id_matches.len() == 1 {
+            (id_matches[0].clone(), None)
+        } else if id_matches.len() > 1 {
+            bail!("Bitwarden item ID '{selector}' is ambiguous in the requested scope");
+        } else {
+            let exact_titles: Vec<serde_json::Value> = items
+                .iter()
+                .filter(|item| item.get("name").and_then(|name| name.as_str()) == Some(selector))
+                .cloned()
+                .collect();
+            if exact_titles.is_empty() {
+                bail!("No Bitwarden item found with exact title '{selector}'");
+            }
+            let selected = Self::select_item_from_list(
+                selector,
+                &exact_titles,
+                repository,
+                scope.folder_id.as_deref(),
+                project,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Bitwarden item title '{selector}' is ambiguous in the requested scope"
+                )
+            })?;
+            (selected.clone(), Some(selector.to_string()))
+        };
+
+        let item_id = selected
+            .get("id")
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Selected Bitwarden item has no ID"))?;
+        let selected_name = selected
+            .get("name")
+            .and_then(|name| name.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Selected Bitwarden item has no title"))?
+            .to_string();
+        let item = Self::get_item_with_scope(item_id, scope, interaction)?;
+        if item.get("id").and_then(|id| id.as_str()) != Some(item_id) {
+            bail!("Bitwarden returned a different item ID than the verified selection");
+        }
+        if item.get("name").and_then(|name| name.as_str()) != Some(selected_name.as_str())
+            || expected_name
+                .as_deref()
+                .is_some_and(|expected| expected != selected_name)
+        {
+            bail!("Bitwarden item title changed during lookup");
+        }
+        Ok(item)
+    }
+
     fn select_item_from_list<'a>(
         key: &str,
         items: &'a [serde_json::Value],
@@ -1186,11 +1251,20 @@ impl BwBackend {
         let item_identifier = item
             .get("id")
             .and_then(|id| id.as_str())
-            .unwrap_or(item_name);
-        let item_json = Self::run_bw_with(&["get", "item", item_identifier], interaction)?;
-        let item: serde_json::Value =
-            serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
-        Self::ensure_item_in_scope(&item, item_name, scope)?;
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Selected Bitwarden item has no ID"))?
+            .to_string();
+        let selected_name = item
+            .get("name")
+            .and_then(|name| name.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Selected Bitwarden item has no title"))?
+            .to_string();
+        let item = Self::get_item_with_scope(&item_identifier, scope, interaction)?;
+        if item.get("id").and_then(|id| id.as_str()) != Some(item_identifier.as_str())
+            || item.get("name").and_then(|name| name.as_str()) != Some(selected_name.as_str())
+        {
+            bail!("Bitwarden item identity changed during lookup");
+        }
         Ok(Some(item))
     }
 
@@ -1351,7 +1425,13 @@ impl BwBackend {
                         return results;
                     }
                 };
-                match Self::get_item_with_scope(item_name, &scope, ctx.interaction) {
+                match Self::get_shared_item_with(
+                    item_name,
+                    ctx.repository.as_deref(),
+                    &scope,
+                    ctx.project.as_deref(),
+                    ctx.interaction,
+                ) {
                     Ok(item) => {
                         for key in &key_entries {
                             results.insert(
@@ -1445,7 +1525,13 @@ impl BwBackend {
             // Look up key as a custom field on the configured item
             debug!("Resolving key '{key}' as field on Bitwarden item '{item}'");
             let scope = Self::resolve_scope_with(bw_config, None, ctx.interaction)?;
-            let item_value = Self::get_item_with_scope(item, &scope, ctx.interaction)?;
+            let item_value = Self::get_shared_item_with(
+                item,
+                ctx.repository.as_deref(),
+                &scope,
+                ctx.project.as_deref(),
+                ctx.interaction,
+            )?;
             Self::extract_field_from_value(&item_value, key)
         } else {
             // Look up the key as a password item using list + exact-name filter
@@ -1498,10 +1584,13 @@ impl Backend for BwBackend {
 
         if let Some(item_name) = ctx.config.effective_item(ctx.dir) {
             debug!("Storing key '{key}' as custom field on Bitwarden item '{item_name}'");
-            let item_json = Self::run_bw_with(&["get", "item", item_name], None)?;
-            let mut item: serde_json::Value =
-                serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
-            Self::ensure_item_in_scope(&item, item_name, &scope)?;
+            let mut item = Self::get_shared_item_with(
+                item_name,
+                ctx.repository.as_deref(),
+                &scope,
+                ctx.project.as_deref(),
+                None,
+            )?;
             let item_id = item
                 .get("id")
                 .and_then(|id| id.as_str())
@@ -2131,10 +2220,6 @@ exit 1
         });
     }
 
-    fn make_bw_item_json(password: &str) -> String {
-        format!(r#"{{"type":1,"name":"test-item","login":{{"password":"{password}"}}}}"#)
-    }
-
     fn make_resolve_context<'a>(
         config: &'a Config,
         dir: &'a Path,
@@ -2489,7 +2574,7 @@ exit 1
         let state_dir = tempfile::tempdir().unwrap();
         let call_log = state_dir.path().join("bw-calls.log");
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"sync\" ]; then exit 0; fi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"org-collections\" ]; then echo '[{{\"id\":\"coll-1\",\"organizationId\":\"org-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"foreign-id\",\"name\":\"shared-env\",\"organizationId\":\"org-2\",\"collectionIds\":[\"coll-1\"],\"fields\":[]}}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"sync\" ]; then exit 0; fi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"org-collections\" ]; then echo '[{{\"id\":\"coll-1\",\"organizationId\":\"org-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '[{{\"id\":\"foreign-id\",\"name\":\"shared-env\",\"organizationId\":\"org-2\",\"collectionIds\":[\"coll-1\"],\"fields\":[]}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"foreign-id\",\"name\":\"shared-env\",\"organizationId\":\"org-2\",\"collectionIds\":[\"coll-1\"],\"fields\":[]}}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
             call_log.display()
         );
         let config = Config {
@@ -2517,7 +2602,12 @@ exit 1
             let error = BwBackend
                 .store("API_KEY", "new-secret", &ctx)
                 .expect_err("foreign organization item must not be edited");
-            assert!(error.to_string().contains("not owned"), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("No Bitwarden item found with exact title"),
+                "{error}"
+            );
             let calls = std::fs::read_to_string(call_log).unwrap();
             assert!(!calls.lines().any(|line| line.starts_with("edit item")));
             assert!(!calls.lines().any(|line| line == "create item"));
@@ -2640,7 +2730,14 @@ exit 1
 
     #[test]
     fn backend_resolve_with_bw_reference() {
-        let item_json = make_bw_item_json("secret-pw");
+        let item_json = serde_json::json!({
+            "id": "item-1",
+            "name": "my-item",
+            "type": 1,
+            "login": {"password": "secret-pw"},
+            "fields": []
+        })
+        .to_string();
         let script = format!(
             "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n  echo '[{{\"id\":\"item-1\",\"name\":\"my-item\",\"login\":{{\"password\":\"secret-pw\"}},\"fields\":[]}}]'\n  exit 0\nfi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item-1\" ]; then\n  echo '{}'\n  exit 0\nfi\necho 'unexpected command' >&2\nexit 1\n",
             item_json
@@ -2657,6 +2754,90 @@ exit 1
             let backend = BwBackend;
             let result = backend.resolve("API_KEY", Some("bw://my-item/password"), &ctx);
             assert_eq!(result.unwrap(), "secret-pw");
+        });
+    }
+
+    #[test]
+    fn configured_shared_item_rejects_partial_title_before_fetching_fields() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let items_json = serde_json::json!([{
+            "id": "partial-id",
+            "name": "my-bw-item-staging",
+            "fields": [{"name":"MY_KEY","value":"wrong-secret"}]
+        }]);
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\necho 'unexpected command' >&2\nexit 1\n",
+            call_log.display(),
+            items_json
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    item: Some("my-bw-item".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = make_resolve_context(&config, Path::new("/tmp"));
+
+        with_mock_bw(&script, || {
+            let error = BwBackend
+                .resolve("MY_KEY", None, &ctx)
+                .expect_err("a partial title match must not be used");
+            assert!(
+                error
+                    .to_string()
+                    .contains("No Bitwarden item found with exact title")
+            );
+            let results = BwBackend::resolve_batch(&[("MY_KEY", None)], &ctx);
+            assert!(results.get("MY_KEY").unwrap().is_err());
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(!calls.lines().any(|line| line.starts_with("get item")));
+        });
+    }
+
+    #[test]
+    fn configured_shared_item_fetches_exact_title_by_verified_id() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let items_json = serde_json::json!([
+            {"id":"partial-id","name":"my-bw-item-staging","fields":[{"name":"MY_KEY","value":"wrong-secret"}]},
+            {"id":"exact-id","name":"my-bw-item","fields":[{"name":"MY_KEY","value":"right-secret"}]}
+        ]);
+        let item_json = serde_json::json!({
+            "id":"exact-id",
+            "name":"my-bw-item",
+            "fields":[{"name":"MY_KEY","value":"right-secret"}]
+        });
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"exact-id\" ]; then echo '{}'; exit 0; fi\necho 'unexpected command' >&2\nexit 1\n",
+            call_log.display(),
+            items_json,
+            item_json
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    item: Some("my-bw-item".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = make_resolve_context(&config, Path::new("/tmp"));
+
+        with_mock_bw(&script, || {
+            let value = BwBackend.resolve("MY_KEY", None, &ctx).unwrap();
+            assert_eq!(value, "right-secret");
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(calls.lines().any(|line| line == "get item exact-id"));
+            assert!(!calls.lines().any(|line| line == "get item my-bw-item"));
         });
     }
 
@@ -3073,8 +3254,12 @@ exit 1
 
     #[test]
     fn backend_resolve_with_item_configured() {
-        let item_json = r#"{"type":1,"name":"my-bw-item","fields":[{"name":"MY_KEY","value":"item-field-value"}],"login":{"password":""}}"#;
-        let script = format!("#!/bin/sh\necho '{}'\n", item_json);
+        let item_json = r#"{"id":"my-bw-item-id","type":1,"name":"my-bw-item","fields":[{"name":"MY_KEY","value":"item-field-value"}],"login":{"password":""}}"#;
+        let items_json = r#"[{"id":"my-bw-item-id","name":"my-bw-item"}]"#;
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"my-bw-item-id\" ]; then echo '{}'; exit 0; fi\nexit 1\n",
+            items_json, item_json
+        );
         with_mock_bw(&script, || {
             let config = Config {
                 defaults: Defaults {
@@ -3097,10 +3282,10 @@ exit 1
 
     #[test]
     fn backend_resolve_with_configured_item_rejects_outside_folder() {
-        let item_json = r#"{"type":1,"name":"my-bw-item","folderId":"production","fields":[{"name":"MY_KEY","value":"production-value"}],"login":{"password":""}}"#;
+        let items_json = r#"[{"id":"my-bw-item-id","name":"my-bw-item","folderId":"production"}]"#;
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Development\",\"id\":\"development\"}}]'\n  exit 0\nfi\necho '{}'\n",
-            item_json
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then\n  echo '[{{\"name\":\"Development\",\"id\":\"development\"}}]'\n  exit 0\nfi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\necho 'unexpected command' >&2\nexit 1\n",
+            items_json
         );
         with_mock_bw(&script, || {
             let config = Config {
@@ -3121,9 +3306,10 @@ exit 1
             let error = BwBackend
                 .resolve("MY_KEY", None, &ctx)
                 .expect_err("configured item outside the folder must fail");
-            assert_eq!(
-                error.to_string(),
-                "Bitwarden item 'my-bw-item' is not in the requested folder"
+            assert!(
+                error
+                    .to_string()
+                    .contains("No Bitwarden item found with exact title")
             );
         });
     }
@@ -3492,10 +3678,14 @@ exit 1
 
     #[test]
     fn backend_store_edits_existing_item_when_item_configured() {
-        // Mock bw: "get item" returns existing item JSON; "edit item" reads stdin and exits 0
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let items_json = r#"[{"id":"item123","name":"my-bw-item"}]"#;
         let item_json = r#"{"id":"item123","name":"my-bw-item","type":1,"login":{"password":"old"},"fields":[]}"#;
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then\necho '{}'\nexit 0\nfi\ncat >/dev/null\necho 'edited'\nexit 0\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item123\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"edit\" ] && [ \"$2\" = \"item\" ] && [ \"$3\" = \"item123\" ]; then cat >/dev/null; exit 0; fi\nexit 1\n",
+            call_log.display(),
+            items_json,
             item_json
         );
         with_mock_bw(&script, || {
@@ -3520,6 +3710,8 @@ exit 1
             };
             let result = BwBackend.store("MY_KEY", "my-value", &ctx);
             assert!(result.is_ok());
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(calls.lines().any(|line| line == "edit item item123"));
         });
     }
 
@@ -3528,7 +3720,7 @@ exit 1
         let state_dir = tempfile::tempdir().unwrap();
         let call_log = state_dir.path().join("bw-calls.log");
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then echo '[{{\"name\":\"team\",\"id\":\"folder-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-2\",\"fields\":[]}}'; exit 0; fi\nexit 1\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then echo '[{{\"name\":\"team\",\"id\":\"folder-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '[{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-2\",\"fields\":[]}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-2\",\"fields\":[]}}'; exit 0; fi\nexit 1\n",
             call_log.display()
         );
         let config = Config {
@@ -3554,7 +3746,11 @@ exit 1
             let error = BwBackend
                 .store("API_KEY", "secret", &ctx)
                 .expect_err("an item outside the configured folder must not be edited");
-            assert!(error.to_string().contains("not in the requested folder"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("No Bitwarden item found with exact title")
+            );
             let calls = std::fs::read_to_string(call_log).unwrap();
             assert!(!calls.lines().any(|line| line.starts_with("edit item")));
         });
@@ -3565,7 +3761,7 @@ exit 1
         let state_dir = tempfile::tempdir().unwrap();
         let call_log = state_dir.path().join("bw-calls.log");
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then echo '[{{\"name\":\"team\",\"id\":\"folder-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-1\",\"fields\":[]}}'; exit 0; fi\nif [ \"$1\" = \"edit\" ] && [ \"$2\" = \"item\" ]; then cat >/dev/null; exit 0; fi\nexit 1\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then echo '[{{\"name\":\"team\",\"id\":\"folder-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '[{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-1\",\"fields\":[]}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-1\",\"fields\":[]}}'; exit 0; fi\nif [ \"$1\" = \"edit\" ] && [ \"$2\" = \"item\" ]; then cat >/dev/null; exit 0; fi\nexit 1\n",
             call_log.display()
         );
         let config = Config {
