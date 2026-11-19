@@ -1,0 +1,4 @@
+[profile.mutants]
+# Mutants that make a test hang must fail that mutant instead of stalling the
+# mutation shard. This profile is selected only by the mutation workflow.
+slow-timeout = { period = "30s", terminate-after = 1, grace-period = "0s" }
