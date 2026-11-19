@@ -107,7 +107,16 @@ fn commands_add_and_list_for_given_directory() {
 
     assert!(second_add.status.success());
     let override_contents = std::fs::read_to_string(project_dir.join(".pw-env.toml")).unwrap();
-    assert!(override_contents.contains("commands = [\"cargo\", \"npm\", \"terraform\"]"));
+    let parsed_override: toml::Value = toml::from_str(&override_contents).unwrap();
+    let configured_commands = parsed_override
+        .get("commands")
+        .and_then(toml::Value::as_array)
+        .unwrap()
+        .iter()
+        .map(toml::Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .unwrap();
+    assert_eq!(configured_commands, ["cargo", "npm", "terraform"]);
 
     let approve = Command::new(env!("CARGO_BIN_EXE_pw-env"))
         .arg("approvals")
@@ -174,15 +183,23 @@ fn export_powershell_tracks_only_valid_keys_from_source_all() {
     let workspace = TempDir::new().unwrap();
     let project_dir = workspace.path().join("project");
     let xdg_config_home = workspace.path().join("xdg");
+    let xdg_state_home = workspace.path().join("state");
 
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
     std::fs::write(
         project_dir.join(".env"),
         "X'); Write-Output 'PWSH_PROBE'; #=harmless\nVALID_KEY=exact-value\n",
     )
     .unwrap();
     write_config(&xdg_config_home, "[defaults]\nsource_all = true\n");
+    approve_fetch_for_test(
+        &project_dir,
+        &xdg_config_home,
+        &xdg_state_home,
+        workspace.path(),
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
         .arg("export")
@@ -190,12 +207,14 @@ fn export_powershell_tracks_only_valid_keys_from_source_all() {
         .arg("--shell")
         .arg("powershell")
         .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("$env:VALID_KEY = 'exact-value'\n"));
+    assert_powershell_assignment(&stdout, "VALID_KEY", "exact-value");
     assert!(stdout.contains("$global:__pw_env_previous_keys = @('VALID_KEY')\n"));
     assert!(!stdout.contains("PWSH_PROBE"));
     assert!(!stdout.contains("Write-Output"));
@@ -206,15 +225,23 @@ fn hook_powershell_tracks_only_valid_keys_from_source_all() {
     let workspace = TempDir::new().unwrap();
     let project_dir = workspace.path().join("project");
     let xdg_config_home = workspace.path().join("xdg");
+    let xdg_state_home = workspace.path().join("state");
 
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
     std::fs::write(
         project_dir.join(".env"),
         "X'); Write-Output 'PWSH_PROBE'; #=harmless\nVALID_KEY=exact-value\n",
     )
     .unwrap();
     write_config(&xdg_config_home, "[defaults]\nsource_all = true\n");
+    approve_fetch_for_test(
+        &project_dir,
+        &xdg_config_home,
+        &xdg_state_home,
+        workspace.path(),
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
         .arg("hook")
@@ -222,12 +249,14 @@ fn hook_powershell_tracks_only_valid_keys_from_source_all() {
         .arg("--shell")
         .arg("powershell")
         .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("$env:VALID_KEY = 'exact-value'\n"));
+    assert_powershell_assignment(&stdout, "VALID_KEY", "exact-value");
     assert!(stdout.contains("$global:__pw_env_previous_keys = @('VALID_KEY')\n"));
     assert!(!stdout.contains("PWSH_PROBE"));
     assert!(!stdout.contains("Write-Output"));
@@ -238,15 +267,23 @@ fn export_powershell_emits_empty_tracking_for_only_invalid_keys() {
     let workspace = TempDir::new().unwrap();
     let project_dir = workspace.path().join("project");
     let xdg_config_home = workspace.path().join("xdg");
+    let xdg_state_home = workspace.path().join("state");
 
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::create_dir_all(xdg_config_home.join("pw-env")).unwrap();
+    std::fs::create_dir_all(&xdg_state_home).unwrap();
     std::fs::write(
         project_dir.join(".env"),
         "X'); Write-Output 'PWSH_PROBE'; #=harmless\n",
     )
     .unwrap();
     write_config(&xdg_config_home, "[defaults]\nsource_all = true\n");
+    approve_fetch_for_test(
+        &project_dir,
+        &xdg_config_home,
+        &xdg_state_home,
+        workspace.path(),
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
         .arg("export")
@@ -254,12 +291,15 @@ fn export_powershell_emits_empty_tracking_for_only_invalid_keys() {
         .arg("--shell")
         .arg("powershell")
         .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .env("HOME", workspace.path())
         .output()
         .unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("$global:__pw_env_previous_keys = @()\n"));
+    assert!(!stdout.contains("$env:"));
     assert!(!stdout.contains("PWSH_PROBE"));
     assert!(!stdout.contains("Write-Output"));
 }
@@ -395,6 +435,46 @@ fn setup_logging_creates_debug_log_when_file_configured() {
 
 fn write_config(xdg_config_home: &Path, contents: &str) {
     std::fs::write(xdg_config_home.join("pw-env/config.toml"), contents).unwrap();
+}
+
+fn approve_fetch_for_test(
+    project_dir: &Path,
+    xdg_config_home: &Path,
+    xdg_state_home: &Path,
+    home: &Path,
+) {
+    let output = Command::new(env!("CARGO_BIN_EXE_pw-env"))
+        .arg("approvals")
+        .arg("approve-fetch")
+        .arg(project_dir)
+        .env("XDG_CONFIG_HOME", xdg_config_home)
+        .env("XDG_STATE_HOME", xdg_state_home)
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "approve-fetch should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_powershell_assignment(stdout: &str, key: &str, value: &str) {
+    let expected = powershell_assignment(key, value);
+    assert!(
+        stdout.contains(&expected),
+        "expected PowerShell assignment {expected:?}, got: {stdout}"
+    );
+}
+
+fn powershell_assignment(key: &str, value: &str) -> String {
+    let bytes = value
+        .as_bytes()
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("$env:{key} = [System.Text.Encoding]::UTF8.GetString([byte[]]@({bytes}))\n")
 }
 
 fn create_executable(path: &Path) {
@@ -812,8 +892,8 @@ fn export_uses_powershell_shell_syntax() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("$env:API_KEY = 'fakevalue'\n"),
-        "expected powershell export syntax, got: {stdout}"
+        stdout.contains(&powershell_assignment("API_KEY", "fakevalue")),
+        "expected UTF-8 encoded PowerShell export syntax, got: {stdout}"
     );
     assert!(
         stdout.contains("$global:__pw_env_previous_keys = @('API_KEY')\n"),
