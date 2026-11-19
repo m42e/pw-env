@@ -276,9 +276,10 @@ fn wait_with_output_timeout_limited(
             }
         }
 
-        if let (Some(status), Some(stdout), Some(stderr)) =
-            (status.take(), stdout.take(), stderr.take())
-        {
+        if status.is_some() && stdout.is_some() && stderr.is_some() {
+            let status = status.take().expect("status was checked");
+            let stdout = stdout.take().expect("stdout was checked");
+            let stderr = stderr.take().expect("stderr was checked");
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Ok(Output {
@@ -399,6 +400,33 @@ mod tests {
         assert!(output.status.success());
         assert!(output.stdout.len() >= 256 * 1024);
         assert!(output.stderr.len() >= 256 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_output_timeout_keeps_completed_streams_until_child_exits() {
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'completed stdout'; exec 1>&-; sleep 0.2; printf 'late stderr' >&2",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = wait_with_output_timeout_limited(
+            child,
+            "staggered stream output test",
+            Duration::from_secs(5),
+            EXTERNAL_COMMAND_STDOUT_LIMIT,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"completed stdout");
+        assert_eq!(output.stderr, b"late stderr");
     }
 
     #[test]
