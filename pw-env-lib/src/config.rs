@@ -15,14 +15,18 @@ pub use crate::file_io::{
 const PROJECT_OVERRIDE_FILE_NAME: &str = ".pw-env.toml";
 const UNAPPROVED_PROJECT_OVERRIDE_COMMAND: &str = "\0";
 
-/// Serialize updates to an approval store across pw-env processes. The lock file
-/// is separate from the store because approval stores are atomically replaced.
-fn with_approval_store_lock<T>(store_path: &Path, update: impl FnOnce() -> Result<T>) -> Result<T> {
-    let parent = match store_path.parent() {
+fn approval_store_parent(store_path: &Path) -> &Path {
+    match store_path.parent() {
         Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
         Some(parent) => parent,
         None => Path::new("."),
-    };
+    }
+}
+
+/// Serialize updates to an approval store across pw-env processes. The lock file
+/// is separate from the store because approval stores are atomically replaced.
+fn with_approval_store_lock<T>(store_path: &Path, update: impl FnOnce() -> Result<T>) -> Result<T> {
+    let parent = approval_store_parent(store_path);
     std::fs::create_dir_all(parent)
         .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
 
@@ -1713,6 +1717,18 @@ mod tests {
     }
 
     #[test]
+    fn approval_store_parent_preserves_nested_paths_and_normalizes_relative_paths() {
+        assert_eq!(
+            approval_store_parent(Path::new("approvals.json")),
+            Path::new(".")
+        );
+        assert_eq!(
+            approval_store_parent(Path::new("state/approvals.json")),
+            Path::new("state")
+        );
+    }
+
+    #[test]
     fn test_default_config() {
         let config = Config {
             defaults: Defaults::default(),
@@ -2789,6 +2805,15 @@ backend = "op"
         assert!(approvals.is_approved(&second, "second-hash"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escape_path_for_display_escapes_backslashes_and_keeps_printable_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'\\', b'A', 0xff]));
+        assert_eq!(escape_path_for_display(&path), r"\\A\xff");
     }
 
     #[cfg(unix)]
