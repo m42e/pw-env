@@ -1418,7 +1418,13 @@ mod tests {
     #[test]
     fn gpg_recipient_parser_rejects_missing_and_invalid_fingerprints() {
         let no_keys = "uid:u:::::::User Name::::::\n";
-        assert!(GpgBackend::parse_primary_recipient_fingerprint("selector", no_keys).is_err());
+        let error = GpgBackend::parse_primary_recipient_fingerprint("selector", no_keys)
+            .expect_err("a listing with no public key must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("did not resolve to a public key")
+        );
 
         for fingerprint in [String::new(), "Z".repeat(40)] {
             let output =
