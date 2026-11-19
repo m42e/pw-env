@@ -237,10 +237,26 @@ fn migrate_without_command_scope_does_not_prompt_for_commands() {
     .unwrap();
     let op_dir = create_mock_op();
 
-    let (output, status) = run_migrate_in_pty(temp_dir.path(), op_dir.path(), "\rn\r");
+    let (output, status) = run_migrate_in_pty_steps(
+        temp_dir.path(),
+        op_dir.path(),
+        &[
+            (
+                "Select the plaintext entries to store in the 'op' backend",
+                "\r",
+            ),
+            (
+                "Should migrated secrets be available only to specific commands?",
+                "n\r",
+            ),
+        ],
+    );
 
     assert!(status.success(), "interactive migration failed: {output}");
-    assert!(output.contains("Done. Migrated values have been removed from .env."));
+    assert!(
+        output.contains("Done. Migrated values have been removed from .env."),
+        "migration did not report completion: {output}"
+    );
     assert!(!output.contains("Command names (space or comma separated"));
     assert!(!temp_dir.path().join(".pw-env.toml").exists());
 }
