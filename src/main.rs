@@ -1649,11 +1649,12 @@ fn handle_commands(dir: Option<PathBuf>, command: CommandCommands) -> Result<()>
         }
         CommandCommands::Add { commands } => {
             let additions = migrate::parse_command_names(&commands.join(","))?;
-            let mut configured = config
-                .effective_commands(&dir)
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>();
+            let existing_commands = if config.project_override_requires_approval(&dir) {
+                &[]
+            } else {
+                config.effective_commands(&dir)
+            };
+            let mut configured = existing_commands.iter().cloned().collect::<BTreeSet<_>>();
             if let Some(override_path) = config::Config::project_override_path(&dir) {
                 configured.extend(migrate::project_override_commands(&override_path)?);
             }
