@@ -450,6 +450,10 @@ mod tests {
                     thread::sleep(Duration::from_secs(1));
                 }
             }
+            "slow-exit" => {
+                io::stdout().lock().write_all(b"partial-secret").unwrap();
+                thread::sleep(Duration::from_secs(2));
+            }
             other => panic!("unknown pipe test mode: {other}"),
         }
     }
@@ -470,6 +474,50 @@ mod tests {
         assert!(output.status.success());
         assert!(output.stdout.len() >= 256 * 1024);
         assert!(output.stderr.len() >= 256 * 1024);
+    }
+
+    #[test]
+    fn read_pipe_limited_accepts_exactly_the_configured_limit() {
+        assert!(matches!(
+            read_pipe_limited(&b"four"[..], 4),
+            Ok(output) if output == b"four"
+        ));
+        assert!(matches!(
+            read_pipe_limited(&b"four"[..], 5),
+            Ok(output) if output == b"four"
+        ));
+        assert_eq!(EXTERNAL_COMMAND_STDERR_LIMIT, 1024 * 1024);
+    }
+
+    #[test]
+    fn read_pipe_limited_stops_on_the_first_eof() {
+        struct EofThenError(usize);
+
+        impl io::Read for EofThenError {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                self.0 += 1;
+                if self.0 == 1 {
+                    Ok(0)
+                } else {
+                    Err(io::Error::other("read after end of stream"))
+                }
+            }
+        }
+
+        let mut pipe = EofThenError(0);
+        assert!(matches!(
+            read_pipe_limited(&mut pipe, 0),
+            Ok(output) if output.is_empty()
+        ));
+        assert_eq!(pipe.0, 1, "reader must not be polled after EOF");
+    }
+
+    #[test]
+    fn join_pipe_reader_consumes_and_joins_the_reader_handle() {
+        let mut reader = Some(thread::spawn(|| {}));
+
+        join_pipe_reader(&mut reader);
+        assert!(reader.is_none());
     }
 
     #[cfg(unix)]
@@ -501,6 +549,78 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn wait_with_output_timeout_waits_for_streams_inherited_by_a_descendant() {
+        let child = Command::new("sh")
+            .args(["-c", "sleep 0.2 &"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = wait_with_output_timeout_inner(
+            child,
+            "inherited stream output test",
+            Duration::from_secs(2),
+            EXTERNAL_COMMAND_STDOUT_LIMIT,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+            true,
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_output_timeout_waits_for_child_after_stderr_closes() {
+        let child = Command::new("sh")
+            .args(["-c", "printf 'early stderr' >&2; exec 2>&-; sleep 0.2"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = wait_with_output_timeout_inner(
+            child,
+            "staggered stderr output test",
+            Duration::from_secs(2),
+            EXTERNAL_COMMAND_STDOUT_LIMIT,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+            true,
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"early stderr");
+    }
+
+    #[test]
+    fn wait_with_output_timeout_reports_deadline_when_child_exits_later() {
+        let child = spawn_pipe_test_child("slow-exit");
+        let started_at = Instant::now();
+
+        let error = wait_with_output_timeout_limited(
+            child,
+            "slow output test",
+            Duration::from_millis(50),
+            EXTERNAL_COMMAND_STDOUT_LIMIT,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(!error.to_string().contains("partial-secret"));
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "timed-out child must be terminated instead of being left to exit on its own"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn wait_with_stderr_timeout_supports_stdout_redirected_to_file() {
         let stdout_file = tempfile::NamedTempFile::new().unwrap();
         let child = Command::new("sh")
@@ -513,7 +633,15 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let output = wait_with_stderr_timeout(child, "redirected output test").unwrap();
+        let output = wait_with_output_timeout_inner(
+            child,
+            "redirected output test",
+            Duration::from_secs(2),
+            0,
+            EXTERNAL_COMMAND_STDERR_LIMIT,
+            false,
+        )
+        .unwrap();
 
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
@@ -630,6 +758,105 @@ mod tests {
         assert_eq!(
             ctx.created_with(),
             format!("pw-env ({})", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    struct DefaultInteraction;
+
+    impl ResolutionInteraction for DefaultInteraction {
+        fn prompt_bitwarden_password(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn start_progress(&self, _initial_message: &str) -> Box<dyn ProgressReporter> {
+            Box::new(NoopProgressReporter)
+        }
+    }
+
+    struct NoopProgressReporter;
+
+    impl ProgressReporter for NoopProgressReporter {
+        fn set_message(&mut self, _message: &str) {}
+
+        fn finish(&mut self, _message: &str) {}
+    }
+
+    #[test]
+    fn default_gpg_binding_interaction_refuses_enrollment() {
+        assert!(
+            !DefaultInteraction
+                .confirm_gpg_store_binding(
+                    GpgStoreBindingAction::EnrollNewStore,
+                    Path::new("/project"),
+                    &[],
+                    &["0123456789ABCDEF0123456789ABCDEF01234567".to_string()],
+                )
+                .unwrap()
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        stores: std::cell::RefCell<Vec<(String, String)>>,
+    }
+
+    impl Backend for RecordingBackend {
+        fn resolve(
+            &self,
+            _key: &str,
+            _reference: Option<&str>,
+            _ctx: &ResolveContext,
+        ) -> Result<String> {
+            anyhow::bail!("not implemented for recording backend")
+        }
+
+        fn store(&self, key: &str, value: &str, _ctx: &StoreContext) -> Result<()> {
+            self.stores
+                .borrow_mut()
+                .push((key.to_string(), value.to_string()));
+            Ok(())
+        }
+
+        fn has(&self, _key: &str, _ctx: &ResolveContext) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn name(&self) -> &str {
+            "recording"
+        }
+    }
+
+    #[test]
+    fn backend_store_defaults_write_and_return_the_migration_value() {
+        let config = make_config();
+        let ctx = StoreContext {
+            dir: Path::new("/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+        let backend = RecordingBackend::default();
+
+        backend
+            .store_with_interaction("FIRST", "first-value", &ctx, None)
+            .unwrap();
+        assert_eq!(
+            backend.stores.borrow().as_slice(),
+            &[("FIRST".to_string(), "first-value".to_string())]
+        );
+
+        assert_eq!(
+            backend
+                .store_for_migration("SECOND", "verify-me", &ctx, None)
+                .unwrap(),
+            "verify-me"
+        );
+        assert_eq!(
+            backend.stores.borrow().as_slice(),
+            &[
+                ("FIRST".to_string(), "first-value".to_string()),
+                ("SECOND".to_string(), "verify-me".to_string())
+            ]
         );
     }
 }

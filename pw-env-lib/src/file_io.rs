@@ -194,16 +194,13 @@ fn windows_dacl(file: &File) -> Result<(Vec<u64>, usize, bool, bool)> {
         if control_read == 0 {
             anyhow::bail!("Failed to inspect Windows environment file DACL controls");
         }
-        let present = control & SE_DACL_PRESENT != 0;
-        let protected = control & SE_DACL_PROTECTED != 0;
+        let (present, protected) = windows_dacl_control_flags(control);
         if dacl.is_null() {
             return Ok((Vec::new(), 0, present, protected));
         }
 
         let acl_len = unsafe { (*dacl).AclSize as usize };
-        if acl_len < std::mem::size_of::<ACL>() {
-            anyhow::bail!("Windows returned an invalid environment file DACL");
-        }
+        validate_windows_acl_length(acl_len)?;
         let word_count = acl_len.div_ceil(std::mem::size_of::<u64>());
         let mut acl_words = vec![0u64; word_count];
         unsafe {
@@ -220,6 +217,26 @@ fn windows_dacl(file: &File) -> Result<(Vec<u64>, usize, bool, bool)> {
         LocalFree(descriptor.cast());
     }
     captured
+}
+
+#[cfg(windows)]
+fn windows_dacl_control_flags(control: u16) -> (bool, bool) {
+    use windows_sys::Win32::Security::{SE_DACL_PRESENT, SE_DACL_PROTECTED};
+
+    (
+        control & SE_DACL_PRESENT != 0,
+        control & SE_DACL_PROTECTED != 0,
+    )
+}
+
+#[cfg(windows)]
+fn validate_windows_acl_length(acl_len: usize) -> Result<()> {
+    use windows_sys::Win32::Security::ACL;
+
+    if acl_len < std::mem::size_of::<ACL>() {
+        anyhow::bail!("Windows returned an invalid environment file DACL");
+    }
+    Ok(())
 }
 
 /// Open a regular file without following a final-component symlink/reparse point.
@@ -444,6 +461,16 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn open_regular_file_nofollow_rejects_a_directory() {
+        let directory = TempDir::new().unwrap();
+        assert!(
+            open_regular_file_nofollow(directory.path()).is_err(),
+            "directories are not regular environment files"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn migration_rewrite_keeps_owner_only_mode_and_remaining_plaintext() {
@@ -498,6 +525,59 @@ mod tests {
         assert_eq!(
             fs::read_to_string(displaced).unwrap(),
             "KEEP=owner-only-secret\nAPI_KEY=migrated-secret\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rewrite_rejects_content_change_without_permission_change() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join(".env");
+        fs::write(&path, "KEEP=original-secret\nAPI_KEY=migrated-secret\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let env_file = crate::env_file::EnvFile::parse(&path).unwrap();
+        fs::write(&path, "KEEP=replacement-secret\nAPI_KEY=migrated-secret\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = env_file
+            .rewrite_with_cleared_keys(&["API_KEY"])
+            .expect_err("changed contents must be rejected even when permissions match");
+        assert!(format!("{error:#}").contains("changed after it was read"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "KEEP=replacement-secret\nAPI_KEY=migrated-secret\n"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rewrite_rejects_permission_change_without_content_change() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join(".env");
+        let original = "KEEP=original-secret\nAPI_KEY=migrated-secret\n";
+        fs::write(&path, original).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let env_file = crate::env_file::EnvFile::parse(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = env_file
+            .rewrite_with_cleared_keys(&["API_KEY"])
+            .expect_err("changed permissions must be rejected even when contents match");
+        assert!(format!("{error:#}").contains("changed after it was read"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
         );
     }
 
@@ -701,5 +781,162 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "EXISTING_KEY=\nAPI_KEY=op://vault/item/password\n"
         );
+    }
+
+    #[cfg(windows)]
+    mod windows_mutation_tests {
+        use super::super::{
+            FileProtectionSnapshot, atomic_write_file_with_protection, open_regular_file_nofollow,
+            validate_windows_acl_length, windows_dacl, windows_dacl_control_flags,
+        };
+        use std::fs;
+        use std::path::Path;
+        use tempfile::TempDir;
+        use windows_sys::Win32::Security::{SE_DACL_PRESENT, SE_DACL_PROTECTED};
+
+        fn assert_icacls(args: &[&std::ffi::OsStr]) {
+            let output = std::process::Command::new("icacls")
+                .args(args)
+                .output()
+                .expect("icacls must be available on Windows");
+            assert!(
+                output.status.success(),
+                "icacls failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn make_parent_broad_and_file_private(directory: &TempDir, path: &Path) {
+            let owner = std::env::var("USERNAME").expect("Windows tests need a user name");
+            let owner_acl = format!("{owner}:(F)");
+            assert_icacls(&[
+                directory.path().as_os_str(),
+                std::ffi::OsStr::new("/grant"),
+                std::ffi::OsStr::new("*S-1-5-32-545:(OI)(CI)(RX)"),
+            ]);
+            assert_icacls(&[
+                path.as_os_str(),
+                std::ffi::OsStr::new("/inheritance:r"),
+                std::ffi::OsStr::new("/grant:r"),
+                std::ffi::OsStr::new(&owner_acl),
+            ]);
+        }
+
+        #[test]
+        fn windows_mutation_tests_dacl_application_preserves_explicit_acl() {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join(".env");
+            let original = b"KEEP=secret\nAPI_KEY=old\n";
+            fs::write(&path, original).unwrap();
+            make_parent_broad_and_file_private(&directory, &path);
+
+            let source = open_regular_file_nofollow(&path).unwrap();
+            let (source_acl, source_len, source_present, source_protected) =
+                windows_dacl(&source).unwrap();
+            assert!(source_present, "test source ACL should be present");
+            assert!(source_protected, "test source ACL should be protected");
+            let protection = FileProtectionSnapshot::capture(&source, original).unwrap();
+
+            atomic_write_file_with_protection(&path, b"KEEP=secret\nAPI_KEY=\n", &protection)
+                .unwrap();
+
+            let replacement = open_regular_file_nofollow(&path).unwrap();
+            let (replacement_acl, replacement_len, replacement_present, replacement_protected) =
+                windows_dacl(&replacement).unwrap();
+            let words = source_len.div_ceil(std::mem::size_of::<u64>());
+            assert_eq!(replacement_len, source_len);
+            assert!(replacement_present);
+            assert_eq!(replacement_acl[..words], source_acl[..words]);
+            assert!(replacement_protected);
+            assert_eq!(fs::read(&path).unwrap(), b"KEEP=secret\nAPI_KEY=\n");
+        }
+
+        #[test]
+        fn windows_mutation_tests_changed_dacl_is_rejected_before_replacement() {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join(".env");
+            let original = b"KEEP=secret\nAPI_KEY=old\n";
+            fs::write(&path, original).unwrap();
+            make_parent_broad_and_file_private(&directory, &path);
+            let env_file = crate::env_file::EnvFile::parse(&path).unwrap();
+
+            assert_icacls(&[
+                path.as_os_str(),
+                std::ffi::OsStr::new("/grant"),
+                std::ffi::OsStr::new("*S-1-1-0:(R)"),
+            ]);
+
+            let error = env_file
+                .rewrite_with_cleared_keys(&["API_KEY"])
+                .expect_err("a DACL edit after parsing must be rejected");
+            assert!(format!("{error:#}").contains("changed after it was read"));
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+
+        #[test]
+        fn windows_mutation_tests_dacl_snapshot_checks_presence_and_bytes() {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join(".env");
+            let contents = b"KEY=value\n";
+            fs::write(&path, contents).unwrap();
+            let file = open_regular_file_nofollow(&path).unwrap();
+            let protection = FileProtectionSnapshot::capture(&file, contents).unwrap();
+
+            assert!(protection.matches_access_controls(&file, true).unwrap());
+
+            let mut different_presence = protection.clone();
+            different_presence.dacl_present = !protection.dacl_present;
+            assert!(
+                !different_presence
+                    .matches_access_controls(&file, true)
+                    .unwrap(),
+                "destination DACL presence is part of the snapshot"
+            );
+
+            let mut different_bytes = protection.clone();
+            different_bytes.dacl[0] ^= 1;
+            assert!(
+                !different_bytes
+                    .matches_access_controls(&file, true)
+                    .unwrap(),
+                "destination DACL bytes are part of the snapshot"
+            );
+        }
+
+        #[test]
+        fn windows_mutation_tests_dacl_control_flags_match_each_bit() {
+            assert_eq!(windows_dacl_control_flags(0), (false, false));
+            assert_eq!(windows_dacl_control_flags(SE_DACL_PRESENT), (true, false));
+            assert_eq!(windows_dacl_control_flags(SE_DACL_PROTECTED), (false, true));
+            assert_eq!(
+                windows_dacl_control_flags(SE_DACL_PRESENT | SE_DACL_PROTECTED),
+                (true, true)
+            );
+        }
+
+        #[test]
+        fn windows_mutation_tests_acl_length_checks_boundary_values() {
+            use windows_sys::Win32::Security::ACL;
+
+            let minimum = std::mem::size_of::<ACL>();
+            assert!(validate_windows_acl_length(minimum - 1).is_err());
+            assert!(validate_windows_acl_length(minimum).is_ok());
+            assert!(validate_windows_acl_length(minimum + 1).is_ok());
+        }
+
+        #[test]
+        fn windows_mutation_tests_reparse_points_are_not_opened_as_regular_files() {
+            use std::os::windows::fs::symlink_file;
+
+            let directory = TempDir::new().unwrap();
+            let target = directory.path().join("target.env");
+            let link = directory.path().join("link.env");
+            fs::write(&target, "SECRET=value\n").unwrap();
+            symlink_file(&target, &link).expect("Windows runner must support file symlinks");
+
+            let error =
+                open_regular_file_nofollow(&link).expect_err("reparse points must be rejected");
+            assert!(format!("{error:#}").contains("reparse point"));
+        }
     }
 }

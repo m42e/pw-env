@@ -125,9 +125,6 @@ fn canonical_repository_identifier(value: &str) -> Option<String> {
     let value = value.trim();
     let (authority, path) = value.split_once('/')?;
     if authority.is_empty()
-        || path.is_empty()
-        || path.starts_with('/')
-        || path.ends_with('/')
         || path.contains('\\')
         || path.contains('?')
         || path.contains('#')
@@ -188,8 +185,6 @@ fn canonical_repository_identifier(value: &str) -> Option<String> {
 fn normalize_git_remote_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
     if trimmed.is_empty()
-        || trimmed.starts_with("file://")
-        || trimmed.starts_with('/')
         || trimmed.starts_with("./")
         || trimmed.starts_with("../")
         || trimmed.starts_with('~')
@@ -223,9 +218,6 @@ fn normalize_git_remote_url(url: &str) -> Option<String> {
             .map(|port| format!(":{port}"))
             .unwrap_or_default();
         let path = parsed.path().trim_matches('/');
-        if host.is_empty() || path.is_empty() || path.contains('\\') {
-            return None;
-        }
         return canonical_repository_identifier(&format!("{host}{port}/{path}"));
     }
 
@@ -251,16 +243,7 @@ fn normalize_git_remote_url(url: &str) -> Option<String> {
         .next()
         .unwrap_or_default()
         .trim_matches('/');
-    if host.is_empty()
-        || host.contains('/')
-        || host.contains('@')
-        || host.chars().any(char::is_whitespace)
-        || host.contains('?')
-        || host.contains('#')
-        || path.is_empty()
-        || path.contains('\\')
-        || path.chars().any(char::is_whitespace)
-    {
+    if host.contains('/') {
         return None;
     }
 
@@ -1238,6 +1221,88 @@ branch "broken"]
     }
 
     #[test]
+    fn canonical_repository_identifier_rejects_each_unsafe_path_value() {
+        for candidate in [
+            "example.com/",
+            "example.com//repo",
+            "example.com/repo/",
+            "example.com/repo\\private",
+            "example.com/repo?token=value",
+            "example.com/repo#fragment",
+            "example.com/repo@other-host",
+            "example.com/repo name",
+            "example.com/repo//nested",
+            "example.com/repo/./nested",
+            "example.com/repo/../nested",
+        ] {
+            assert_eq!(
+                canonical_repository_identifier(candidate),
+                None,
+                "candidate={candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_repository_identifier_validates_authorities_and_ipv6_ports() {
+        assert_eq!(
+            canonical_repository_identifier("example.com:8443/repo.git").as_deref(),
+            Some("example.com:8443/repo.git")
+        );
+        assert_eq!(
+            canonical_repository_identifier("[2001:DB8::1]/repo.git").as_deref(),
+            Some("[2001:db8::1]/repo.git")
+        );
+        assert_eq!(
+            canonical_repository_identifier("[::ffff:192.0.2.1]:8443/repo.git").as_deref(),
+            Some("[::ffff:192.0.2.1]:8443/repo.git")
+        );
+        assert_eq!(
+            canonical_repository_identifier("[2001:dbz::1]/repo.git"),
+            None
+        );
+        assert_eq!(canonical_repository_identifier("[::1]:84x/repo.git"), None);
+        assert_eq!(canonical_repository_identifier(":/repo.git"), None);
+        assert_eq!(canonical_repository_identifier("_invalid/repo.git"), None);
+    }
+
+    #[test]
+    fn normalize_git_remote_url_handles_bracketed_scp_hosts_and_paths() {
+        assert_eq!(
+            normalize_git_remote_url("[2001:db8::1]:example/repo.git").as_deref(),
+            Some("[2001:db8::1]/example/repo.git")
+        );
+        assert_eq!(
+            normalize_git_remote_url("user@a:/repo.git").as_deref(),
+            Some("a/repo.git")
+        );
+        assert_eq!(normalize_git_remote_url("user@1:/repo.git"), None);
+        assert_eq!(normalize_git_remote_url("user@bad/host:repo.git"), None);
+    }
+
+    #[test]
+    fn normalize_git_remote_url_relies_on_canonical_validation_for_paths_and_hosts() {
+        for candidate in [
+            "file://example.com/repo.git",
+            "/github.com/example/repo.git",
+            "https://example.com",
+            "user@:repo.git",
+            "user@bad host:repo.git",
+            "user@?bad:repo.git",
+            "user@#bad:repo.git",
+            "user@host:",
+            "user@host:repo\\private",
+            "user@host:repo name",
+        ] {
+            assert_eq!(
+                normalize_git_remote_url(candidate),
+                None,
+                "candidate={candidate}"
+            );
+        }
+    }
+
+    #[test]
     fn repository_identifier_discards_credentials_query_and_fragment() {
         let https = normalize_git_remote_url(
             "https://build-user:ghp_dummy-secret@GitHub.com:443/example/repo.git?access_token=query-secret#fragment-secret",
@@ -1323,6 +1388,34 @@ branch "broken"]
     #[test]
     fn normalize_git_remote_url_rejects_false_windows_drive_from_third_byte_slash() {
         assert_eq!(normalize_git_remote_url("ht://example.com"), None);
+    }
+
+    #[test]
+    fn resolve_with_source_all_does_not_request_approval_for_comment_only_file() {
+        let temp = unique_subdir("resolve-source-all-comment-only");
+        let env_path = temp.join(".env");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "# no values to export\n").unwrap();
+
+        let env_file = EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                source_all: true,
+                ..crate::config::Defaults::default()
+            },
+            updates: crate::config::UpdateConfig::default(),
+            log: crate::config::LogConfig::default(),
+            projects: vec![],
+        };
+        crate::config::set_test_secret_fetch_store_path(Some(
+            temp.join("approved-secret-fetches.json"),
+        ));
+
+        let result = resolve_env_file(&env_file, &config, &temp);
+        crate::config::set_test_secret_fetch_store_path(None);
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(result.unwrap(), BTreeMap::new());
     }
 
     #[test]

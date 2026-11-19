@@ -18,10 +18,11 @@ const UNAPPROVED_PROJECT_OVERRIDE_COMMAND: &str = "\0";
 /// Serialize updates to an approval store across pw-env processes. The lock file
 /// is separate from the store because approval stores are atomically replaced.
 fn with_approval_store_lock<T>(store_path: &Path, update: impl FnOnce() -> Result<T>) -> Result<T> {
-    let parent = store_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let parent = match store_path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => Path::new("."),
+    };
     std::fs::create_dir_all(parent)
         .with_context(|| format!("Failed to create state directory {}", parent.display()))?;
 
@@ -1370,6 +1371,30 @@ fn decode_hex(encoded: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+fn path_identity_platform() -> &'static str {
+    #[cfg(unix)]
+    {
+        "unix-bytes"
+    }
+    #[cfg(windows)]
+    {
+        "windows-utf16le"
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        "other-utf8-lossy"
+    }
+}
+
+fn path_identity_matches_platform(
+    stored_platform: &str,
+    current_platform: &str,
+    bytes: &[u8],
+    requires_even_utf16_length: bool,
+) -> bool {
+    stored_platform == current_platform && (!requires_even_utf16_length || bytes.len() % 2 == 0)
+}
+
 fn path_from_identity(identity: &str) -> PathBuf {
     let Some((platform, encoded)) = identity
         .strip_prefix(PATH_IDENTITY_PREFIX)
@@ -1441,14 +1466,14 @@ fn migrate_path_key(stored_path: &str) -> Option<String> {
         let (platform, encoded) = stored_path
             .strip_prefix(PATH_IDENTITY_PREFIX)?
             .split_once(':')?;
-        let _bytes = decode_hex(encoded)?;
-        #[cfg(unix)]
-        return (platform == "unix-bytes").then(|| stored_path.to_string());
-        #[cfg(windows)]
-        return (platform == "windows-utf16le" && _bytes.len() % 2 == 0)
-            .then(|| stored_path.to_string());
-        #[cfg(not(any(unix, windows)))]
-        return (platform == "other-utf8-lossy").then(|| stored_path.to_string());
+        let bytes = decode_hex(encoded)?;
+        return path_identity_matches_platform(
+            platform,
+            path_identity_platform(),
+            &bytes,
+            cfg!(windows),
+        )
+        .then(|| stored_path.to_string());
     }
     if stored_path.contains(LEGACY_PATH_REPLACEMENT) {
         return None;
@@ -1600,6 +1625,20 @@ mod tests {
     }
 
     #[test]
+    fn approval_store_relative_lock_child_process() {
+        let Some(marker_path) = std::env::var_os("PW_ENV_TEST_APPROVAL_LOCK_RELATIVE_MARKER")
+        else {
+            return;
+        };
+
+        with_approval_store_lock(Path::new("approvals.json"), || {
+            fs::write(marker_path, "updated").unwrap();
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn approval_store_lock_blocks_a_second_process() {
         let test_dir = unique_test_dir("approval-lock-process");
         fs::create_dir_all(&test_dir).unwrap();
@@ -1645,6 +1684,31 @@ mod tests {
             "child update did not finish after unlock"
         );
 
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn approval_store_lock_handles_store_paths_without_parent_components() {
+        let test_dir = unique_test_dir("approval-lock-relative");
+        fs::create_dir_all(&test_dir).unwrap();
+        let marker = test_dir.join("update-ran");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .current_dir(&test_dir)
+            .args([
+                "--exact",
+                "config::tests::approval_store_relative_lock_child_process",
+            ])
+            .env("PW_ENV_TEST_APPROVAL_LOCK_RELATIVE_MARKER", &marker)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child output: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(marker).unwrap(), "updated");
+        assert!(test_dir.join("approvals.json.lock").exists());
         let _ = fs::remove_dir_all(&test_dir);
     }
 
@@ -2521,6 +2585,12 @@ backend = "op"
         assert!(path.is_absolute());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_filesystem_root_uses_the_system_drive_root() {
+        assert_eq!(filesystem_root(), PathBuf::from(r"C:\"));
+    }
+
     #[test]
     fn state_dir_path_returns_local_state_location() {
         let path = state_dir();
@@ -2568,6 +2638,117 @@ backend = "op"
         let normalized = normalize_path(&path);
         assert!(normalized.starts_with(PATH_IDENTITY_PREFIX));
         assert_eq!(path_from_identity(&normalized), path);
+    }
+
+    #[test]
+    fn path_identity_platform_validation_covers_all_platform_tags() {
+        assert!(path_identity_matches_platform(
+            "other-utf8-lossy",
+            "other-utf8-lossy",
+            &[0x41],
+            false,
+        ));
+        assert!(!path_identity_matches_platform(
+            "unix-bytes",
+            "other-utf8-lossy",
+            &[0x41],
+            false,
+        ));
+        assert!(path_identity_matches_platform(
+            "windows-utf16le",
+            "windows-utf16le",
+            &[0x41, 0x00],
+            true,
+        ));
+        assert!(!path_identity_matches_platform(
+            "windows-utf16le",
+            "windows-utf16le",
+            &[0x41],
+            true,
+        ));
+    }
+
+    #[test]
+    fn migrate_path_key_rejects_malformed_or_cross_platform_identities() {
+        let malformed = format!("{PATH_IDENTITY_PREFIX}{}:4z", path_identity_platform());
+        assert_eq!(migrate_path_key(&malformed), None);
+
+        let other_platform = if path_identity_platform() == "other-utf8-lossy" {
+            "unix-bytes"
+        } else {
+            "other-utf8-lossy"
+        };
+        let cross_platform = format!("{PATH_IDENTITY_PREFIX}{other_platform}:41");
+        assert_eq!(migrate_path_key(&cross_platform), None);
+
+        let fallback = format!("{PATH_IDENTITY_PREFIX}other-utf8-lossy:41");
+        let migrated = (path_identity_platform() == "other-utf8-lossy").then(|| fallback.clone());
+        assert_eq!(migrate_path_key(&fallback), migrated);
+    }
+
+    #[test]
+    fn test_secret_fetch_store_path_override_updates_and_clears_thread_local() {
+        let store_path = unique_test_dir("secret-fetch-store-override").join("approvals.json");
+        set_test_secret_fetch_store_path(Some(store_path.clone()));
+        assert_eq!(
+            TEST_SECRET_FETCH_STORE_PATH.with(|value| value.borrow().clone()),
+            Some(store_path)
+        );
+
+        set_test_secret_fetch_store_path(None);
+        assert_eq!(
+            TEST_SECRET_FETCH_STORE_PATH.with(|value| value.borrow().clone()),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_identity_round_trips_utf16_and_rejects_unknown_platforms() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            b'p' as u16,
+            b'w' as u16,
+            b'-' as u16,
+            0xd83e,
+            0xddea,
+        ]));
+        let identity = normalize_path(&path);
+        assert_eq!(path_from_identity(&identity), path);
+
+        let unknown = format!("{PATH_IDENTITY_PREFIX}other-utf16le:4100");
+        assert_eq!(
+            path_from_identity(&unknown),
+            PathBuf::from(unknown.as_str())
+        );
+        assert_eq!(migrate_path_key(&unknown), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_identity_requires_even_utf16_byte_count() {
+        let valid = format!("{PATH_IDENTITY_PREFIX}windows-utf16le:4100");
+        assert_eq!(migrate_path_key(&valid), Some(valid.clone()));
+        assert_eq!(path_from_identity(&valid), PathBuf::from("A"));
+
+        let odd = format!("{PATH_IDENTITY_PREFIX}windows-utf16le:410041");
+        assert_eq!(migrate_path_key(&odd), None);
+        assert_eq!(path_from_identity(&odd), PathBuf::from(odd.as_str()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_display_escapes_backslashes_printable_units_and_unpaired_surrogates() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_wide(&[0x005c, 0x0041, 0xd800]));
+        assert_eq!(escape_path_for_display(&path), r"\\A\u{d800}");
     }
 
     #[cfg(unix)]

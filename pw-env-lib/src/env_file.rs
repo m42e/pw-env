@@ -843,6 +843,29 @@ mod tests {
     }
 
     #[test]
+    fn append_with_key_value_preserves_exact_newline_boundaries() {
+        for (initial, expected) in [
+            ("", "NEW_KEY=new-value\n"),
+            ("KEEP=value", "KEEP=value\nNEW_KEY=new-value\n"),
+            ("KEEP=value\n", "KEEP=value\nNEW_KEY=new-value\n"),
+        ] {
+            let path = write_test_env(initial);
+            let snapshot = EnvFile::parse(&path).expect("parse should succeed");
+
+            snapshot
+                .append_with_key_value("NEW_KEY", "new-value")
+                .expect("append should succeed");
+
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("appended file should be readable"),
+                expected,
+                "initial contents={initial:?}"
+            );
+            std::fs::remove_file(path).expect("temp file should be removable");
+        }
+    }
+
+    #[test]
     fn rewrite_with_key_value_updates_only_matching_entry() {
         let path = write_test_env("KEEP_ME=original # note\nCHANGE_ME=old\n");
         let env_file = EnvFile::parse(&path).expect("parse should succeed");

@@ -34,33 +34,33 @@ impl GpgFileLocation {
     fn open_optional(&self) -> Result<Option<cap_std::fs::File>> {
         match self.parent.open(&self.file_name) {
             Ok(file) => Ok(Some(file)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match self.parent.symlink_metadata(&self.file_name) {
-                    Err(metadata_error)
-                        if metadata_error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        Ok(None)
+            Err(error) => match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    match self.parent.symlink_metadata(&self.file_name) {
+                        Err(metadata_error) => match metadata_error.kind() {
+                            std::io::ErrorKind::NotFound => Ok(None),
+                            _ => Err(metadata_error).with_context(|| {
+                                format!(
+                                    "Failed to inspect configured GPG file {}",
+                                    self.display_path.display()
+                                )
+                            }),
+                        },
+                        Ok(_) => Err(error).with_context(|| {
+                            format!(
+                                "Configured GPG file exists but cannot be opened safely: {}",
+                                self.display_path.display()
+                            )
+                        }),
                     }
-                    Ok(_) => Err(error).with_context(|| {
-                        format!(
-                            "Configured GPG file exists but cannot be opened safely: {}",
-                            self.display_path.display()
-                        )
-                    }),
-                    Err(metadata_error) => Err(metadata_error).with_context(|| {
-                        format!(
-                            "Failed to inspect configured GPG file {}",
-                            self.display_path.display()
-                        )
-                    }),
                 }
-            }
-            Err(error) => Err(error).with_context(|| {
-                format!(
-                    "Failed to open GPG encrypted file {}",
-                    self.display_path.display()
-                )
-            }),
+                _ => Err(error).with_context(|| {
+                    format!(
+                        "Failed to open GPG encrypted file {}",
+                        self.display_path.display()
+                    )
+                }),
+            },
         }
     }
 
@@ -69,7 +69,15 @@ impl GpgFileLocation {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        self.replace_atomically_with_nonce(contents, owner_uid, nonce)
+    }
 
+    fn replace_atomically_with_nonce(
+        &self,
+        contents: &[u8],
+        owner_uid: u32,
+        nonce: u128,
+    ) -> Result<()> {
         for attempt in 0..100u32 {
             let staging_name = PathBuf::from(format!(
                 ".pw-env-gpg-{}-{nonce}-{attempt}.tmpdir",
@@ -78,15 +86,17 @@ impl GpgFileLocation {
             let staging_dir =
                 match create_private_staging_dir(&self.parent, &staging_name, owner_uid) {
                     Ok(dir) => dir,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!(
-                                "Failed to create private GPG staging directory beside {}",
-                                self.display_path.display()
-                            )
-                        });
-                    }
+                    Err(error) => match error.kind() {
+                        std::io::ErrorKind::AlreadyExists => continue,
+                        _ => {
+                            return Err(error).with_context(|| {
+                                format!(
+                                    "Failed to create private GPG staging directory beside {}",
+                                    self.display_path.display()
+                                )
+                            });
+                        }
+                    },
                 };
 
             let result = (|| {
@@ -133,61 +143,84 @@ impl GpgFileLocation {
     }
 }
 
-#[cfg(unix)]
-fn create_private_staging_dir(parent: &Dir, name: &Path, owner_uid: u32) -> std::io::Result<Dir> {
-    use cap_std::fs::{DirBuilder, DirBuilderExt};
-    use cap_std::fs::{MetadataExt, PermissionsExt};
+#[cfg(windows)]
+fn windows_directory_create_options() -> u32 {
+    windows_sys::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE
+        | windows_sys::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT
+}
 
-    let mut builder = DirBuilder::new();
-    builder.mode(0o700);
-    parent.create_dir_with(name, &builder)?;
-    let directory = parent.open_dir(name)?;
-    let metadata = directory.metadata(".")?;
-    let mode = metadata.permissions().mode() & 0o777;
-    if metadata.uid() != owner_uid || mode & 0o077 != 0 || mode & 0o700 != 0o700 {
+#[cfg(windows)]
+fn windows_file_create_options() -> u32 {
+    windows_sys::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
+        | windows_sys::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT
+}
+
+#[cfg(windows)]
+fn windows_file_share_mode() -> u32 {
+    windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+        | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+}
+
+#[cfg(windows)]
+fn ntstatus_failed(status: i32) -> bool {
+    status < 0
+}
+
+fn create_private_staging_dir(parent: &Dir, name: &Path, owner_uid: u32) -> std::io::Result<Dir> {
+    #[cfg(unix)]
+    {
+        use cap_std::fs::{DirBuilder, DirBuilderExt};
+        use cap_std::fs::{MetadataExt, PermissionsExt};
+
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        parent.create_dir_with(name, &builder)?;
+        let directory = parent.open_dir(name)?;
+        let metadata = directory.metadata(".")?;
+        let mode = metadata.permissions().mode() & 0o777;
+        validate_unix_staging_directory(metadata.uid(), owner_uid, mode)?;
+        return Ok(directory);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
+
+        let _ = owner_uid;
+        let directory_file = create_windows_private_object(
+            parent,
+            name.as_os_str(),
+            windows_sys::core::w!("D:P(A;OICI;FA;;;OW)"),
+            windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY,
+            windows_directory_create_options(),
+        )?;
+        verify_private_windows_dacl(
+            directory_file.as_raw_handle(),
+            (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
+        )?;
+        return Ok(Dir::from_std_file(directory_file));
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (parent, name, owner_uid);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure GPG staging directories are unsupported on this platform",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn validate_unix_staging_directory(uid: u32, owner_uid: u32, mode: u32) -> std::io::Result<()> {
+    if uid != owner_uid || mode & 0o077 != 0 || mode & 0o700 != 0o700 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "GPG staging directory is not owned by the current user with owner-only access",
         ));
     }
-    Ok(directory)
-}
-
-#[cfg(windows)]
-fn create_private_staging_dir(parent: &Dir, name: &Path, _owner_uid: u32) -> std::io::Result<Dir> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
-
-    let directory_file = create_windows_private_object(
-        parent,
-        name.as_os_str(),
-        windows_sys::core::w!("D:P(A;OICI;FA;;;OW)"),
-        windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY,
-        windows_sys::Wdk::Storage::FileSystem::FILE_DIRECTORY_FILE
-            | windows_sys::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
-    )?;
-    verify_private_windows_dacl(
-        directory_file.as_raw_handle(),
-        (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
-    )?;
-    Ok(Dir::from_std_file(directory_file))
-}
-
-#[cfg(windows)]
-fn create_private_staging_file(staging_dir: &Dir) -> std::io::Result<cap_std::fs::File> {
-    use std::ffi::OsStr;
-    use std::os::windows::io::AsRawHandle;
-
-    let file = create_windows_private_object(
-        staging_dir,
-        OsStr::new("ciphertext"),
-        windows_sys::core::w!("D:P(A;;FA;;;OW)"),
-        windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
-        windows_sys::Wdk::Storage::FileSystem::FILE_NON_DIRECTORY_FILE
-            | windows_sys::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
-    )?;
-    verify_private_windows_dacl(file.as_raw_handle(), 0)?;
-    Ok(cap_std::fs::File::from_std(file))
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -209,21 +242,14 @@ fn create_windows_private_object(
     };
     use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_DESCRIPTOR};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ALL_ACCESS, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
     let mut name_wide: Vec<u16> = name.encode_wide().collect();
-    if name_wide.is_empty() || name_wide.len() > (u16::MAX as usize / 2) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "GPG staging entry name is too long",
-        ));
-    }
+    let name_length_bytes = windows_name_length_bytes(name_wide.len())?;
     let mut object_name = windows_sys::Win32::Foundation::UNICODE_STRING {
-        Length: (name_wide.len() * 2) as u16,
-        MaximumLength: (name_wide.len() * 2) as u16,
+        Length: name_length_bytes,
+        MaximumLength: name_length_bytes,
         Buffer: name_wide.as_mut_ptr(),
     };
 
@@ -258,7 +284,7 @@ fn create_windows_private_object(
             &mut io_status,
             null(),
             file_attributes,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            windows_file_share_mode(),
             FILE_CREATE,
             create_options,
             null(),
@@ -266,13 +292,24 @@ fn create_windows_private_object(
         )
     };
     unsafe { LocalFree(security_descriptor as _) };
-    if status < 0 {
+    if ntstatus_failed(status) {
         let code = unsafe { RtlNtStatusToDosError(status) };
         return Err(std::io::Error::from_raw_os_error(code as i32));
     }
 
     // Omitting FILE_SHARE_DELETE pins the just-created entry while it is used.
     Ok(unsafe { std::fs::File::from_raw_handle(raw_handle) })
+}
+
+#[cfg(windows)]
+fn windows_name_length_bytes(name_units: usize) -> std::io::Result<u16> {
+    if name_units == 0 || name_units > (u16::MAX as usize / 2) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "GPG staging entry name is empty or too long",
+        ));
+    }
+    Ok((name_units * 2) as u16)
 }
 
 #[cfg(windows)]
@@ -321,8 +358,10 @@ fn verify_private_windows_dacl(
         let mut revision = 0u32;
         if unsafe { GetSecurityDescriptorControl(security_descriptor, &mut control, &mut revision) }
             == 0
-            || control & SE_DACL_PROTECTED == 0
         {
+            return Err(std::io::Error::last_os_error());
+        }
+        if control & SE_DACL_PROTECTED == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "GPG staging object DACL is not protected from inheritance",
@@ -338,8 +377,10 @@ fn verify_private_windows_dacl(
                 AclSizeInformation,
             )
         } == 0
-            || acl_info.AceCount != 1
         {
+            return Err(std::io::Error::last_os_error());
+        }
+        if acl_info.AceCount != 1 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "GPG staging object DACL is not owner-only",
@@ -347,7 +388,10 @@ fn verify_private_windows_dacl(
         }
 
         let mut ace_pointer = null_mut();
-        if unsafe { GetAce(dacl, 0, &mut ace_pointer) } == 0 || ace_pointer.is_null() {
+        if unsafe { GetAce(dacl, 0, &mut ace_pointer) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if ace_pointer.is_null() {
             return Err(std::io::Error::last_os_error());
         }
         let header = unsafe { read_unaligned(ace_pointer as *const ACE_HEADER) };
@@ -394,33 +438,40 @@ fn verify_private_windows_dacl(
     result
 }
 
-#[cfg(unix)]
 fn create_private_staging_file(staging_dir: &Dir) -> std::io::Result<cap_std::fs::File> {
-    use cap_std::fs::{OpenOptions, OpenOptionsExt};
+    #[cfg(unix)]
+    {
+        use cap_std::fs::{OpenOptions, OpenOptionsExt};
 
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    staging_dir.open_with("ciphertext", &options)
-}
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        return staging_dir.open_with("ciphertext", &options);
+    }
 
-#[cfg(not(any(unix, windows)))]
-fn create_private_staging_file(_staging_dir: &Dir) -> std::io::Result<cap_std::fs::File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "secure GPG staging files are unsupported on this platform",
-    ))
-}
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::io::AsRawHandle;
 
-#[cfg(not(any(unix, windows)))]
-fn create_private_staging_dir(
-    _parent: &Dir,
-    _name: &Path,
-    _owner_uid: u32,
-) -> std::io::Result<Dir> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "secure GPG staging directories are unsupported on this platform",
-    ))
+        let file = create_windows_private_object(
+            staging_dir,
+            OsStr::new("ciphertext"),
+            windows_sys::core::w!("D:P(A;;FA;;;OW)"),
+            windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+            windows_file_create_options(),
+        )?;
+        verify_private_windows_dacl(file.as_raw_handle(), 0)?;
+        return Ok(cap_std::fs::File::from_std(file));
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = staging_dir;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure GPG staging files are unsupported on this platform",
+        ))
+    }
 }
 
 fn remove_private_staging_dir(staging_dir: Dir) -> std::io::Result<()> {
@@ -492,7 +543,7 @@ impl GpgBackend {
                 }
             }
         }
-        if path.as_os_str().is_empty() || path.file_name().is_none() {
+        if path.as_os_str().is_empty() {
             bail!("GPG file_pattern must name a file inside the project directory");
         }
         Ok(path)
@@ -544,21 +595,20 @@ impl GpgBackend {
                     display_path: project_root.join(resolved_relative),
                 })
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let configured_name = relative_path
-                    .file_name()
-                    .map(PathBuf::from)
-                    .context("GPG file_pattern must name a file inside the project directory")?;
-                match project_dir.symlink_metadata(&relative_path) {
-                    Err(metadata_error)
-                        if metadata_error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        let relative_parent = relative_path
-                            .parent()
-                            .filter(|parent| !parent.as_os_str().is_empty());
-                        let (parent, parent_relative) = match relative_parent {
-                            Some(parent) => {
-                                let canonical_parent = project_dir
+            Err(error) => match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    let configured_name = relative_path.file_name().map(PathBuf::from).context(
+                        "GPG file_pattern must name a file inside the project directory",
+                    )?;
+                    match project_dir.symlink_metadata(&relative_path) {
+                        Err(metadata_error) => match metadata_error.kind() {
+                            std::io::ErrorKind::NotFound => {
+                                let relative_parent = relative_path
+                                    .parent()
+                                    .filter(|parent| !parent.as_os_str().is_empty());
+                                let (parent, display_parent) = match relative_parent {
+                                    Some(parent) => {
+                                        let canonical_parent = project_dir
                                     .canonicalize(parent)
                                     .with_context(|| {
                                         format!(
@@ -566,12 +616,13 @@ impl GpgBackend {
                                             gpg_config.file_pattern
                                         )
                                     })?;
-                                let canonical_parent = if canonical_parent.as_os_str().is_empty() {
-                                    PathBuf::from(".")
-                                } else {
-                                    canonical_parent
-                                };
-                                let parent = project_dir
+                                        let canonical_parent =
+                                            if canonical_parent.as_os_str().is_empty() {
+                                                PathBuf::from(".")
+                                            } else {
+                                                canonical_parent
+                                            };
+                                        let parent = project_dir
                                     .open_dir(&canonical_parent)
                                     .with_context(|| {
                                         format!(
@@ -579,46 +630,44 @@ impl GpgBackend {
                                             gpg_config.file_pattern
                                         )
                                     })?;
-                                (parent, canonical_parent)
+                                        let display_parent = project_root.join(canonical_parent);
+                                        (parent, display_parent)
+                                    }
+                                    None => (
+                                        project_dir
+                                            .try_clone()
+                                            .context("Failed to clone project directory")?,
+                                        project_root.clone(),
+                                    ),
+                                };
+                                Ok(GpgFileLocation {
+                                    parent,
+                                    file_name: configured_name.clone(),
+                                    display_path: display_parent.join(configured_name),
+                                })
                             }
-                            None => (
-                                project_dir
-                                    .try_clone()
-                                    .context("Failed to clone project directory")?,
-                                PathBuf::from("."),
-                            ),
-                        };
-                        let display_parent = if parent_relative == Path::new(".") {
-                            project_root.clone()
-                        } else {
-                            project_root.join(parent_relative)
-                        };
-                        Ok(GpgFileLocation {
-                            parent,
-                            file_name: configured_name.clone(),
-                            display_path: display_parent.join(configured_name),
-                        })
+                            _ => Err(metadata_error).with_context(|| {
+                                format!(
+                                    "Failed to inspect configured GPG file {}",
+                                    relative_path.display()
+                                )
+                            }),
+                        },
+                        Ok(_) => Err(error).with_context(|| {
+                            format!(
+                                "Configured GPG file exists but cannot be resolved safely: {}",
+                                relative_path.display()
+                            )
+                        }),
                     }
-                    Ok(_) => Err(error).with_context(|| {
-                        format!(
-                            "Configured GPG file exists but cannot be resolved safely: {}",
-                            relative_path.display()
-                        )
-                    }),
-                    Err(metadata_error) => Err(metadata_error).with_context(|| {
-                        format!(
-                            "Failed to inspect configured GPG file {}",
-                            relative_path.display()
-                        )
-                    }),
                 }
-            }
-            Err(error) => Err(error).with_context(|| {
-                format!(
-                    "Failed to resolve configured GPG file {}",
-                    gpg_config.file_pattern
-                )
-            }),
+                _ => Err(error).with_context(|| {
+                    format!(
+                        "Failed to resolve configured GPG file {}",
+                        gpg_config.file_pattern
+                    )
+                }),
+            },
         }
     }
 
@@ -690,6 +739,10 @@ impl GpgBackend {
         }
         let stdout = String::from_utf8(output.stdout)
             .context("GPG recipient listing was not valid UTF-8")?;
+        Self::parse_primary_recipient_fingerprint(selector, &stdout)
+    }
+
+    fn parse_primary_recipient_fingerprint(selector: &str, stdout: &str) -> Result<String> {
         let mut primary_fingerprints: Vec<Option<String>> = Vec::new();
         let mut reading_primary_fingerprint = false;
         for line in stdout.lines() {
@@ -1136,6 +1189,22 @@ impl GpgBackend {
     }
 }
 
+#[cfg(test)]
+fn store_config(recipient: &str) -> crate::config::Config {
+    crate::config::Config {
+        defaults: crate::config::Defaults {
+            gpg: crate::config::GpgConfig {
+                recipient: Some(recipient.to_string()),
+                file_pattern: ".env.gpg".to_string(),
+            },
+            ..crate::config::Defaults::default()
+        },
+        log: crate::config::LogConfig::default(),
+        updates: crate::config::UpdateConfig::default(),
+        projects: vec![],
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1145,6 +1214,7 @@ mod tests {
     struct TestGpgInteraction {
         approved: bool,
         actions: RefCell<Vec<GpgStoreBindingAction>>,
+        progress_finished: std::rc::Rc<Cell<bool>>,
     }
 
     impl TestGpgInteraction {
@@ -1152,15 +1222,23 @@ mod tests {
             Self {
                 approved,
                 actions: RefCell::new(Vec::new()),
+                progress_finished: std::rc::Rc::new(Cell::new(false)),
             }
         }
     }
 
-    struct TestGpgProgress;
+    #[derive(Default)]
+    struct TestGpgProgress {
+        finished: Option<std::rc::Rc<Cell<bool>>>,
+    }
 
     impl super::super::ProgressReporter for TestGpgProgress {
         fn set_message(&mut self, _message: &str) {}
-        fn finish(&mut self, _message: &str) {}
+        fn finish(&mut self, _message: &str) {
+            if let Some(finished) = &self.finished {
+                finished.set(true);
+            }
+        }
     }
 
     impl super::super::ResolutionInteraction for TestGpgInteraction {
@@ -1183,8 +1261,24 @@ mod tests {
             &self,
             _initial_message: &str,
         ) -> Box<dyn super::super::ProgressReporter> {
-            Box::new(TestGpgProgress)
+            Box::new(TestGpgProgress {
+                finished: Some(self.progress_finished.clone()),
+            })
         }
+    }
+
+    #[test]
+    fn gpg_test_interaction_keeps_unused_bitwarden_prompt_rejected() {
+        let interaction = TestGpgInteraction::new(false);
+        assert!(interaction.prompt_bitwarden_password().is_err());
+    }
+
+    #[test]
+    fn gpg_test_interaction_reports_progress_completion() {
+        let interaction = TestGpgInteraction::new(false);
+        let mut progress = interaction.start_progress("starting");
+        progress.finish("finished");
+        assert!(interaction.progress_finished.get());
     }
 
     #[test]
@@ -1295,6 +1389,45 @@ mod tests {
     fn test_parse_env_content_empty() {
         let map = GpgBackend::parse_env_content("");
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn gpg_recipient_parser_returns_primary_fingerprint_only() {
+        let primary = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let subkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let output = format!(
+            "pub:u:2048:1:KEYID::::::scESC::::::\nfpr:::::::::{primary}:\nsub:u:2048:1:SUBKEY::::::e::::::\nfpr:::::::::{subkey}:\n"
+        );
+
+        assert_eq!(
+            GpgBackend::parse_primary_recipient_fingerprint("selector", &output).unwrap(),
+            primary
+        );
+    }
+
+    #[test]
+    fn gpg_recipient_parser_ignores_subkey_fingerprints_without_a_primary_fingerprint() {
+        let subkey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let output = format!(
+            "pub:u:2048:1:KEYID::::::scESC::::::\nsub:u:2048:1:SUBKEY::::::e::::::\nfpr:::::::::{subkey}:\n"
+        );
+
+        assert!(GpgBackend::parse_primary_recipient_fingerprint("selector", &output).is_err());
+    }
+
+    #[test]
+    fn gpg_recipient_parser_rejects_missing_and_invalid_fingerprints() {
+        let no_keys = "uid:u:::::::User Name::::::\n";
+        assert!(GpgBackend::parse_primary_recipient_fingerprint("selector", no_keys).is_err());
+
+        for fingerprint in [String::new(), "Z".repeat(40)] {
+            let output =
+                format!("pub:u:2048:1:KEYID::::::scESC::::::\nfpr:::::::::{fingerprint}:\n");
+            assert!(
+                GpgBackend::parse_primary_recipient_fingerprint("selector", &output).is_err(),
+                "invalid fingerprint should be rejected: {fingerprint:?}"
+            );
+        }
     }
 
     #[test]
@@ -1660,21 +1793,6 @@ PLAIN=value
         }
     }
 
-    fn store_config(recipient: &str) -> Config {
-        Config {
-            defaults: Defaults {
-                gpg: crate::config::GpgConfig {
-                    recipient: Some(recipient.to_string()),
-                    file_pattern: ".env.gpg".to_string(),
-                },
-                ..Defaults::default()
-            },
-            log: LogConfig::default(),
-            updates: UpdateConfig::default(),
-            projects: vec![],
-        }
-    }
-
     #[test]
     fn with_failing_mock_gpg_executes_callback() {
         let called = Cell::new(false);
@@ -1820,6 +1938,118 @@ PLAIN=value
         assert_eq!(metadata.uid(), owner_uid);
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
         stage.remove_open_dir().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_staging_directory_validation_rejects_each_unsafe_attribute() {
+        assert!(validate_unix_staging_directory(17, 17, 0o700).is_ok());
+        assert!(validate_unix_staging_directory(18, 17, 0o700).is_err());
+        assert!(validate_unix_staging_directory(17, 17, 0o600).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_private_staging_directory_removes_the_open_directory() {
+        use std::os::unix::fs::MetadataExt as StdMetadataExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        let owner_uid = std::fs::metadata(temp_dir.path()).unwrap().uid();
+        let stage = create_private_staging_dir(&parent, Path::new("stage"), owner_uid).unwrap();
+
+        remove_private_staging_dir(stage).unwrap();
+
+        assert!(!temp_dir.path().join("stage").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_open_preserves_non_not_found_errors() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("loop.gpg");
+        std::os::unix::fs::symlink("loop.gpg", &path).unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        let location = GpgFileLocation {
+            parent,
+            file_name: PathBuf::from("loop.gpg"),
+            display_path: path,
+        };
+
+        let error = location.open_optional().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to open GPG encrypted file")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replacement_retries_only_a_staging_name_collision() {
+        use std::os::unix::fs::MetadataExt as StdMetadataExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        let owner_uid = std::fs::metadata(temp_dir.path()).unwrap().uid();
+        let nonce = 41;
+        let collision_name = format!(".pw-env-gpg-{}-{nonce}-0.tmpdir", std::process::id());
+        std::fs::create_dir(temp_dir.path().join(&collision_name)).unwrap();
+        let location = GpgFileLocation {
+            parent,
+            file_name: PathBuf::from("secrets.gpg"),
+            display_path: temp_dir.path().join("secrets.gpg"),
+        };
+
+        location
+            .replace_atomically_with_nonce(b"new ciphertext", owner_uid, nonce)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(temp_dir.path().join("secrets.gpg")).unwrap(),
+            b"new ciphertext"
+        );
+        assert!(temp_dir.path().join(collision_name).is_dir());
+        let remaining_staging_dirs = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pw-env-gpg-")
+            })
+            .count();
+        assert_eq!(remaining_staging_dirs, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replacement_fails_immediately_for_non_collision_staging_errors() {
+        use std::os::unix::fs::{MetadataExt as StdMetadataExt, PermissionsExt};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        let owner_uid = std::fs::metadata(temp_dir.path()).unwrap().uid();
+        let location = GpgFileLocation {
+            parent,
+            file_name: PathBuf::from("secrets.gpg"),
+            display_path: temp_dir.path().join("secrets.gpg"),
+        };
+        let original_permissions = std::fs::metadata(temp_dir.path()).unwrap().permissions();
+        let mut restricted_permissions = original_permissions.clone();
+        restricted_permissions.set_mode(0o500);
+        std::fs::set_permissions(temp_dir.path(), restricted_permissions).unwrap();
+
+        let result = location.replace_atomically_with_nonce(b"new ciphertext", owner_uid, 42);
+
+        std::fs::set_permissions(temp_dir.path(), original_permissions).unwrap();
+        let error = result.expect_err("permission errors must not be treated as collisions");
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to create private GPG staging directory")
+        );
     }
 
     #[test]
@@ -2091,6 +2321,43 @@ PLAIN=value
     }
 
     #[test]
+    fn binding_rejects_each_project_identity_mismatch_independently() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let valid = binding_for(
+            temp_dir.path(),
+            &["0123456789ABCDEF0123456789ABCDEF01234567"],
+        );
+        let mut path_mismatch = valid.clone();
+        path_mismatch.project_path.push_str("/different");
+        let mut id_mismatch = valid.clone();
+        let replacement = if id_mismatch.project_id.starts_with('0') {
+            '1'
+        } else {
+            '0'
+        };
+        id_mismatch
+            .project_id
+            .replace_range(0..1, &replacement.to_string());
+
+        with_mock_gpg_recipient("", "0123456789ABCDEF0123456789ABCDEF01234567", || {
+            for (label, binding) in [("project path", path_mismatch), ("project ID", id_mismatch)] {
+                let content = GpgBackend::serialize_bound_store(&BTreeMap::new(), &binding);
+                let error = GpgBackend::bind_store_for_write(
+                    Some(&content),
+                    temp_dir.path(),
+                    "test@example.com",
+                    None,
+                )
+                .expect_err("a partial identity mismatch must be rejected");
+                assert!(
+                    error.to_string().contains("bound to a different project"),
+                    "unexpected {label} mismatch error: {error}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn changed_recipient_requires_approved_rotation_and_records_new_fingerprint() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let old_fingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -2167,6 +2434,46 @@ PLAIN=value
             assert!(error.to_string().contains("invalid binding metadata"));
         });
         assert_eq!(std::fs::read(gpg_file).unwrap(), original);
+    }
+
+    #[test]
+    fn binding_parser_rejects_each_invalid_field_independently() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let valid = binding_for(
+            temp_dir.path(),
+            &["0123456789ABCDEF0123456789ABCDEF01234567"],
+        );
+
+        let mut bad_version = valid.clone();
+        bad_version.version += 1;
+        let mut short_project_id = valid.clone();
+        short_project_id.project_id.pop();
+        let mut non_hex_project_id = valid.clone();
+        non_hex_project_id.project_id.replace_range(0..1, "G");
+        let mut empty_project_path = valid.clone();
+        empty_project_path.project_path.clear();
+        let mut empty_recipients = valid.clone();
+        empty_recipients.recipients.clear();
+        let mut short_recipient = valid.clone();
+        short_recipient.recipients[0] = "A".to_string();
+        let mut non_hex_recipient = valid;
+        non_hex_recipient.recipients[0] = "Z".repeat(40);
+
+        for (label, binding) in [
+            ("version", bad_version),
+            ("project ID length", short_project_id),
+            ("project ID encoding", non_hex_project_id),
+            ("project path", empty_project_path),
+            ("recipient list", empty_recipients),
+            ("recipient length", short_recipient),
+            ("recipient encoding", non_hex_recipient),
+        ] {
+            let content = GpgBackend::serialize_bound_store(&BTreeMap::new(), &binding);
+            assert!(
+                GpgBackend::parse_store_binding(&content).is_err(),
+                "invalid {label} should be rejected"
+            );
+        }
     }
 
     #[test]
@@ -2372,5 +2679,234 @@ API_KEY=secret\n";
 
         // GpgBackend uses the default trait impl which returns None.
         assert_eq!(GpgBackend.reference_url("ANY_KEY", &ctx), None);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_mutation_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::io::Write;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR};
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+
+    // FILE_NON_DIRECTORY_FILE (0x40) | FILE_SYNCHRONOUS_IO_NONALERT (0x20).
+    const TEST_FILE_CREATE_OPTIONS: u32 = 0x60;
+    // DACL_SECURITY_INFORMATION (0x4) | PROTECTED_DACL_SECURITY_INFORMATION (0x80000000).
+    const PROTECTED_DACL_INFO: u32 = 0x8000_0004;
+    // DACL_SECURITY_INFORMATION (0x4) | UNPROTECTED_DACL_SECURITY_INFORMATION (0x20000000).
+    const UNPROTECTED_DACL_INFO: u32 = 0x2000_0004;
+
+    fn create_dacl_test_file(
+        parent: &Dir,
+        name: &str,
+        sddl: windows_sys::core::PCWSTR,
+    ) -> std::io::Result<std::fs::File> {
+        create_windows_private_object(
+            parent,
+            OsStr::new(name),
+            sddl,
+            FILE_ATTRIBUTE_NORMAL,
+            TEST_FILE_CREATE_OPTIONS,
+        )
+    }
+
+    fn set_dacl_from_sddl(
+        file: &impl AsRawHandle,
+        sddl: windows_sys::core::PCWSTR,
+        security_information: u32,
+    ) -> std::io::Result<()> {
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl,
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let mut dacl = std::ptr::null_mut();
+        let mut dacl_present = 0;
+        let mut dacl_defaulted = 0;
+        if unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor,
+                &mut dacl_present,
+                &mut dacl,
+                &mut dacl_defaulted,
+            )
+        } == 0
+        {
+            unsafe { LocalFree(descriptor as _) };
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                security_information,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        unsafe { LocalFree(descriptor as _) };
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status as i32));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn windows_mutation_staging_objects_are_private_shareable_and_removed() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        assert_eq!(windows_directory_create_options(), 0x21);
+        assert_eq!(windows_file_create_options(), TEST_FILE_CREATE_OPTIONS);
+        assert_eq!(windows_file_share_mode(), 0x03);
+        let stage = create_private_staging_dir(&parent, Path::new("stage"), 0).unwrap();
+        // OBJECT_INHERIT_ACE (1) | CONTAINER_INHERIT_ACE (2).
+        let directory_flags = 3u8;
+        assert_eq!(directory_flags, 0x03);
+        verify_private_windows_dacl(stage.as_raw_handle(), directory_flags).unwrap();
+
+        let mut file = create_private_staging_file(&stage).unwrap();
+        verify_private_windows_dacl(file.as_raw_handle(), 0).unwrap();
+        file.write_all(b"staged ciphertext").unwrap();
+        file.sync_all().unwrap();
+        let second_reader = stage.open("ciphertext").unwrap();
+        assert_eq!(second_reader.metadata().unwrap().len(), 17);
+        drop(second_reader);
+        drop(file);
+
+        remove_private_staging_dir(stage).unwrap();
+        assert!(parent.open_dir("stage").is_err());
+    }
+
+    #[test]
+    fn windows_mutation_dacl_verifier_rejects_unprotected_and_non_owner_acls() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        let cases = [
+            (
+                "unprotected",
+                windows_sys::core::w!("D:(A;;FA;;;OW)"),
+                UNPROTECTED_DACL_INFO,
+            ),
+            (
+                "multiple-aces",
+                windows_sys::core::w!("D:P(A;;FA;;;OW)(A;;FR;;;SY)"),
+                PROTECTED_DACL_INFO,
+            ),
+            (
+                "deny-ace",
+                windows_sys::core::w!("D:P(D;;FA;;;OW)"),
+                PROTECTED_DACL_INFO,
+            ),
+            (
+                "unexpected-flags",
+                windows_sys::core::w!("D:P(A;OI;FA;;;OW)"),
+                PROTECTED_DACL_INFO,
+            ),
+            (
+                "unexpected-rights",
+                windows_sys::core::w!("D:P(A;;FR;;;OW)"),
+                PROTECTED_DACL_INFO,
+            ),
+            (
+                "unexpected-owner",
+                windows_sys::core::w!("D:P(A;;FA;;;SY)"),
+                PROTECTED_DACL_INFO,
+            ),
+            (
+                "null-dacl",
+                windows_sys::core::w!("D:NO_ACCESS_CONTROL"),
+                PROTECTED_DACL_INFO,
+            ),
+        ];
+
+        for (name, sddl, security_information) in cases {
+            let stage_name = format!("stage-{name}");
+            let stage = create_private_staging_dir(&parent, Path::new(&stage_name), 0).unwrap();
+            let file = create_private_staging_file(&stage).unwrap();
+            set_dacl_from_sddl(&file, sddl, security_information).unwrap();
+            assert!(
+                verify_private_windows_dacl(file.as_raw_handle(), 0).is_err(),
+                "DACL case {name} should be rejected"
+            );
+            drop(file);
+            remove_private_staging_dir(stage).unwrap();
+        }
+    }
+
+    #[test]
+    fn windows_mutation_dacl_verifier_propagates_native_handle_errors() {
+        let error = verify_private_windows_dacl(std::ptr::null_mut(), 0).unwrap_err();
+        assert!(error.raw_os_error().is_some());
+    }
+
+    #[test]
+    fn windows_mutation_ntstatus_check_distinguishes_success_from_failure() {
+        assert!(ntstatus_failed(-1));
+        assert!(!ntstatus_failed(0));
+        assert!(!ntstatus_failed(0x4000_0000));
+    }
+
+    #[test]
+    fn windows_mutation_native_creation_rejects_a_name_collision() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        let sddl = windows_sys::core::w!("D:P(A;;FA;;;OW)");
+        let file = create_dacl_test_file(&parent, "duplicate", sddl).unwrap();
+        drop(file);
+
+        let error = create_dacl_test_file(&parent, "duplicate", sddl)
+            .expect_err("FILE_CREATE must reject an existing entry");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn windows_mutation_name_length_validation_covers_utf16_boundaries() {
+        let max_units = u16::MAX as usize / 2;
+        assert_eq!(windows_name_length_bytes(1).unwrap(), 2);
+        assert_eq!(windows_name_length_bytes(max_units).unwrap(), u16::MAX - 1);
+        assert_eq!(
+            windows_name_length_bytes(0).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            windows_name_length_bytes(max_units + 1).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let parent = Dir::open_ambient_dir(temp_dir.path(), cap_std::ambient_authority()).unwrap();
+        let valid_sddl = windows_sys::core::w!("D:P(A;;FA;;;OW)");
+        let empty_name = create_dacl_test_file(&parent, "", valid_sddl).unwrap_err();
+        assert_eq!(empty_name.kind(), std::io::ErrorKind::InvalidInput);
+        let too_long = "x".repeat(max_units + 1);
+        let too_long_name = create_dacl_test_file(&parent, &too_long, valid_sddl).unwrap_err();
+        assert_eq!(too_long_name.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn windows_mutation_store_config_sets_gpg_recipient_and_file_pattern() {
+        let config = store_config("test@example.com");
+
+        assert_eq!(
+            config.defaults.gpg.recipient.as_deref(),
+            Some("test@example.com")
+        );
+        assert_eq!(config.defaults.gpg.file_pattern, ".env.gpg");
     }
 }

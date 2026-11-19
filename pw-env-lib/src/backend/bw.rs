@@ -1080,7 +1080,7 @@ impl BwBackend {
 
         let (selected, expected_name) = if id_matches.len() == 1 {
             (id_matches[0].clone(), None)
-        } else if id_matches.len() > 1 {
+        } else if !id_matches.is_empty() {
             bail!("Bitwarden item ID '{selector}' is ambiguous in the requested scope");
         } else {
             let exact_titles: Vec<serde_json::Value> = items
@@ -2461,6 +2461,151 @@ exit 1
                     .lines()
                     .any(|line| line == "list items --collectionid coll-1")
             );
+        });
+    }
+
+    #[test]
+    fn ensure_item_in_scope_requires_matching_organization_and_collection() {
+        let scope = BwScope {
+            organization_id: Some("org-1".to_string()),
+            collection_id: Some("coll-1".to_string()),
+            ..BwScope::default()
+        };
+
+        for item in [
+            serde_json::json!({"organizationId":"org-2","collectionIds":["coll-1"]}),
+            serde_json::json!({"collectionIds":["coll-1"]}),
+        ] {
+            let error = BwBackend::ensure_item_in_scope(&item, "shared", &scope)
+                .expect_err("item with a missing or different organization must be rejected");
+            assert!(error.to_string().contains("requested organization"));
+        }
+
+        for item in [
+            serde_json::json!({"organizationId":"org-1","collectionIds":["coll-2"]}),
+            serde_json::json!({"organizationId":"org-1"}),
+        ] {
+            let error = BwBackend::ensure_item_in_scope(&item, "shared", &scope)
+                .expect_err("item outside or missing the requested collection must be rejected");
+            assert!(error.to_string().contains("requested collection"));
+        }
+
+        let scoped_item = serde_json::json!({
+            "organizationId":"org-1",
+            "collectionIds":["coll-1"]
+        });
+        BwBackend::ensure_item_in_scope(&scoped_item, "shared", &scope)
+            .expect("matching owner and collection should be accepted");
+    }
+
+    #[test]
+    fn get_shared_item_rejects_ambiguous_ids_and_changed_identities() {
+        let duplicate_ids = serde_json::json!([
+            {"id":"duplicate-id","name":"first"},
+            {"id":"duplicate-id","name":"second"}
+        ]);
+        let duplicate_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
+            duplicate_ids
+        );
+        with_mock_bw(&duplicate_script, || {
+            let error = BwBackend::get_shared_item_with(
+                "duplicate-id",
+                None,
+                &BwScope::default(),
+                None,
+                None,
+            )
+            .expect_err("duplicate IDs must be reported as ambiguous");
+            assert!(
+                error
+                    .to_string()
+                    .contains("ambiguous in the requested scope")
+            );
+        });
+
+        let selected_items = serde_json::json!([
+            {"id":"verified-id","name":"shared-item"}
+        ]);
+        let changed_item = serde_json::json!({"id":"changed-id","name":"shared-item"});
+        let changed_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
+            selected_items, changed_item
+        );
+        with_mock_bw(&changed_script, || {
+            let error = BwBackend::get_shared_item_with(
+                "verified-id",
+                None,
+                &BwScope::default(),
+                None,
+                None,
+            )
+            .expect_err("a changed item ID must be rejected even when its title matches");
+            assert!(error.to_string().contains("different item ID"));
+        });
+
+        let renamed_item = serde_json::json!({"id":"verified-id","name":"renamed-item"});
+        let renamed_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
+            selected_items, renamed_item
+        );
+        with_mock_bw(&renamed_script, || {
+            let error = BwBackend::get_shared_item_with(
+                "shared-item",
+                None,
+                &BwScope::default(),
+                None,
+                None,
+            )
+            .expect_err("an item renamed during a title-based lookup must be rejected");
+            assert!(error.to_string().contains("title changed during lookup"));
+        });
+
+        let single_item_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
+            selected_items,
+            serde_json::json!({"id":"verified-id","name":"shared-item"})
+        );
+        with_mock_bw(&single_item_script, || {
+            let item = BwBackend::get_shared_item_with(
+                "verified-id",
+                None,
+                &BwScope::default(),
+                None,
+                None,
+            )
+            .expect("a single verified ID match should be selected");
+            assert_eq!(
+                item.get("id").and_then(|id| id.as_str()),
+                Some("verified-id")
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_reference_item_rejects_an_id_change_even_when_title_matches() {
+        let listed_item = serde_json::json!([
+            {"id":"listed-id","name":"shared-item","fields":[]}
+        ]);
+        let returned_item = serde_json::json!({
+            "id":"returned-id",
+            "name":"shared-item",
+            "fields":[]
+        });
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then echo '{}'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{}'; exit 0; fi\necho unexpected >&2\nexit 1\n",
+            listed_item, returned_item
+        );
+        with_mock_bw(&script, || {
+            let error = BwBackend::resolve_reference_item_with(
+                "shared-item",
+                None,
+                &BwScope::default(),
+                None,
+                None,
+            )
+            .expect_err("the fetched item ID must match the verified list result");
+            assert!(error.to_string().contains("identity changed during lookup"));
         });
     }
 
