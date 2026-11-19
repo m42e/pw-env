@@ -180,6 +180,19 @@ pub(crate) fn wait_with_output_timeout(child: Child, context: &str) -> Result<Ou
     )
 }
 
+/// Wait for a child whose stdout is redirected to a file or another sink, while
+/// draining bounded stderr and enforcing the same command timeout.
+pub(crate) fn wait_with_stderr_timeout(child: Child, context: &str) -> Result<Output> {
+    wait_with_output_timeout_inner(
+        child,
+        context,
+        EXTERNAL_COMMAND_TIMEOUT,
+        0,
+        EXTERNAL_COMMAND_STDERR_LIMIT,
+        false,
+    )
+}
+
 enum PipeReadError {
     LimitExceeded,
     Io(io::Error),
@@ -209,21 +222,41 @@ fn read_pipe_limited(
 }
 
 fn wait_with_output_timeout_limited(
-    mut child: Child,
+    child: Child,
     context: &str,
     timeout: Duration,
     stdout_limit: usize,
     stderr_limit: usize,
 ) -> Result<Output> {
+    wait_with_output_timeout_inner(child, context, timeout, stdout_limit, stderr_limit, true)
+}
+
+fn wait_with_output_timeout_inner(
+    mut child: Child,
+    context: &str,
+    timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+    capture_stdout: bool,
+) -> Result<Output> {
     let (sender, receiver) = mpsc::channel();
-    let stdout_pipe = child.stdout.take().context("Child stdout was not piped")?;
+    let stdout_pipe = if capture_stdout {
+        Some(child.stdout.take().context("Child stdout was not piped")?)
+    } else {
+        if child.stdout.is_some() {
+            anyhow::bail!("Child stdout must be redirected when it is not captured");
+        }
+        None
+    };
     let stderr_pipe = child.stderr.take().context("Child stderr was not piped")?;
-    let stdout_sender = sender.clone();
-    let stdout_reader = thread::spawn(move || {
-        let _ = stdout_sender.send(PipeOutput::Stdout(read_pipe_limited(
-            stdout_pipe,
-            stdout_limit,
-        )));
+    let mut stdout_reader = stdout_pipe.map(|stdout_pipe| {
+        let stdout_sender = sender.clone();
+        thread::spawn(move || {
+            let _ = stdout_sender.send(PipeOutput::Stdout(read_pipe_limited(
+                stdout_pipe,
+                stdout_limit,
+            )));
+        })
     });
     let stderr_reader = thread::spawn(move || {
         let _ = sender.send(PipeOutput::Stderr(read_pipe_limited(
@@ -234,7 +267,7 @@ fn wait_with_output_timeout_limited(
 
     let started_at = Instant::now();
     let mut status = None;
-    let mut stdout = None;
+    let mut stdout = (!capture_stdout).then(Vec::new);
     let mut stderr = None;
     loop {
         if status.is_none() {
@@ -243,7 +276,7 @@ fn wait_with_output_timeout_limited(
                 Ok(None) => {}
                 Err(error) => {
                     terminate_child(&mut child);
-                    let _ = stdout_reader.join();
+                    join_pipe_reader(&mut stdout_reader);
                     let _ = stderr_reader.join();
                     return Err(error).with_context(|| context.to_string());
                 }
@@ -256,20 +289,20 @@ fn wait_with_output_timeout_limited(
                 PipeOutput::Stderr(Ok(bytes)) => stderr = Some(bytes),
                 PipeOutput::Stdout(Err(PipeReadError::LimitExceeded)) => {
                     terminate_child(&mut child);
-                    let _ = stdout_reader.join();
+                    join_pipe_reader(&mut stdout_reader);
                     let _ = stderr_reader.join();
                     anyhow::bail!("{context} exceeded stdout output limit of {stdout_limit} bytes");
                 }
                 PipeOutput::Stderr(Err(PipeReadError::LimitExceeded)) => {
                     terminate_child(&mut child);
-                    let _ = stdout_reader.join();
+                    join_pipe_reader(&mut stdout_reader);
                     let _ = stderr_reader.join();
                     anyhow::bail!("{context} exceeded stderr output limit of {stderr_limit} bytes");
                 }
                 PipeOutput::Stdout(Err(PipeReadError::Io(error)))
                 | PipeOutput::Stderr(Err(PipeReadError::Io(error))) => {
                     terminate_child(&mut child);
-                    let _ = stdout_reader.join();
+                    join_pipe_reader(&mut stdout_reader);
                     let _ = stderr_reader.join();
                     return Err(error).with_context(|| context.to_string());
                 }
@@ -280,7 +313,7 @@ fn wait_with_output_timeout_limited(
             let status = status.take().expect("status was checked");
             let stdout = stdout.take().expect("stdout was checked");
             let stderr = stderr.take().expect("stderr was checked");
-            let _ = stdout_reader.join();
+            join_pipe_reader(&mut stdout_reader);
             let _ = stderr_reader.join();
             return Ok(Output {
                 status,
@@ -291,12 +324,18 @@ fn wait_with_output_timeout_limited(
 
         if started_at.elapsed() >= timeout {
             terminate_child(&mut child);
-            let _ = stdout_reader.join();
+            join_pipe_reader(&mut stdout_reader);
             let _ = stderr_reader.join();
             anyhow::bail!("{context} timed out after {} seconds", timeout.as_secs());
         }
 
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn join_pipe_reader(reader: &mut Option<thread::JoinHandle<()>>) {
+    if let Some(reader) = reader.take() {
+        let _ = reader.join();
     }
 }
 
@@ -427,6 +466,31 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"completed stdout");
         assert_eq!(output.stderr, b"late stderr");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_stderr_timeout_supports_stdout_redirected_to_file() {
+        let stdout_file = tempfile::NamedTempFile::new().unwrap();
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'redirected output'; printf 'captured diagnostics' >&2",
+            ])
+            .stdout(stdout_file.reopen().unwrap())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = wait_with_stderr_timeout(child, "redirected output test").unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"captured diagnostics");
+        assert_eq!(
+            std::fs::read(stdout_file.path()).unwrap(),
+            b"redirected output"
+        );
     }
 
     #[test]

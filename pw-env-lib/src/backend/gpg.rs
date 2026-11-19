@@ -774,7 +774,7 @@ impl GpgBackend {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(content.as_bytes())?;
             }
-            super::wait_with_output_timeout(child, "Failed to wait for `gpg` encryption")
+            super::wait_with_stderr_timeout(child, "Failed to wait for `gpg` encryption")
         })()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
