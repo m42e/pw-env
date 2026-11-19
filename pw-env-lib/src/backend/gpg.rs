@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use cap_std::fs::Dir;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -8,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 use super::{
-    Backend, CREATED_WITH_FIELD_NAME, MIGRATED_FROM_FIELD_NAME, PROJECT_FIELD_NAME, ResolveContext,
-    StoreContext,
+    Backend, CREATED_WITH_FIELD_NAME, GpgStoreBindingAction, MIGRATED_FROM_FIELD_NAME,
+    PROJECT_FIELD_NAME, ResolutionInteraction, ResolveContext, StoreContext,
 };
 
 pub struct GpgBackend;
@@ -451,6 +452,18 @@ fn remove_private_staging_dir(staging_dir: Dir) -> std::io::Result<()> {
     staging_dir.remove_open_dir()
 }
 
+const GPG_STORE_BINDING_FIELD: &str = "gpg-store-binding";
+const GPG_STORE_BINDING_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GpgStoreBinding {
+    version: u32,
+    project_id: String,
+    project_path: String,
+    recipients: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct StoredSecret {
     value: String,
@@ -618,6 +631,240 @@ impl GpgBackend {
 
     fn metadata_comment(name: &str, value: &str) -> String {
         format!("# pw-env: {name}={value}")
+    }
+
+    fn project_identity(ctx_dir: &Path) -> Result<(PathBuf, String)> {
+        let project_path = std::fs::canonicalize(ctx_dir).with_context(|| {
+            format!(
+                "Failed to resolve GPG project directory {}",
+                ctx_dir.display()
+            )
+        })?;
+        let mut hasher = Sha256::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            hasher.update(b"unix\0");
+            hasher.update(project_path.as_os_str().as_bytes());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            hasher.update(b"windows\0");
+            for unit in project_path.as_os_str().encode_wide() {
+                hasher.update(unit.to_le_bytes());
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            hasher.update(b"other\0");
+            hasher.update(project_path.to_string_lossy().as_bytes());
+        }
+        let project_id = Sha256::finalize(hasher)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok((project_path, project_id))
+    }
+
+    fn resolve_recipient_fingerprint(selector: &str) -> Result<String> {
+        if selector.trim().is_empty() {
+            bail!("GPG recipient selector cannot be empty");
+        }
+        let mut command = Command::new("gpg");
+        command.args([
+            "--batch",
+            "--with-colons",
+            "--fingerprint",
+            "--list-keys",
+            "--",
+        ]);
+        command.arg(selector);
+        let output = super::run_command_with_timeout(
+            command,
+            "Failed to execute `gpg` while resolving the configured recipient",
+        )?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to resolve GPG recipient {selector:?}: {stderr}");
+        }
+        let stdout = String::from_utf8(output.stdout)
+            .context("GPG recipient listing was not valid UTF-8")?;
+        let mut primary_fingerprints: Vec<Option<String>> = Vec::new();
+        let mut reading_primary_fingerprint = false;
+        for line in stdout.lines() {
+            let mut fields = line.split(':');
+            match fields.next() {
+                Some("pub") => {
+                    primary_fingerprints.push(None);
+                    reading_primary_fingerprint = true;
+                }
+                Some("sub") | Some("sec") | Some("ssb") => {
+                    reading_primary_fingerprint = false;
+                }
+                Some("fpr") if reading_primary_fingerprint => {
+                    let fingerprint = line
+                        .split(':')
+                        .nth(9)
+                        .filter(|value| {
+                            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        .context("GPG returned an invalid public-key fingerprint")?
+                        .to_ascii_uppercase();
+                    if let Some(primary) = primary_fingerprints.last_mut() {
+                        *primary = Some(fingerprint);
+                    }
+                    reading_primary_fingerprint = false;
+                }
+                _ => {}
+            }
+        }
+        let primary_fingerprints = primary_fingerprints
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        match primary_fingerprints.as_slice() {
+            [fingerprint] => Ok(fingerprint.clone()),
+            [] => bail!("GPG recipient selector {selector:?} did not resolve to a public key"),
+            _ => bail!(
+                "GPG recipient selector {selector:?} resolves to multiple public keys; use a fingerprint"
+            ),
+        }
+    }
+
+    fn parse_store_binding(content: &str) -> Result<Option<GpgStoreBinding>> {
+        let mut binding = None;
+        for line in content.lines().map(str::trim) {
+            let Some(value) = line
+                .strip_prefix("# pw-env: ")
+                .and_then(|metadata| metadata.strip_prefix(&format!("{GPG_STORE_BINDING_FIELD}=")))
+            else {
+                continue;
+            };
+            if binding.is_some() {
+                bail!("GPG store contains duplicate binding metadata");
+            }
+            let mut parsed: GpgStoreBinding = serde_json::from_str(value)
+                .context("GPG store contains invalid binding metadata")?;
+            if parsed.version != GPG_STORE_BINDING_VERSION
+                || parsed.project_id.len() != 64
+                || !parsed
+                    .project_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || parsed.project_path.is_empty()
+                || parsed.recipients.is_empty()
+                || parsed.recipients.iter().any(|fingerprint| {
+                    !matches!(fingerprint.len(), 40 | 64)
+                        || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            {
+                bail!("GPG store contains unsupported or invalid binding metadata");
+            }
+            for fingerprint in &mut parsed.recipients {
+                *fingerprint = fingerprint.to_ascii_uppercase();
+            }
+            binding = Some(parsed);
+        }
+        Ok(binding)
+    }
+
+    fn serialize_bound_store(
+        secrets: &BTreeMap<String, StoredSecret>,
+        binding: &GpgStoreBinding,
+    ) -> String {
+        let binding_json = serde_json::to_string(binding)
+            .expect("serializing GPG store binding metadata cannot fail");
+        format!(
+            "{}\n{}",
+            Self::metadata_comment(GPG_STORE_BINDING_FIELD, &binding_json),
+            Self::serialize_stored_secrets(secrets)
+        )
+    }
+
+    fn confirm_store_binding(
+        interaction: Option<&dyn ResolutionInteraction>,
+        action: GpgStoreBindingAction,
+        project_path: &Path,
+        previous_recipients: &[String],
+        new_recipients: &[String],
+    ) -> Result<()> {
+        let approved = match interaction {
+            Some(interaction) => interaction.confirm_gpg_store_binding(
+                action,
+                project_path,
+                previous_recipients,
+                new_recipients,
+            )?,
+            None => false,
+        };
+        if approved {
+            return Ok(());
+        }
+        let operation = match action {
+            GpgStoreBindingAction::EnrollNewStore => "new GPG store enrollment",
+            GpgStoreBindingAction::EnrollLegacyStore => "legacy GPG store enrollment",
+            GpgStoreBindingAction::RotateRecipients => "GPG recipient rotation",
+        };
+        bail!(
+            "{operation} requires explicit interactive confirmation; rerun `pw-env add` or `pw-env migrate` in an interactive terminal and approve the binding prompt"
+        )
+    }
+
+    fn bind_store_for_write(
+        existing_content: Option<&str>,
+        ctx_dir: &Path,
+        recipient_selector: &str,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<GpgStoreBinding> {
+        let (project_path, project_id) = Self::project_identity(ctx_dir)?;
+        let project_path_display = project_path.to_string_lossy().into_owned();
+        let mut resolved_recipients =
+            vec![Self::resolve_recipient_fingerprint(recipient_selector)?];
+        resolved_recipients.sort();
+
+        let action = match existing_content {
+            None => Some(GpgStoreBindingAction::EnrollNewStore),
+            Some(content) => match Self::parse_store_binding(content)? {
+                None => Some(GpgStoreBindingAction::EnrollLegacyStore),
+                Some(binding) => {
+                    if binding.project_id != project_id
+                        || binding.project_path != project_path_display
+                    {
+                        bail!(
+                            "GPG store is bound to a different project; cross-project stores cannot be rewritten"
+                        );
+                    }
+                    if binding.recipients != resolved_recipients {
+                        Self::confirm_store_binding(
+                            interaction,
+                            GpgStoreBindingAction::RotateRecipients,
+                            &project_path,
+                            &binding.recipients,
+                            &resolved_recipients,
+                        )?;
+                    }
+                    None
+                }
+            },
+        };
+
+        if let Some(action) = action {
+            Self::confirm_store_binding(
+                interaction,
+                action,
+                &project_path,
+                &[],
+                &resolved_recipients,
+            )?;
+        }
+
+        Ok(GpgStoreBinding {
+            version: GPG_STORE_BINDING_VERSION,
+            project_id,
+            project_path: project_path_display,
+            recipients: resolved_recipients,
+        })
     }
 
     /// Decrypt an already-opened GPG file so path changes cannot redirect GPG's input.
@@ -812,6 +1059,16 @@ impl Backend for GpgBackend {
     }
 
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()> {
+        self.store_with_interaction(key, value, ctx, None)
+    }
+
+    fn store_with_interaction(
+        &self,
+        key: &str,
+        value: &str,
+        ctx: &StoreContext,
+        interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<()> {
         let gpg_config = ctx.config.effective_gpg(ctx.dir);
         let recipient = gpg_config
             .recipient
@@ -820,17 +1077,28 @@ impl Backend for GpgBackend {
 
         let location = Self::gpg_file_location(ctx.dir, ctx.config)?;
 
-        // Load the existing store from one already-open, project-confined handle.
-        let mut existing = if let Some(file) = location
+        // Load and bind the existing store from one already-open, project-confined handle.
+        let existing_content = if let Some(file) = location
             .open_optional()
             .context("Failed to check the existing GPG secret store")?
         {
-            let content = Self::decrypt_file(file, &location.display_path)
-                .context("Refusing to overwrite an unreadable GPG secret store")?;
-            Self::parse_stored_secrets(&content)
+            Some(
+                Self::decrypt_file(file, &location.display_path)
+                    .context("Refusing to overwrite an unreadable GPG secret store")?,
+            )
         } else {
-            BTreeMap::new()
+            None
         };
+        let binding = Self::bind_store_for_write(
+            existing_content.as_deref(),
+            ctx.dir,
+            recipient,
+            interaction,
+        )?;
+        let mut existing = existing_content
+            .as_deref()
+            .map(Self::parse_stored_secrets)
+            .unwrap_or_default();
 
         existing.insert(
             key.to_string(),
@@ -842,9 +1110,12 @@ impl Backend for GpgBackend {
             },
         );
 
-        let content = Self::serialize_stored_secrets(&existing);
-
-        Self::encrypt_to_file(&content, &location, recipient)?;
+        let content = Self::serialize_bound_store(&existing, &binding);
+        let recipient_fingerprint = binding
+            .recipients
+            .first()
+            .context("GPG store binding has no recipient fingerprint")?;
+        Self::encrypt_to_file(&content, &location, recipient_fingerprint)?;
         Ok(())
     }
 
@@ -869,7 +1140,52 @@ impl GpgBackend {
 mod tests {
     use super::*;
     use crate::config::{Config, Defaults, LogConfig, UpdateConfig};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+
+    struct TestGpgInteraction {
+        approved: bool,
+        actions: RefCell<Vec<GpgStoreBindingAction>>,
+    }
+
+    impl TestGpgInteraction {
+        fn new(approved: bool) -> Self {
+            Self {
+                approved,
+                actions: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    struct TestGpgProgress;
+
+    impl super::super::ProgressReporter for TestGpgProgress {
+        fn set_message(&mut self, _message: &str) {}
+        fn finish(&mut self, _message: &str) {}
+    }
+
+    impl super::super::ResolutionInteraction for TestGpgInteraction {
+        fn confirm_gpg_store_binding(
+            &self,
+            action: GpgStoreBindingAction,
+            _project_path: &Path,
+            _previous_recipients: &[String],
+            _new_recipients: &[String],
+        ) -> Result<bool> {
+            self.actions.borrow_mut().push(action);
+            Ok(self.approved)
+        }
+
+        fn prompt_bitwarden_password(&self) -> Result<String> {
+            bail!("not used by GPG tests")
+        }
+
+        fn start_progress(
+            &self,
+            _initial_message: &str,
+        ) -> Box<dyn super::super::ProgressReporter> {
+            Box::new(TestGpgProgress)
+        }
+    }
 
     #[test]
     fn test_parse_stored_secrets_with_line_without_equals() {
@@ -1268,14 +1584,24 @@ PLAIN=value
     // ------- Mock-gpg infrastructure -------
 
     fn with_mock_gpg<F: FnOnce()>(decrypt_output: &str, f: F) {
+        with_mock_gpg_recipient(
+            decrypt_output,
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            f,
+        );
+    }
+
+    fn with_mock_gpg_recipient<F: FnOnce()>(decrypt_output: &str, fingerprint: &str, f: F) {
         let _guard = super::super::MOCK_PATH_MUTEX
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let script_path = dir.path().join("gpg");
-        // Script echoes the preset decrypt output when --decrypt is given; exits 0 for anything else
+        // Return one primary fingerprint, echo decryption content, and capture
+        // the encryption input for the private publication tests.
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\n[ \"$#\" -eq 3 ] || exit 92\nprintf '%s' '{}'\nelse\nfor arg do\n  [ \"$arg\" != \"--output\" ] || exit 91\ndone\ncat\nfi\nexit 0\n",
+            "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"--list-keys\" ]; then\n    printf 'pub:u:2048:1:KEYID::::::scESC::::::\\nfpr:::::::::%s:\\n' '{}'\n    exit 0\n  fi\ndone\nif [ \"$1\" = \"--decrypt\" ]; then\n[ \"$#\" -eq 3 ] || exit 92\nprintf '%s' '{}'\nelse\nfor arg do\n  [ \"$arg\" != \"--output\" ] || exit 91\ndone\ncat\nfi\nexit 0\n",
+            fingerprint,
             decrypt_output.replace('\'', "'\\''")
         );
         std::fs::write(&script_path, &script).unwrap();
@@ -1319,6 +1645,34 @@ PLAIN=value
         unsafe { std::env::set_var("PATH", &new_path) };
         f();
         unsafe { std::env::set_var("PATH", &old_path) };
+    }
+
+    fn binding_for(path: &Path, recipients: &[&str]) -> GpgStoreBinding {
+        let (project_path, project_id) = GpgBackend::project_identity(path).unwrap();
+        GpgStoreBinding {
+            version: GPG_STORE_BINDING_VERSION,
+            project_id,
+            project_path: project_path.to_string_lossy().into_owned(),
+            recipients: recipients
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+        }
+    }
+
+    fn store_config(recipient: &str) -> Config {
+        Config {
+            defaults: Defaults {
+                gpg: crate::config::GpgConfig {
+                    recipient: Some(recipient.to_string()),
+                    file_pattern: ".env.gpg".to_string(),
+                },
+                ..Defaults::default()
+            },
+            log: LogConfig::default(),
+            updates: UpdateConfig::default(),
+            projects: vec![],
+        }
     }
 
     #[test]
@@ -1534,8 +1888,15 @@ PLAIN=value
                 repository: None,
             };
             // A new file under a verified nested directory can be initialized.
-            GpgBackend.store("NEW_KEY", "new-value", &ctx).unwrap();
+            let interaction = TestGpgInteraction::new(true);
+            GpgBackend
+                .store_with_interaction("NEW_KEY", "new-value", &ctx, Some(&interaction))
+                .unwrap();
             assert!(gpg_file.exists());
+            assert_eq!(
+                interaction.actions.borrow().as_slice(),
+                &[GpgStoreBindingAction::EnrollNewStore]
+            );
         });
     }
 
@@ -1565,12 +1926,247 @@ PLAIN=value
                 repository: None,
             };
             // File exists → load_all_stored_secrets is called (decrypt), then encrypt
-            let result = GpgBackend.store("NEW_KEY", "new-value", &ctx);
+            let interaction = TestGpgInteraction::new(true);
+            let result =
+                GpgBackend.store_with_interaction("NEW_KEY", "new-value", &ctx, Some(&interaction));
             assert!(result.is_ok(), "store failed: {:?}", result);
             let encrypted = std::fs::read_to_string(&gpg_file).unwrap();
+            assert!(encrypted.contains("# pw-env: gpg-store-binding="));
             assert!(encrypted.contains("EXISTING_KEY=\"existing-value\""));
             assert!(encrypted.contains("NEW_KEY=\"new-value\""));
+            assert_eq!(
+                interaction.actions.borrow().as_slice(),
+                &[GpgStoreBindingAction::EnrollLegacyStore]
+            );
         });
+    }
+
+    #[test]
+    fn store_requires_explicit_approval_for_new_and_legacy_stores() {
+        with_mock_gpg_recipient(
+            "LEGACY_KEY=legacy-value\n",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            || {
+                let temp_dir = tempfile::TempDir::new().unwrap();
+                let config = store_config("test@example.com");
+                let ctx = super::super::StoreContext {
+                    dir: temp_dir.path(),
+                    config: &config,
+                    project: None,
+                    repository: None,
+                };
+
+                let new_error = GpgBackend
+                    .store("NEW_KEY", "new-value", &ctx)
+                    .expect_err("a new store must require an explicit enrollment prompt");
+                assert!(
+                    new_error
+                        .to_string()
+                        .contains("explicit interactive confirmation")
+                );
+                assert!(!temp_dir.path().join(".env.gpg").exists());
+
+                let gpg_file = temp_dir.path().join(".env.gpg");
+                let original = b"legacy ciphertext";
+                std::fs::write(&gpg_file, original).unwrap();
+                let legacy_error = GpgBackend
+                    .store("NEW_KEY", "new-value", &ctx)
+                    .expect_err("an unbound legacy store must require re-enrollment");
+                assert!(
+                    legacy_error
+                        .to_string()
+                        .contains("explicit interactive confirmation")
+                );
+                assert_eq!(std::fs::read(&gpg_file).unwrap(), original);
+            },
+        );
+    }
+
+    #[test]
+    fn legacy_enrollment_prompts_once_then_matching_binding_is_silent() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let legacy_content = "EXISTING_KEY=existing-value\n";
+        let interaction = TestGpgInteraction::new(true);
+
+        with_mock_gpg_recipient(
+            legacy_content,
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            || {
+                let binding = GpgBackend::bind_store_for_write(
+                    Some(legacy_content),
+                    temp_dir.path(),
+                    "test@example.com",
+                    Some(&interaction),
+                )
+                .unwrap();
+                assert_eq!(
+                    interaction.actions.borrow().as_slice(),
+                    &[GpgStoreBindingAction::EnrollLegacyStore]
+                );
+
+                let enrolled_content =
+                    GpgBackend::serialize_bound_store(&BTreeMap::new(), &binding);
+                let second_write_binding = GpgBackend::bind_store_for_write(
+                    Some(&enrolled_content),
+                    temp_dir.path(),
+                    "test@example.com",
+                    None,
+                )
+                .expect("matching enrolled store should not need another prompt");
+                assert_eq!(second_write_binding, binding);
+                assert_eq!(interaction.actions.borrow().len(), 1);
+            },
+        );
+    }
+
+    #[test]
+    fn matching_store_binding_updates_without_another_prompt() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let binding = binding_for(
+            temp_dir.path(),
+            &["0123456789ABCDEF0123456789ABCDEF01234567"],
+        );
+        let mut secrets = BTreeMap::new();
+        secrets.insert(
+            "EXISTING_KEY".to_string(),
+            StoredSecret {
+                value: "existing-value".to_string(),
+                ..StoredSecret::default()
+            },
+        );
+        let content = GpgBackend::serialize_bound_store(&secrets, &binding);
+        let gpg_file = temp_dir.path().join(".env.gpg");
+        std::fs::write(&gpg_file, "ciphertext").unwrap();
+        let config = store_config("test@example.com");
+        let ctx = super::super::StoreContext {
+            dir: temp_dir.path(),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_gpg_recipient(&content, "0123456789ABCDEF0123456789ABCDEF01234567", || {
+            GpgBackend
+                .store("NEW_KEY", "new-value", &ctx)
+                .expect("matching binding should permit normal updates");
+        });
+
+        let updated = std::fs::read_to_string(gpg_file).unwrap();
+        let updated_binding = GpgBackend::parse_store_binding(&updated).unwrap().unwrap();
+        assert_eq!(updated_binding, binding);
+        assert!(updated.contains("EXISTING_KEY=\"existing-value\""));
+        assert!(updated.contains("NEW_KEY=\"new-value\""));
+    }
+
+    #[test]
+    fn store_rejects_a_binding_from_another_project_before_replacement() {
+        let foreign_dir = tempfile::TempDir::new().unwrap();
+        let foreign_binding = binding_for(
+            foreign_dir.path(),
+            &["0123456789ABCDEF0123456789ABCDEF01234567"],
+        );
+        let content = GpgBackend::serialize_bound_store(&BTreeMap::new(), &foreign_binding);
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let gpg_file = project_dir.path().join(".env.gpg");
+        let original = b"foreign store ciphertext";
+        std::fs::write(&gpg_file, original).unwrap();
+        let config = store_config("test@example.com");
+        let ctx = super::super::StoreContext {
+            dir: project_dir.path(),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+        let interaction = TestGpgInteraction::new(true);
+
+        with_mock_gpg_recipient(&content, "0123456789ABCDEF0123456789ABCDEF01234567", || {
+            let error = GpgBackend
+                .store_with_interaction("NEW_KEY", "new-value", &ctx, Some(&interaction))
+                .expect_err("cross-project store must be rejected");
+            assert!(error.to_string().contains("bound to a different project"));
+        });
+
+        assert!(interaction.actions.borrow().is_empty());
+        assert_eq!(std::fs::read(gpg_file).unwrap(), original);
+    }
+
+    #[test]
+    fn changed_recipient_requires_approved_rotation_and_records_new_fingerprint() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let old_fingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let new_fingerprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let old_binding = binding_for(temp_dir.path(), &[old_fingerprint]);
+        let mut secrets = BTreeMap::new();
+        secrets.insert(
+            "EXISTING_KEY".to_string(),
+            StoredSecret {
+                value: "existing-value".to_string(),
+                ..StoredSecret::default()
+            },
+        );
+        let content = GpgBackend::serialize_bound_store(&secrets, &old_binding);
+        let gpg_file = temp_dir.path().join(".env.gpg");
+        std::fs::write(&gpg_file, "original ciphertext").unwrap();
+        let original = std::fs::read(&gpg_file).unwrap();
+        let config = store_config("new@example.com");
+        let ctx = super::super::StoreContext {
+            dir: temp_dir.path(),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_gpg_recipient(&content, new_fingerprint, || {
+            let error = GpgBackend
+                .store("NEW_KEY", "new-value", &ctx)
+                .expect_err("recipient changes require an explicit rotation prompt");
+            assert!(
+                error
+                    .to_string()
+                    .contains("explicit interactive confirmation")
+            );
+        });
+        assert_eq!(std::fs::read(&gpg_file).unwrap(), original);
+
+        let interaction = TestGpgInteraction::new(true);
+        with_mock_gpg_recipient(&content, new_fingerprint, || {
+            GpgBackend
+                .store_with_interaction("NEW_KEY", "new-value", &ctx, Some(&interaction))
+                .expect("approved rotation should re-encrypt the entire store");
+        });
+        assert_eq!(
+            interaction.actions.borrow().as_slice(),
+            &[GpgStoreBindingAction::RotateRecipients]
+        );
+        let updated = std::fs::read_to_string(gpg_file).unwrap();
+        let updated_binding = GpgBackend::parse_store_binding(&updated).unwrap().unwrap();
+        assert_eq!(updated_binding.recipients, vec![new_fingerprint]);
+        assert!(updated.contains("EXISTING_KEY=\"existing-value\""));
+        assert!(updated.contains("NEW_KEY=\"new-value\""));
+    }
+
+    #[test]
+    fn malformed_binding_is_rejected_before_replacement() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let content = "# pw-env: gpg-store-binding={bad json}\nKEY=secret\n";
+        let gpg_file = temp_dir.path().join(".env.gpg");
+        let original = b"original ciphertext";
+        std::fs::write(&gpg_file, original).unwrap();
+        let config = store_config("test@example.com");
+        let ctx = super::super::StoreContext {
+            dir: temp_dir.path(),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_gpg_recipient(content, "0123456789ABCDEF0123456789ABCDEF01234567", || {
+            let error = GpgBackend
+                .store("NEW_KEY", "new-value", &ctx)
+                .expect_err("malformed binding metadata must fail closed");
+            assert!(error.to_string().contains("invalid binding metadata"));
+        });
+        assert_eq!(std::fs::read(gpg_file).unwrap(), original);
     }
 
     #[test]
@@ -1579,7 +2175,7 @@ PLAIN=value
         let gpg_file = temp_dir.path().join(".env.gpg");
         let original = b"existing ciphertext";
         std::fs::write(&gpg_file, original).unwrap();
-        let script = "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\nprintf 'EXISTING_KEY=existing-value\\n'\nexit 0\nfi\nfor arg do\n  [ \"$arg\" != \"--output\" ] || exit 91\ndone\ncat >/dev/null\nprintf 'partial ciphertext'\nexit 1\n";
+        let script = "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"--list-keys\" ]; then\n    printf 'pub:u:2048:1:KEYID::::::scESC::::::\\nfpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\\n'\n    exit 0\n  fi\ndone\nif [ \"$1\" = \"--decrypt\" ]; then\nprintf 'EXISTING_KEY=existing-value\\n'\nexit 0\nfi\nfor arg do\n  [ \"$arg\" != \"--output\" ] || exit 91\ndone\ncat >/dev/null\nprintf 'partial ciphertext'\nexit 1\n";
 
         with_failing_mock_gpg(script, || {
             let config = Config {
@@ -1600,8 +2196,9 @@ PLAIN=value
                 project: None,
                 repository: None,
             };
+            let interaction = TestGpgInteraction::new(true);
             let error = GpgBackend
-                .store("NEW_KEY", "new-value", &ctx)
+                .store_with_interaction("NEW_KEY", "new-value", &ctx, Some(&interaction))
                 .expect_err("failed encryption must not publish partial output");
             assert!(error.to_string().contains("gpg encrypt failed"));
         });
@@ -1617,7 +2214,7 @@ PLAIN=value
         std::fs::write(&gpg_file, original).unwrap();
         let encryption_marker = temp_dir.path().join("encryption-invoked");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\n  echo 'decrypt failed' >&2\n  exit 1\nfi\ntouch '{}'\nexit 0\n",
+            "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"--list-keys\" ]; then\n    printf 'pub:u:2048:1:KEYID::::::scESC::::::\\nfpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\\n'\n    exit 0\n  fi\ndone\nif [ \"$1\" = \"--decrypt\" ]; then\n  echo 'decrypt failed' >&2\n  exit 1\nfi\ntouch '{}'\nexit 0\n",
             encryption_marker.display()
         );
 

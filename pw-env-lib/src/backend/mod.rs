@@ -66,6 +66,14 @@ pub struct OpItemChoice {
     pub project: Option<String>,
 }
 
+/// Why a GPG store needs the user's approval to establish its binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpgStoreBindingAction {
+    EnrollNewStore,
+    EnrollLegacyStore,
+    RotateRecipients,
+}
+
 /// UI operations that may be needed while resolving or storing secrets.
 ///
 /// The library never reads from a terminal or writes progress output itself.
@@ -92,6 +100,18 @@ pub trait ResolutionInteraction {
         _project: Option<&str>,
     ) -> Result<Option<usize>> {
         Ok(None)
+    }
+
+    /// Confirm binding a GPG store to a project and recipient fingerprint policy.
+    /// The default refuses; applications must explicitly provide an interactive approval.
+    fn confirm_gpg_store_binding(
+        &self,
+        _action: GpgStoreBindingAction,
+        _project_path: &Path,
+        _previous_recipients: &[String],
+        _new_recipients: &[String],
+    ) -> Result<bool> {
+        Ok(false)
     }
 
     /// Ask the caller for a Bitwarden master password.
@@ -130,6 +150,17 @@ pub trait Backend {
     /// Store a key-value pair in the password manager.
     fn store(&self, key: &str, value: &str, ctx: &StoreContext) -> Result<()>;
 
+    /// Store a key-value pair with optional UI operations for explicit backend approval.
+    fn store_with_interaction(
+        &self,
+        key: &str,
+        value: &str,
+        ctx: &StoreContext,
+        _interaction: Option<&dyn ResolutionInteraction>,
+    ) -> Result<()> {
+        self.store(key, value, ctx)
+    }
+
     /// Store or explicitly reuse a secret during migration, returning the value to verify.
     fn store_for_migration(
         &self,
@@ -138,7 +169,7 @@ pub trait Backend {
         ctx: &StoreContext,
         _interaction: Option<&dyn ResolutionInteraction>,
     ) -> Result<String> {
-        self.store(key, value, ctx)?;
+        self.store_with_interaction(key, value, ctx, _interaction)?;
         Ok(value.to_owned())
     }
 

@@ -59,7 +59,7 @@ pub fn add_entry_with_interaction(
 
     info!(key, backend = backend.name(), "Adding managed secret");
     backend
-        .store(key, &value, &store_ctx)
+        .store_with_interaction(key, &value, &store_ctx, interaction)
         .with_context(|| format!("Failed to store '{key}' in {}", backend.name()))?;
 
     if !backend.has(key, &resolve_ctx).with_context(|| {
@@ -279,10 +279,44 @@ fn apply_env_entry_update(update: EnvEntryUpdate, key: &str, url: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{GpgStoreBindingAction, ProgressReporter};
     use crate::config::Config;
     #[cfg(unix)]
     use crate::config::{Defaults, GpgConfig, LogConfig, OpConfig, UpdateConfig};
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    struct ApproveGpgStoreEnrollment;
+
+    #[cfg(unix)]
+    struct TestProgress;
+
+    #[cfg(unix)]
+    impl ProgressReporter for TestProgress {
+        fn set_message(&mut self, _message: &str) {}
+        fn finish(&mut self, _message: &str) {}
+    }
+
+    #[cfg(unix)]
+    impl crate::backend::ResolutionInteraction for ApproveGpgStoreEnrollment {
+        fn confirm_gpg_store_binding(
+            &self,
+            _action: GpgStoreBindingAction,
+            _project_path: &std::path::Path,
+            _previous_recipients: &[String],
+            _new_recipients: &[String],
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        fn prompt_bitwarden_password(&self) -> anyhow::Result<String> {
+            anyhow::bail!("not used by add tests")
+        }
+
+        fn start_progress(&self, _initial_message: &str) -> Box<dyn ProgressReporter> {
+            Box::new(TestProgress)
+        }
+    }
 
     #[test]
     fn bitwarden_unlock_is_selected_only_for_bitwarden_backend() {
@@ -583,7 +617,8 @@ mod tests {
         let gpg_path = bin_dir.path().join("gpg");
         let gpg_output_path = temp_dir.path().join("captured-gpg-output.txt");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--decrypt\" ]; then\n  cat '{}'\n  exit 0\nfi\nout=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--output\" ]; then\n    out=\"$arg\"\n    break\n  fi\n  prev=\"$arg\"\ndone\ncat > \"$out\"\ncp \"$out\" '{}'\nexit 0\n",
+            "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"--list-keys\" ]; then\n    printf 'pub:u:2048:1:KEYID::::::scESC::::::\\nfpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\\n'\n    exit 0\n  fi\ndone\nif [ \"$1\" = \"--decrypt\" ]; then\n  cat '{}'\n  exit 0\nfi\ncat > '{}'\ncat '{}'\nexit 0\n",
+            gpg_output_path.display(),
             gpg_output_path.display(),
             gpg_output_path.display()
         );
@@ -617,12 +652,14 @@ mod tests {
             projects: vec![],
         };
 
-        let result = add_entry(
+        let interaction = ApproveGpgStoreEnrollment;
+        let result = add_entry_with_interaction(
             temp_dir.path(),
             &config,
             "API_KEY",
             Some("super-secret".to_string()),
             None,
+            Some(&interaction),
         );
 
         unsafe { std::env::set_var("PATH", &old_path) };

@@ -149,6 +149,51 @@ impl backend::ResolutionInteraction for CliResolutionInteraction {
         Ok(confirmed.then_some(index))
     }
 
+    fn confirm_gpg_store_binding(
+        &self,
+        action: backend::GpgStoreBindingAction,
+        project_path: &Path,
+        previous_recipients: &[String],
+        new_recipients: &[String],
+    ) -> Result<bool> {
+        if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+            return Ok(false);
+        }
+        let _progress_suspension = progress::suspend_progress_output();
+        let project = format!("Project path: {project_path:?}");
+        let recipients = |label: &str, values: &[String]| {
+            format!(
+                "{label}:
+{}",
+                values
+                    .iter()
+                    .map(|value| format!("  {value}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
+        let prompt = match action {
+            backend::GpgStoreBindingAction::EnrollNewStore => format!(
+                "Enroll this new unbound GPG store? Future writes will bind it to this project and recipient policy.\n{project}\n{}",
+                recipients("Recipient fingerprint(s) being bound", new_recipients)
+            ),
+            backend::GpgStoreBindingAction::EnrollLegacyStore => format!(
+                "Enroll this legacy GPG store? This associates all of its decrypted entries with this project and recipient policy.\n{project}\n{}",
+                recipients("Recipient fingerprint(s) being bound", new_recipients)
+            ),
+            backend::GpgStoreBindingAction::RotateRecipients => format!(
+                "Rotate the recipients for this GPG store? All entries will be re-encrypted under the new recipient policy.\n{project}\n{}\n{}",
+                recipients("Current recipient fingerprint(s)", previous_recipients),
+                recipients("New recipient fingerprint(s) being bound", new_recipients)
+            ),
+        };
+        dialoguer::Confirm::new()
+            .with_prompt(prompt)
+            .default(false)
+            .interact()
+            .context("Failed to confirm GPG store binding")
+    }
+
     fn prompt_bitwarden_password(&self) -> Result<String> {
         if let Some(password) = &self.password_override {
             return Ok(password.clone());
