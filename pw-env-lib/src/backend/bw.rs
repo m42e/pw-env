@@ -1495,6 +1495,12 @@ impl Backend for BwBackend {
             let mut item: serde_json::Value =
                 serde_json::from_str(&item_json).context("Failed to parse Bitwarden item JSON")?;
             Self::ensure_item_in_scope(&item, item_name, &scope)?;
+            let item_id = item
+                .get("id")
+                .and_then(|id| id.as_str())
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Selected Bitwarden item has no ID"))?
+                .to_string();
             Self::upsert_custom_field(&mut item, key, value, 1);
             for field in &metadata_fields {
                 if let (Some(name), Some(field_value), Some(field_type)) = (
@@ -1509,7 +1515,7 @@ impl Backend for BwBackend {
             }
             let encoded = serde_json::to_string(&item)?;
             let mut cmd = Self::bw_command()?;
-            cmd.args(["edit", "item", item_name]);
+            cmd.args(["edit", "item", &item_id]);
             cmd.stdin(std::process::Stdio::piped());
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::piped());
@@ -1522,7 +1528,7 @@ impl Backend for BwBackend {
             }
             let output = child.wait_with_output()?;
             Self::log_action_timing(
-                &format!("bw edit item {item_name}"),
+                &format!("bw edit item {item_id}"),
                 started_at,
                 output.status.success(),
             );
@@ -3509,6 +3515,79 @@ exit 1
             assert!(result.is_ok());
         });
     }
+
+    #[test]
+    fn backend_store_rejects_shared_item_outside_configured_folder_before_edit() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then echo '[{{\"name\":\"team\",\"id\":\"folder-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-2\",\"fields\":[]}}'; exit 0; fi\nexit 1\n",
+            call_log.display()
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    folder: Some("team".to_string()),
+                    item: Some("shared".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_bw(&script, || {
+            let error = BwBackend
+                .store("API_KEY", "secret", &ctx)
+                .expect_err("an item outside the configured folder must not be edited");
+            assert!(error.to_string().contains("not in the requested folder"));
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(!calls.lines().any(|line| line.starts_with("edit item")));
+        });
+    }
+
+    #[test]
+    fn backend_store_edits_verified_shared_item_by_immutable_id() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let call_log = state_dir.path().join("bw-calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"folders\" ]; then echo '[{{\"name\":\"team\",\"id\":\"folder-1\"}}]'; exit 0; fi\nif [ \"$1\" = \"get\" ] && [ \"$2\" = \"item\" ]; then echo '{{\"id\":\"item-1\",\"name\":\"shared\",\"folderId\":\"folder-1\",\"fields\":[]}}'; exit 0; fi\nif [ \"$1\" = \"edit\" ] && [ \"$2\" = \"item\" ]; then cat >/dev/null; exit 0; fi\nexit 1\n",
+            call_log.display()
+        );
+        let config = Config {
+            defaults: Defaults {
+                backend: "bw".to_string(),
+                bw: BwConfig {
+                    folder: Some("team".to_string()),
+                    item: Some("shared".to_string()),
+                    ..BwConfig::default()
+                },
+                ..Defaults::default()
+            },
+            ..Config::default()
+        };
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: None,
+        };
+
+        with_mock_bw(&script, || {
+            BwBackend.store("API_KEY", "secret", &ctx).unwrap();
+            let calls = std::fs::read_to_string(call_log).unwrap();
+            assert!(calls.lines().any(|line| line == "edit item item-1"));
+            assert!(!calls.lines().any(|line| line == "edit item shared"));
+        });
+    }
+
     #[test]
     fn test_extract_field_from_value_password_prefers_login_over_username() {
         // When both login.password and login.username are present, asking for
