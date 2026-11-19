@@ -10,7 +10,7 @@ use crate::cache::{SecretCacheKey, SecretValueCache};
 use crate::config::Config;
 use crate::env_file::{EntryKind, EnvEntry, EnvFile};
 
-const BITWARDEN_CACHE_KEY_VERSION: &str = "bw-cache-v2";
+const BITWARDEN_CACHE_KEY_VERSION: &str = "bw-cache-v3-account-identity";
 
 /// Walk up from `dir` to find a `.git` directory, returning the containing folder.
 pub(crate) fn find_git_root(dir: &Path) -> Option<PathBuf> {
@@ -374,6 +374,14 @@ fn cache_backend_config(config: &Config, dir: &Path, backend: &str) -> String {
     }
 }
 
+fn bitwarden_cache_enabled(config: &Config, dir: &Path) -> bool {
+    config
+        .effective_bw(dir)
+        .cache_identity
+        .as_deref()
+        .is_some_and(|identity| !identity.trim().is_empty())
+}
+
 fn build_secret_cache_key(
     env_path: &Path,
     entry: &EnvEntry,
@@ -561,16 +569,19 @@ fn resolve_env_file_with_options(
         let bw_started_at = Instant::now();
         let mut uncached_bw_entries: Vec<&EnvEntry> = Vec::new();
         let mut bw_cache_keys: BTreeMap<String, SecretCacheKey> = BTreeMap::new();
+        let bw_cache_enabled = bitwarden_cache_enabled(config, dir);
 
         for entry in &bw_entries {
-            let cache_key = build_secret_cache_key(env_file.path(), entry, "bw", &ctx);
-            if let Some(value) = secret_cache.get(&cache_key) {
-                debug!("Resolved {} via cached Bitwarden value", entry.key);
-                resolved.insert(entry.key.clone(), value);
-                continue;
+            if bw_cache_enabled {
+                let cache_key = build_secret_cache_key(env_file.path(), entry, "bw", &ctx);
+                if let Some(value) = secret_cache.get(&cache_key) {
+                    debug!("Resolved {} via cached Bitwarden value", entry.key);
+                    resolved.insert(entry.key.clone(), value);
+                    continue;
+                }
+                bw_cache_keys.insert(entry.key.clone(), cache_key);
             }
 
-            bw_cache_keys.insert(entry.key.clone(), cache_key);
             uncached_bw_entries.push(entry);
         }
 
@@ -1386,7 +1397,7 @@ branch "broken"]
         let unknown = cache_backend_config(&config, dir, "unknown");
 
         assert!(op.contains("op-item"));
-        assert!(bw.starts_with("bw-cache-v2:"));
+        assert!(bw.starts_with("bw-cache-v3-account-identity:"));
         assert!(bw.contains("bw-item"));
         assert!(gpg.contains(".env.secrets.gpg"));
         assert_eq!(unknown, "{}");
@@ -1444,6 +1455,63 @@ branch "broken"]
         };
         let gpg_key = build_secret_cache_key(Path::new("/tmp/.env"), &entry, "gpg", &gpg_ctx);
         assert_eq!(gpg_key.effective_item, None);
+    }
+
+    #[test]
+    fn bitwarden_cache_key_is_account_scoped_and_rejects_pre_identity_namespace() {
+        let entry = EnvEntry {
+            key: "API_KEY".to_string(),
+            raw_value: String::new(),
+            trailing_comment: None,
+            no_migrate: false,
+            kind: EntryKind::Empty,
+        };
+        let dir = Path::new("/tmp");
+        let config_for_identity = |identity: &str| Config {
+            defaults: crate::config::Defaults {
+                bw: crate::config::BwConfig {
+                    cache_identity: Some(identity.to_string()),
+                    ..crate::config::BwConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+        let first_config = config_for_identity("vault.example:work");
+        let second_config = config_for_identity("vault.example:personal");
+        let first_ctx = ResolveContext {
+            dir,
+            config: &first_config,
+            project: Some("project".to_string()),
+            repository: None,
+            interaction: None,
+        };
+        let second_ctx = ResolveContext {
+            dir,
+            config: &second_config,
+            project: Some("project".to_string()),
+            repository: None,
+            interaction: None,
+        };
+
+        let first = build_secret_cache_key(Path::new("/tmp/.env"), &entry, "bw", &first_ctx);
+        let second = build_secret_cache_key(Path::new("/tmp/.env"), &entry, "bw", &second_ctx);
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
+        let old_namespace =
+            first
+                .backend_config
+                .replacen(BITWARDEN_CACHE_KEY_VERSION, "bw-cache-v2", 1);
+        let mut old_key = first.clone();
+        old_key.backend_config = old_namespace;
+        assert_ne!(first.fingerprint(), old_key.fingerprint());
+        assert!(
+            first
+                .backend_config
+                .starts_with(BITWARDEN_CACHE_KEY_VERSION)
+        );
     }
 
     #[test]
@@ -2257,6 +2325,7 @@ branch "broken"]
                 backend: "bw".to_string(),
                 bw: crate::config::BwConfig {
                     folder: Some("Secrets".to_string()),
+                    cache_identity: Some("vault.example:work".to_string()),
                     ..crate::config::BwConfig::default()
                 },
                 ..crate::config::Defaults::default()
@@ -2298,6 +2367,91 @@ branch "broken"]
                 .count(),
             1,
             "expected the Bitwarden item list to be fetched only once"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_env_file_skips_bitwarden_cache_without_account_identity() {
+        let _lock = crate::cache::keyring_test_lock()
+            .lock()
+            .expect("keyring test mutex poisoned");
+        let temp = unique_subdir("resolve-bw-cache-no-identity");
+        let env_path = temp.join(".env");
+        let call_log = temp.join("bw-calls.log");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(&env_path, "API_KEY=\n").unwrap();
+
+        let items_json = r#"[{"name":"API_KEY","folderId":"folder-abc","login":{"password":"backend-secret"},"fields":[]}]"#;
+        let bw_script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'status' ]; then\n  echo '{{\"status\":\"unlocked\"}}'\nelif [ \"$1\" = 'sync' ]; then\n  exit 0\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'folders' ] && [ \"$4\" = 'Secrets' ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] ; then\n  echo '{}'\nelse\n  exit 1\nfi\n",
+            call_log.display(),
+            items_json
+        );
+
+        let env_file = crate::env_file::EnvFile::parse(&env_path).unwrap();
+        let config = Config {
+            defaults: crate::config::Defaults {
+                backend: "bw".to_string(),
+                bw: crate::config::BwConfig {
+                    folder: Some("Secrets".to_string()),
+                    ..crate::config::BwConfig::default()
+                },
+                ..crate::config::Defaults::default()
+            },
+            log: crate::config::LogConfig::default(),
+            updates: crate::config::UpdateConfig::default(),
+            projects: vec![],
+        };
+
+        let cache_index_path = temp.join("pw-env").join("resolved-secret-cache.json");
+        crate::cache::set_test_secret_cache_index_path(Some(cache_index_path));
+        crate::cache::set_test_keyring_available(true);
+
+        let ctx = ResolveContext {
+            dir: &temp,
+            config: &config,
+            project: detect_project_name(&temp),
+            repository: detect_repository_remote(&temp),
+            interaction: None,
+        };
+        let cache_key = build_secret_cache_key(
+            env_file.path(),
+            env_file.entries().first().unwrap(),
+            "bw",
+            &ctx,
+        );
+        SecretValueCache::load(config.effective_cache(&temp))
+            .set(&cache_key, "stale-cached-secret");
+
+        let resolved =
+            with_approval_and_mock_binaries(None, Some(&bw_script), None, &env_path, || {
+                resolve_env_file(&env_file, &config, &temp).expect("should fetch from Bitwarden")
+            });
+        let cached_after_resolve =
+            SecretValueCache::load(config.effective_cache(&temp)).get(&cache_key);
+        crate::cache::reset_test_keyring();
+        crate::cache::set_test_secret_cache_index_path(None);
+
+        let log = fs::read_to_string(&call_log).unwrap();
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(
+            resolved.get("API_KEY").map(String::as_str),
+            Some("backend-secret"),
+            "an unbound Bitwarden cache entry must not be used"
+        );
+        assert_eq!(
+            cached_after_resolve.as_deref(),
+            Some("stale-cached-secret"),
+            "an unbound Bitwarden result must not overwrite the cache"
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("list items --folderid folder-abc"))
+                .count(),
+            1,
+            "the stale cached value must not avoid a Bitwarden lookup"
         );
     }
 

@@ -42,6 +42,8 @@ ttl_hours = 4
 [defaults.bw]
 # Default Bitwarden folder to search in
 # folder = "env-secrets"
+# Stable account/server identifier used to isolate Bitwarden cache entries
+# cache_identity = "vault.example.com:work-account"
 # Default Bitwarden organization
 # organization = "<organization-id>"
 # Default Bitwarden organization collection ID (requires organization)
@@ -101,7 +103,7 @@ check_interval_hours = 24
 | `[defaults.cache]` | `enabled`, `ttl_hours` | Enables OS-keyring caching of resolved secrets and sets the expiry window |
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings; `vault` may use a configured alias |
 | `[defaults.op.vault_aliases]` | `<alias> = <vault>` | Maps user-friendly 1Password vault aliases to real vault names; also applies to `op://<alias>/...` references |
-| `[defaults.bw]` | `folder`, `organization`, `collection`, `item` | Default Bitwarden lookup settings; organization items use an organization ID and optional collection ID |
+| `[defaults.bw]` | `folder`, `cache_identity`, `organization`, `collection`, `item` | Default Bitwarden lookup settings; organization items use an organization ID and optional collection ID |
 | `[defaults.gpg]` | `file_pattern`, `recipient` | Project-relative GPG file path and encryption settings; paths that escape the project are rejected |
 | `[log]` | `level`, `file` | Logging configuration and audit-log destination |
 | `[updates]` | `enabled`, `check_interval_hours` | Automatic GitHub release checks |
@@ -114,6 +116,13 @@ organization. Organization-scoped configuration cannot be combined with the pers
 vault `folder` setting. Reads are restricted to the configured organization and, when
 set, collection. New organization items require a collection; without one, reads and
 updates can still use existing items owned by the configured organization.
+
+Set `cache_identity` to a stable identifier that distinguishes both the Bitwarden server
+and account, such as `vault.example.com:work-account`, to enable shared-secret caching for
+Bitwarden. If it is unset or blank, Bitwarden secrets are not read from or written to the
+shared cache. This value identifies the account for cache separation; do not put a
+`BW_SESSION` token or other credential in it. Configure it in project overrides too when
+they define their own Bitwarden settings, because project backend settings replace defaults.
 
 ## Valid backend values
 

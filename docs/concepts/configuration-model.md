@@ -24,10 +24,13 @@ From broadest to narrowest, the effective configuration is built like this:
 | --- | --- |
 | `[defaults]` | Select the default backend for empty values |
 | `[defaults.op]` | 1Password defaults such as `vault`, `account`, and `item` |
-| `[defaults.bw]` | Bitwarden defaults such as `folder`, `organization`, and `item` |
+| `[defaults.bw]` | Bitwarden defaults such as `folder`, `cache_identity`, `organization`, and `item` |
 | `[defaults.gpg]` | GPG defaults such as `file_pattern` and `recipient` |
 
 The same backend-specific sections can also appear under `[[projects]]`, and inside a project-local `.pw-env.toml`.
+
+Bitwarden shared-secret caching is disabled unless `cache_identity` names the account and server. Set a stable value
+for each account/server pair, and set it in a project override when that override selects a different account.
 
 ## Item resolution
 

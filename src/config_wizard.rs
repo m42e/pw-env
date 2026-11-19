@@ -250,6 +250,7 @@ struct ConfigWizardState {
     op_account: Option<String>,
     op_item: Option<String>,
     bw_folder: Option<String>,
+    bw_cache_identity: Option<String>,
     bw_organization: Option<String>,
     bw_collection: Option<String>,
     bw_item: Option<String>,
@@ -278,6 +279,7 @@ impl ConfigWizardState {
             op_account: config.defaults.op.account.clone(),
             op_item: config.defaults.op.item.clone(),
             bw_folder: config.defaults.bw.folder.clone(),
+            bw_cache_identity: config.defaults.bw.cache_identity.clone(),
             bw_organization: config.defaults.bw.organization.clone(),
             bw_collection: config.defaults.bw.collection.clone(),
             bw_item: config.defaults.bw.item.clone(),
@@ -313,6 +315,7 @@ impl ConfigWizardState {
                 },
                 bw: crate::config::BwConfig {
                     folder: self.bw_folder.clone(),
+                    cache_identity: self.bw_cache_identity.clone(),
                     organization: self.bw_organization.clone(),
                     collection: self.bw_collection.clone(),
                     item: self.bw_item.clone(),
@@ -381,6 +384,9 @@ impl ConfigWizardState {
         lines.push("[defaults.bw]".to_string());
         if let Some(folder) = &self.bw_folder {
             lines.push(format!("folder = {}", quoted(folder)));
+        }
+        if let Some(cache_identity) = &self.bw_cache_identity {
+            lines.push(format!("cache_identity = {}", quoted(cache_identity)));
         }
         if let Some(organization) = &self.bw_organization {
             lines.push(format!("organization = {}", quoted(organization)));
@@ -668,6 +674,7 @@ enum FieldId {
     OpAccount,
     OpItem,
     BwFolder,
+    BwCacheIdentity,
     BwOrganization,
     BwCollection,
     BwItem,
@@ -680,7 +687,7 @@ enum FieldId {
     UpdateCheckIntervalHours,
 }
 
-const ALL_FIELDS: [FieldId; 21] = [
+const ALL_FIELDS: [FieldId; 22] = [
     FieldId::Backend,
     FieldId::SearchParentEnv,
     FieldId::SourceAll,
@@ -692,6 +699,7 @@ const ALL_FIELDS: [FieldId; 21] = [
     FieldId::OpAccount,
     FieldId::OpItem,
     FieldId::BwFolder,
+    FieldId::BwCacheIdentity,
     FieldId::BwOrganization,
     FieldId::BwCollection,
     FieldId::BwItem,
@@ -718,6 +726,7 @@ impl FieldId {
             Self::OpAccount => "1Password account",
             Self::OpItem => "1Password item",
             Self::BwFolder => "Bitwarden folder",
+            Self::BwCacheIdentity => "Bitwarden cache identity",
             Self::BwOrganization => "Bitwarden organization",
             Self::BwCollection => "Bitwarden collection",
             Self::BwItem => "Bitwarden item",
@@ -760,6 +769,9 @@ impl FieldId {
                 "Optional 1Password item name. When set, keys resolve as fields on this item."
             }
             Self::BwFolder => "Optional Bitwarden folder to search by default.",
+            Self::BwCacheIdentity => {
+                "Stable Bitwarden account and server identifier. Required to enable shared-secret caching; do not use a session token."
+            }
             Self::BwOrganization => "Optional Bitwarden organization identifier.",
             Self::BwCollection => {
                 "Optional Bitwarden organization collection ID; requires an organization ID."
@@ -791,6 +803,7 @@ impl FieldId {
                 BackendChoice::Op
             ) | (
                 Self::BwFolder
+                    | Self::BwCacheIdentity
                     | Self::BwOrganization
                     | Self::BwCollection
                     | Self::BwItem
@@ -806,6 +819,7 @@ impl FieldId {
                 | Self::OpAccount
                 | Self::OpItem
                 | Self::BwFolder
+                | Self::BwCacheIdentity
                 | Self::BwOrganization
                 | Self::BwCollection
                 | Self::BwItem
@@ -828,6 +842,7 @@ impl FieldId {
             Self::OpAccount => option_display(&state.op_account),
             Self::OpItem => option_display(&state.op_item),
             Self::BwFolder => option_display(&state.bw_folder),
+            Self::BwCacheIdentity => option_display(&state.bw_cache_identity),
             Self::BwOrganization => option_display(&state.bw_organization),
             Self::BwCollection => option_display(&state.bw_collection),
             Self::BwItem => option_display(&state.bw_item),
@@ -849,6 +864,7 @@ impl FieldId {
                 | Self::OpAccount
                 | Self::OpItem
                 | Self::BwFolder
+                | Self::BwCacheIdentity
                 | Self::BwOrganization
                 | Self::BwCollection
                 | Self::BwItem
@@ -867,6 +883,7 @@ impl FieldId {
             Self::OpAccount => state.op_account.clone().unwrap_or_default(),
             Self::OpItem => state.op_item.clone().unwrap_or_default(),
             Self::BwFolder => state.bw_folder.clone().unwrap_or_default(),
+            Self::BwCacheIdentity => state.bw_cache_identity.clone().unwrap_or_default(),
             Self::BwOrganization => state.bw_organization.clone().unwrap_or_default(),
             Self::BwCollection => state.bw_collection.clone().unwrap_or_default(),
             Self::BwItem => state.bw_item.clone().unwrap_or_default(),
@@ -902,6 +919,7 @@ impl FieldId {
             Self::OpAccount => state.op_account = optional_string(buffer),
             Self::OpItem => state.op_item = optional_string(buffer),
             Self::BwFolder => state.bw_folder = optional_string(buffer),
+            Self::BwCacheIdentity => state.bw_cache_identity = optional_string(buffer),
             Self::BwOrganization => state.bw_organization = optional_string(buffer),
             Self::BwCollection => state.bw_collection = optional_string(buffer),
             Self::BwItem => state.bw_item = optional_string(buffer),
@@ -1102,6 +1120,7 @@ mod tests {
                 },
                 bw: BwConfig {
                     folder: None,
+                    cache_identity: Some("vault.example:team".to_string()),
                     organization: Some("acme".to_string()),
                     collection: Some("collection-id".to_string()),
                     item: Some("app".to_string()),
@@ -1137,6 +1156,10 @@ mod tests {
         assert!(round_trip.defaults.fallback_example_env);
         assert!(!round_trip.defaults.cache.enabled);
         assert_eq!(round_trip.defaults.cache.ttl_hours, 12);
+        assert_eq!(
+            round_trip.defaults.bw.cache_identity.as_deref(),
+            Some("vault.example:team")
+        );
         assert_eq!(round_trip.defaults.op.vault.as_deref(), Some("Work"));
         assert_eq!(
             round_trip
@@ -1187,6 +1210,7 @@ mod tests {
             op_account: None,
             op_item: None,
             bw_folder: None,
+            bw_cache_identity: Some("vault.example:team".to_string()),
             bw_organization: Some("org-id".to_string()),
             bw_collection: Some("collection-id".to_string()),
             bw_item: Some("api".to_string()),
@@ -1209,6 +1233,7 @@ mod tests {
         assert!(rendered.contains("backend = \"gpg\""));
         assert!(rendered.contains("warn_missing = true"));
         assert!(rendered.contains("organization = \"org-id\""));
+        assert!(rendered.contains("cache_identity = \"vault.example:team\""));
         assert!(rendered.contains("collection = \"collection-id\""));
         assert!(rendered.contains("sync_throttle_secs = 5400"));
         assert!(rendered.contains("file_pattern = \".team.gpg\""));
@@ -1375,6 +1400,8 @@ mod tests {
     fn backend_specific_fields_follow_backend_and_shared_visibility_rules() {
         assert!(FieldId::OpVault.is_backend_specific(BackendChoice::Op));
         assert!(!FieldId::OpVault.is_backend_specific(BackendChoice::Bw));
+        assert!(FieldId::BwCacheIdentity.is_backend_specific(BackendChoice::Bw));
+        assert!(!FieldId::BwCacheIdentity.is_backend_specific(BackendChoice::Gpg));
         assert!(FieldId::LogLevel.is_backend_specific(BackendChoice::Gpg));
     }
 
@@ -1424,6 +1451,9 @@ mod tests {
 
         FieldId::OpItem.apply_edit(&mut state, " deploy ").unwrap();
         FieldId::BwFolder.apply_edit(&mut state, " env ").unwrap();
+        FieldId::BwCacheIdentity
+            .apply_edit(&mut state, " vault.example:team ")
+            .unwrap();
         FieldId::BwOrganization
             .apply_edit(&mut state, " acme ")
             .unwrap();
@@ -1437,6 +1467,10 @@ mod tests {
 
         assert_eq!(state.op_item.as_deref(), Some("deploy"));
         assert_eq!(state.bw_folder.as_deref(), Some("env"));
+        assert_eq!(
+            state.bw_cache_identity.as_deref(),
+            Some("vault.example:team")
+        );
         assert_eq!(state.bw_organization.as_deref(), Some("acme"));
         assert_eq!(state.bw_collection.as_deref(), Some("collection-id"));
         assert_eq!(state.bw_item.as_deref(), Some("api"));
@@ -1638,7 +1672,7 @@ mod tests {
     #[test]
     fn handle_editing_key_escape_cancels_current_edit() {
         let mut app = WizardApp::new(&Config::default());
-        app.selected = 11;
+        app.selected = 12;
         app.mode = InputMode::Editing {
             buffer: "acme".to_string(),
         };
@@ -1657,7 +1691,7 @@ mod tests {
     #[test]
     fn handle_editing_key_enter_applies_bitwarden_organization_edit() {
         let mut app = WizardApp::new(&Config::default());
-        app.selected = 11;
+        app.selected = 12;
         app.mode = InputMode::Editing {
             buffer: " acme ".to_string(),
         };
@@ -1742,6 +1776,16 @@ mod tests {
         let buffer = FieldId::BwFolder.edit_buffer(&state);
 
         assert_eq!(buffer, "env");
+    }
+
+    #[test]
+    fn edit_buffer_returns_bitwarden_cache_identity() {
+        let mut state = ConfigWizardState::from_config(&Config::default());
+        state.bw_cache_identity = Some("vault.example:team".to_string());
+
+        let buffer = FieldId::BwCacheIdentity.edit_buffer(&state);
+
+        assert_eq!(buffer, "vault.example:team");
     }
 
     #[test]

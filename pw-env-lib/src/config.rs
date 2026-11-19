@@ -323,6 +323,9 @@ impl OpConfig {
 pub struct BwConfig {
     #[serde(default)]
     pub folder: Option<String>,
+    /// Stable account/server identifier used to isolate Bitwarden secret-cache entries.
+    #[serde(default)]
+    pub cache_identity: Option<String>,
     #[serde(default)]
     pub organization: Option<String>,
     /// Collection ID used when reading or creating organization-owned items.
@@ -343,6 +346,7 @@ impl Default for BwConfig {
     fn default() -> Self {
         Self {
             folder: None,
+            cache_identity: None,
             organization: None,
             collection: None,
             item: None,
@@ -1708,6 +1712,7 @@ item = "project-secrets"
 
 [defaults.bw]
 folder = "env-secrets"
+cache_identity = "vault.example.com:work-account"
 
 [defaults.gpg]
 file_pattern = ".secrets.gpg"
@@ -1728,6 +1733,10 @@ backend = "gpg"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.defaults.backend, "op");
         assert_eq!(config.defaults.op.vault.as_deref(), Some("Development"));
+        assert_eq!(
+            config.defaults.bw.cache_identity.as_deref(),
+            Some("vault.example.com:work-account")
+        );
         assert_eq!(config.projects.len(), 2);
         assert_eq!(config.projects[0].backend.as_deref(), Some("bw"));
 

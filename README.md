@@ -374,7 +374,7 @@ Top-level sections:
 - `[defaults]` selects the default backend
 - `[defaults.op]` configures 1Password defaults such as `vault`, `account`, and `item`; `vault` can use a `vault_aliases` entry
 - `[defaults.op.vault_aliases]` maps user-friendly 1Password vault aliases to real vault names
-- `[defaults.bw]` configures Bitwarden defaults such as `folder`, `organization`, `collection`, and `item`
+- `[defaults.bw]` configures Bitwarden defaults such as `folder`, `cache_identity`, `organization`, `collection`, and `item`
 - `[defaults.gpg]` configures `file_pattern` and `recipient`
 - `[log]` configures log level and optional log file path
 - `[updates]` configures automatic release checks
