@@ -39,7 +39,7 @@ The repository publishes releases through a PR-driven workflow:
 
 - Set repository secrets `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY` for a GitHub App installed on this repository.
 - Give the App only repository `Contents: write` permission. The tag workflow mints an installation token scoped to this repository.
-- Protect `refs/tags/v*` with a repository ruleset that limits creation, updates, and deletion to authorized release maintainers and the release App. Tag creator restrictions are a repository setting and cannot be enforced in workflow code.
+- Protect `refs/tags/v*` with a repository ruleset that allows creation only by authorized release maintainers and the release App, and prohibits tag updates and deletions after creation. The workflow cannot enforce those repository ruleset settings.
 - Keep the app private key in the repository secret; do not put it in workflow files or logs.
 
 ### Choose signing and notarization behavior

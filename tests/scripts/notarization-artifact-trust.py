@@ -58,6 +58,25 @@ assert "ref: $ref" in release_workflow
 assert "binary_sha256: $binary_sha256" in release_workflow
 assert ".archive_sha256 = $archive_sha256" in release_workflow
 
+publish_job = release_workflow.split("\n  publish:\n", 1)[1]
+assert "ref: ${{ github.sha }}" in publish_job
+assert "ref: ${{ env.RELEASE_TAG }}" not in publish_job
+assert "name: Revalidate checkout and release tag before publishing" in publish_job
+assert 'checkout_sha=$(git rev-parse HEAD)' in publish_job
+assert '[ "$checkout_sha" != "$RELEASE_SHA" ]' in publish_job
+assert 'repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG' in publish_job
+assert 'repos/$GITHUB_REPOSITORY/git/tags/$object_sha' in publish_job
+assert '[ "$object_sha" != "$RELEASE_SHA" ]' in publish_job
+assert 'if [ "$object_type" != "commit" ]' in publish_job
+assert publish_job.index("name: Revalidate checkout and release tag before publishing") < publish_job.index(
+    "name: Authenticate with crates.io via OIDC trusted publishing"
+)
+assert publish_job.index("name: Authenticate with crates.io via OIDC trusted publishing") < publish_job.index(
+    "name: Publish crates to crates.io"
+)
+assert "prohibits tag updates and deletions after creation" in release_skill
+assert "prohibits tag updates and deletions after creation" in release_instructions
+
 assert "workflow_dispatch:" not in finalizer
 assert "SELECTED_TAG" not in finalizer
 assert 'actions/workflows/release.yml' in finalizer

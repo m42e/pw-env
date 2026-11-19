@@ -301,7 +301,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin: v6.0.2
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # pin: v1
@@ -319,6 +319,47 @@ jobs:
             sudo apt-get install -y libdbus-1-dev pkg-config
           else
             sudo apt-get install -y libdbus-1-dev pkgconf
+          fi
+
+      - name: Revalidate checkout and release tag before publishing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$RELEASE_REF" != "refs/tags/$RELEASE_TAG" ] || \
+             [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Publishing requires an exact vN.N.N tag ref"
+            exit 1
+          fi
+
+          checkout_sha=$(git rev-parse HEAD)
+          if [ "$checkout_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::Publishing checkout does not match the validated workflow commit"
+            exit 1
+          fi
+
+          ref_data=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          object_type=$(jq -r '.object.type // empty' <<< "$ref_data")
+          object_sha=$(jq -r '.object.sha // empty' <<< "$ref_data")
+          for _ in 1 2 3 4 5; do
+            [ "$object_type" = "tag" ] || break
+            if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Release tag points to an invalid annotated tag object"
+              exit 1
+            fi
+            tag_data=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")
+            object_type=$(jq -r '.object.type // empty' <<< "$tag_data")
+            object_sha=$(jq -r '.object.sha // empty' <<< "$tag_data")
+          done
+
+          if [ "$object_type" != "commit" ] || [ "$object_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::Release tag no longer points to this workflow run's commit"
+            exit 1
           fi
 
       - name: Authenticate with crates.io via OIDC trusted publishing
