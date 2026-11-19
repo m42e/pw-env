@@ -442,7 +442,11 @@ impl BwBackend {
                 "type": 0
             }));
         }
-        if let Some(repository) = ctx.repository.as_deref() {
+        if let Some(repository) = ctx
+            .repository
+            .as_deref()
+            .and_then(crate::resolve::safe_repository_identifier)
+        {
             fields.push(serde_json::json!({
                 "name": REPOSITORY_FIELD_NAME,
                 "value": repository,
@@ -954,7 +958,16 @@ impl BwBackend {
                 fields.iter().any(|field| {
                     let name = field.get("name").and_then(|value| value.as_str());
                     name.is_some_and(|name| name.eq_ignore_ascii_case(field_name))
-                        && field.get("value").and_then(|value| value.as_str()) == Some(expected)
+                        && field
+                            .get("value")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|value| {
+                                if field_name.eq_ignore_ascii_case(REPOSITORY_FIELD_NAME) {
+                                    crate::resolve::repository_identifiers_match(value, expected)
+                                } else {
+                                    value == expected
+                                }
+                            })
                 })
             })
     }
@@ -1119,6 +1132,7 @@ impl BwBackend {
         folder_id: Option<&str>,
         project: Option<&str>,
     ) -> Result<&'a serde_json::Value> {
+        let repository = repository.and_then(crate::resolve::safe_repository_identifier);
         debug!(
             key,
             item_count = items.len(),
@@ -1155,7 +1169,7 @@ impl BwBackend {
         }
 
         // Multiple matches — try narrowing by repository
-        if let Some(repository) = repository {
+        if let Some(repository) = repository.as_deref() {
             info!(
                 "Found {} items named '{key}', narrowing by repository '{repository}'",
                 matching.len()
@@ -3677,8 +3691,47 @@ exit 1
         assert!(fields.iter().any(|field| {
             field.get("name").and_then(|value| value.as_str()) == Some("repository")
                 && field.get("value").and_then(|value| value.as_str())
-                    == Some("git@github.com:example/example.git")
+                    == Some("github.com/example/example.git")
         }));
+    }
+
+    #[test]
+    fn repository_metadata_is_canonical_and_legacy_credentials_only_match_in_memory() {
+        let config = Config::default();
+        let ctx = StoreContext {
+            dir: Path::new("/tmp/project"),
+            config: &config,
+            project: None,
+            repository: Some(
+                "https://deploy-user:ghp_dummy-secret@github.com/example/repo.git?token=query-secret"
+                    .to_string(),
+            ),
+        };
+        let fields = BwBackend::migration_metadata_fields(&ctx);
+        let repository = fields
+            .iter()
+            .find(|field| field["name"] == REPOSITORY_FIELD_NAME)
+            .unwrap();
+        assert_eq!(repository["value"], "github.com/example/repo.git");
+        assert!(!repository.to_string().contains("ghp_dummy-secret"));
+        assert!(!repository.to_string().contains("query-secret"));
+
+        let legacy_item = serde_json::json!({
+            "fields": [{
+                "name": REPOSITORY_FIELD_NAME,
+                "value": "https://old-user:old-token@github.com/example/repo.git?token=old-query"
+            }]
+        });
+        assert!(BwBackend::item_matches_custom_field(
+            &legacy_item,
+            REPOSITORY_FIELD_NAME,
+            "github.com/example/repo.git"
+        ));
+        assert!(!BwBackend::item_matches_custom_field(
+            &legacy_item,
+            REPOSITORY_FIELD_NAME,
+            "github.com/example/other.git"
+        ));
     }
 
     #[test]

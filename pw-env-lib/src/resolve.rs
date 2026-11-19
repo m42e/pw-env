@@ -121,6 +121,70 @@ fn select_git_remote_name(
     }
 }
 
+fn canonical_repository_identifier(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (authority, path) = value.split_once('/')?;
+    if authority.is_empty()
+        || path.is_empty()
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.contains('\\')
+        || path.contains('?')
+        || path.contains('#')
+        || path.contains('@')
+        || path.chars().any(char::is_whitespace)
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']')?;
+        let host = &authority[..=close];
+        let suffix = &authority[close + 1..];
+        if !host[1..host.len() - 1]
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == ':' || ch == '.')
+        {
+            return None;
+        }
+        let port = if suffix.is_empty() {
+            ""
+        } else {
+            suffix.strip_prefix(':')?
+        };
+        if !port.is_empty() && !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        (host, port)
+    } else {
+        let (host, port) = authority
+            .split_once(':')
+            .map(|(host, port)| (host, port))
+            .unwrap_or((authority, ""));
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+            || (!port.is_empty() && !port.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return None;
+        }
+        (host, port)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = if port.is_empty() {
+        String::new()
+    } else {
+        format!(":{port}")
+    };
+    Some(format!("{}{port}/{path}", host.to_ascii_lowercase()))
+}
+
 fn normalize_git_remote_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
     if trimmed.is_empty()
@@ -133,27 +197,94 @@ fn normalize_git_remote_url(url: &str) -> Option<String> {
         return None;
     }
 
-    let windows_drive = trimmed.len() >= 3
-        && trimmed.as_bytes()[1] == b':'
-        && trimmed.as_bytes()[2] == b'/'
-        && trimmed.as_bytes()[0].is_ascii_alphabetic();
-    if windows_drive {
+    let drive_like_path =
+        trimmed.len() >= 3 && trimmed.as_bytes()[1] == b':' && trimmed.as_bytes()[2] == b'/';
+    if drive_like_path {
         return None;
     }
 
-    if trimmed.contains("://") || trimmed.starts_with("git@") {
-        return Some(trimmed.to_string());
+    if let Some(identifier) = canonical_repository_identifier(trimmed) {
+        return Some(identifier);
     }
 
-    let (host, path) = trimmed.split_once(':')?;
-    if host.contains('/') || host.is_empty() {
-        return None;
+    if trimmed.contains("://") {
+        let parsed = url::Url::parse(trimmed).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https" | "ssh" | "git") {
+            return None;
+        }
+        let host = parsed.host_str()?.to_ascii_lowercase();
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host
+        };
+        let port = parsed
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        let path = parsed.path().trim_matches('/');
+        if host.is_empty() || path.is_empty() || path.contains('\\') {
+            return None;
+        }
+        return canonical_repository_identifier(&format!("{host}{port}/{path}"));
     }
+
+    // SCP-style Git remotes use `user@host:path`; the user component is not
+    // part of repository identity and must never be persisted or logged.
+    let host_and_path = trimmed
+        .rsplit_once('@')
+        .map(|(_, host_and_path)| host_and_path)
+        .unwrap_or(trimmed);
+    let (host, path) = if host_and_path.starts_with('[') {
+        let close = host_and_path.find(']')?;
+        let host = &host_and_path[..=close];
+        let rest = host_and_path.get(close + 1..)?;
+        (host, rest.strip_prefix(':')?)
+    } else {
+        host_and_path.split_once(':')?
+    };
     if host.len() == 1 && path.starts_with('/') && !host.as_bytes()[0].is_ascii_alphabetic() {
         return None;
     }
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_matches('/');
+    if host.is_empty()
+        || host.contains('/')
+        || host.contains('@')
+        || host.chars().any(char::is_whitespace)
+        || host.contains('?')
+        || host.contains('#')
+        || path.is_empty()
+        || path.contains('\\')
+        || path.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
 
-    Some(trimmed.to_string())
+    canonical_repository_identifier(&format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
+/// Return a canonical, credential-free repository identifier for metadata and matching.
+pub(crate) fn safe_repository_identifier(value: &str) -> Option<String> {
+    normalize_git_remote_url(value)
+        .or_else(|| canonical_repository_identifier(value))
+        .or_else(|| {
+            let value = value.trim();
+            (!value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
+            .then(|| value.to_string())
+        })
+}
+
+pub(crate) fn repository_identifiers_match(stored: &str, expected: &str) -> bool {
+    safe_repository_identifier(stored)
+        .zip(safe_repository_identifier(expected))
+        .is_some_and(|(stored, expected)| stored == expected)
 }
 
 pub fn detect_repository_remote(dir: &Path) -> Option<String> {
@@ -945,7 +1076,7 @@ mod tests {
         assert_eq!(context.project.as_deref(), Some("owner-project"));
         assert_eq!(
             context.repository.as_deref(),
-            Some("git@github.com:example/owner.git")
+            Some("github.com/example/owner.git")
         );
         assert_eq!(config.effective_item(context.dir), Some("owner-item"));
 
@@ -971,7 +1102,7 @@ mod tests {
         let remote = detect_repository_remote(&subdir);
         let _ = fs::remove_dir_all(&root);
 
-        assert_eq!(remote.as_deref(), Some("git@github.com:example/origin.git"));
+        assert_eq!(remote.as_deref(), Some("github.com/example/origin.git"));
     }
 
     #[test]
@@ -993,10 +1124,7 @@ mod tests {
         let remote = detect_repository_remote(&subdir);
         let _ = fs::remove_dir_all(&root);
 
-        assert_eq!(
-            remote.as_deref(),
-            Some("https://github.com/example/upstream.git")
-        );
+        assert_eq!(remote.as_deref(), Some("github.com/example/upstream.git"));
     }
 
     #[test]
@@ -1086,16 +1214,78 @@ branch "broken"]
     fn normalize_git_remote_url_accepts_supported_remote_forms() {
         assert_eq!(
             normalize_git_remote_url("https://github.com/example/repo.git").as_deref(),
-            Some("https://github.com/example/repo.git")
+            Some("github.com/example/repo.git")
         );
         assert_eq!(
             normalize_git_remote_url("git@github.com:example/repo.git").as_deref(),
-            Some("git@github.com:example/repo.git")
+            Some("github.com/example/repo.git")
         );
         assert_eq!(
             normalize_git_remote_url("github.com:example/repo.git").as_deref(),
-            Some("github.com:example/repo.git")
+            Some("github.com/example/repo.git")
         );
+    }
+
+    #[test]
+    fn repository_identifier_discards_credentials_query_and_fragment() {
+        let https = normalize_git_remote_url(
+            "https://build-user:ghp_dummy-secret@GitHub.com:443/example/repo.git?access_token=query-secret#fragment-secret",
+        );
+        assert_eq!(https.as_deref(), Some("github.com/example/repo.git"));
+
+        let ssh = normalize_git_remote_url(
+            "ssh://automation:private-token@github.com:2222/example/repo.git?token=other-secret#ignored",
+        );
+        assert_eq!(ssh.as_deref(), Some("github.com:2222/example/repo.git"));
+
+        let scp = normalize_git_remote_url(
+            "git:ghp_dummy-secret@github.com:example/repo.git?token=query-secret#fragment",
+        );
+        assert_eq!(scp.as_deref(), Some("github.com/example/repo.git"));
+
+        for identifier in [&https, &ssh, &scp] {
+            let value = identifier.as_deref().unwrap();
+            assert!(!value.contains("ghp_dummy-secret"));
+            assert!(!value.contains("private-token"));
+            assert!(!value.contains("query-secret"));
+            assert!(!value.contains("fragment-secret"));
+        }
+    }
+
+    #[test]
+    fn repository_identifier_matches_legacy_credential_bearing_metadata_safely() {
+        assert!(repository_identifiers_match(
+            "https://old-user:old-token@github.com/example/repo.git?token=also-old",
+            "git@github.com:example/repo.git"
+        ));
+        assert!(!repository_identifiers_match(
+            "https://old-user:old-token@github.com/example/other.git?token=also-old",
+            "github.com/example/repo.git"
+        ));
+        assert!(!repository_identifiers_match(
+            "git+https://user:token@host.example/repo.git",
+            "git+https://user:token@host.example/repo.git"
+        ));
+    }
+
+    #[test]
+    fn detect_repository_remote_never_returns_url_credentials() {
+        let root = unique_subdir("remote-credentials");
+        let git_dir = root.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"]\n\turl = https://deploy-user:ghp_dummy-secret@github.com/example/repo.git?access_token=query-secret#ignored\n[branch \"main\"]\n\tremote = origin\n",
+        )
+        .unwrap();
+
+        let remote = detect_repository_remote(&root).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(remote, "github.com/example/repo.git");
+        assert!(!remote.contains("ghp_dummy-secret"));
+        assert!(!remote.contains("query-secret"));
     }
 
     #[test]
@@ -1121,22 +1311,12 @@ branch "broken"]
 
     #[test]
     fn normalize_git_remote_url_rejects_false_windows_drive_from_third_byte_slash() {
-        // "ht://..." has [2]=='/' and [0] is alpha; the windows-drive guard
-        // must NOT reject it (the && chain must stay intact).
-        assert_eq!(
-            normalize_git_remote_url("ht://example.com").as_deref(),
-            Some("ht://example.com")
-        );
+        assert_eq!(normalize_git_remote_url("ht://example.com"), None);
     }
 
     #[test]
     fn normalize_git_remote_url_accepts_scheme_only_url() {
-        // "://repo" has no scheme name but contains "://" – the protocol-OR
-        // branch must still accept it; regression for || → && mutation.
-        assert_eq!(
-            normalize_git_remote_url("://repo").as_deref(),
-            Some("://repo")
-        );
+        assert_eq!(normalize_git_remote_url("://repo"), None);
     }
 
     #[test]
@@ -1147,7 +1327,7 @@ branch "broken"]
         // !host[0].is_ascii_alphabetic().
         assert_eq!(
             normalize_git_remote_url("1:repo.git").as_deref(),
-            Some("1:repo.git")
+            Some("1/repo.git")
         );
     }
 
@@ -1946,7 +2126,7 @@ branch "broken"]
 
         let items_json = r#"[{"name":"API_KEY","folderId":"folder-abc","login":{"password":"api-secret"},"fields":[]},{"name":"DB_PASS","folderId":"folder-abc","login":{"password":"db-secret"},"fields":[]}]"#;
         let bw_script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'status' ]; then\n  echo '{{\"status\":\"unlocked\"}}'\nelif [ \"$1\" = 'sync' ]; then\n  exit 0\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'folders' ] && [ \"$4\" = 'Secrets' ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] && [ $# -eq 2 ]; then\n  echo '{}'\nelse\n  exit 1\nfi\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'status' ]; then\n  echo '{{\"status\":\"unlocked\"}}'\nelif [ \"$1\" = 'sync' ]; then\n  exit 0\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'folders' ] && [ \"$4\" = 'Secrets' ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] ; then\n  echo '{}'\nelse\n  exit 1\nfi\n",
             call_log.display(),
             items_json
         );
@@ -1983,7 +2163,9 @@ branch "broken"]
             Some("db-secret")
         );
         assert_eq!(
-            log.lines().filter(|line| *line == "list items").count(),
+            log.lines()
+                .filter(|line| line.starts_with("list items --folderid folder-abc"))
+                .count(),
             1,
             "expected a single full item list fetch for default Bitwarden entries"
         );
@@ -2064,7 +2246,7 @@ branch "broken"]
 
         let items_json = r#"[{"name":"API_KEY","folderId":"folder-abc","login":{"password":"bw-cache-secret"},"fields":[]}]"#;
         let bw_script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'status' ]; then\n  echo '{{\"status\":\"unlocked\"}}'\nelif [ \"$1\" = 'sync' ]; then\n  exit 0\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'folders' ] && [ \"$4\" = 'Secrets' ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] && [ $# -eq 2 ]; then\n  echo '{}'\nelse\n  exit 1\nfi\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = 'status' ]; then\n  echo '{{\"status\":\"unlocked\"}}'\nelif [ \"$1\" = 'sync' ]; then\n  exit 0\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'folders' ] && [ \"$4\" = 'Secrets' ]; then\n  echo '[{{\"name\":\"Secrets\",\"id\":\"folder-abc\"}}]'\nelif [ \"$1\" = 'list' ] && [ \"$2\" = 'items' ] ; then\n  echo '{}'\nelse\n  exit 1\nfi\n",
             call_log.display(),
             items_json
         );
@@ -2111,7 +2293,9 @@ branch "broken"]
             Some("bw-cache-secret")
         );
         assert_eq!(
-            log.lines().filter(|line| *line == "list items").count(),
+            log.lines()
+                .filter(|line| line.starts_with("list items --folderid folder-abc"))
+                .count(),
             1,
             "expected the Bitwarden item list to be fetched only once"
         );

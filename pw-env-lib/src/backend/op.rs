@@ -87,10 +87,14 @@ impl OpBackend {
         if let Some(project) = ctx.project.as_deref() {
             assignments.push(Self::text_field_assignment(PROJECT_FIELD_NAME, project));
         }
-        if let Some(repository) = ctx.repository.as_deref() {
+        if let Some(repository) = ctx
+            .repository
+            .as_deref()
+            .and_then(crate::resolve::safe_repository_identifier)
+        {
             assignments.push(Self::text_field_assignment(
                 REPOSITORY_FIELD_NAME,
-                repository,
+                &repository,
             ));
         }
         assignments
@@ -116,7 +120,11 @@ impl OpBackend {
                 "value": project
             }));
         }
-        if let Some(repository) = ctx.repository.as_deref() {
+        if let Some(repository) = ctx
+            .repository
+            .as_deref()
+            .and_then(crate::resolve::safe_repository_identifier)
+        {
             fields.push(serde_json::json!({
                 "type": "STRING",
                 "label": REPOSITORY_FIELD_NAME,
@@ -288,7 +296,16 @@ impl OpBackend {
                 fields.iter().any(|field| {
                     let label = field.get("label").and_then(|value| value.as_str());
                     label.is_some_and(|label| label.eq_ignore_ascii_case(field_name))
-                        && field.get("value").and_then(|value| value.as_str()) == Some(expected)
+                        && field
+                            .get("value")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|value| {
+                                if field_name.eq_ignore_ascii_case(REPOSITORY_FIELD_NAME) {
+                                    crate::resolve::repository_identifiers_match(value, expected)
+                                } else {
+                                    value == expected
+                                }
+                            })
                 })
             })
     }
@@ -328,6 +345,7 @@ impl OpBackend {
         account: Option<&str>,
         interaction: Option<&dyn super::ResolutionInteraction>,
     ) -> Result<String> {
+        let repository = repository.and_then(crate::resolve::safe_repository_identifier);
         // Filter by items whose title matches the key
         let matching: Vec<&serde_json::Value> = items
             .iter()
@@ -400,7 +418,7 @@ impl OpBackend {
             }
         }
 
-        if let Some(repository) = repository {
+        if let Some(repository) = repository.as_deref() {
             info!(
                 "Found {} items named '{key}', disambiguating by repository '{repository}'",
                 candidates.len()
@@ -454,7 +472,7 @@ impl OpBackend {
                 .map(|(id, item)| Self::item_choice(id, item, key, vault))
                 .collect();
             if let Some(index) =
-                interaction.select_op_item(key, &choices, dir, repository, project)?
+                interaction.select_op_item(key, &choices, dir, repository.as_deref(), project)?
             {
                 let (id, _) = candidates
                     .get(index)
@@ -472,7 +490,7 @@ impl OpBackend {
                     &dir.display().to_string(),
                     "STRING",
                 )?;
-                if let Some(repository) = repository {
+                if let Some(repository) = repository.as_deref() {
                     Self::upsert_json_field(
                         &mut item,
                         REPOSITORY_FIELD_NAME,
@@ -738,7 +756,12 @@ impl Backend for OpBackend {
                 // Retain associations with other projects when sharing this value.
                 for (label, metadata) in [
                     (MIGRATED_FROM_FIELD_NAME, Some(ctx.migrated_from())),
-                    (REPOSITORY_FIELD_NAME, ctx.repository.clone()),
+                    (
+                        REPOSITORY_FIELD_NAME,
+                        ctx.repository
+                            .as_deref()
+                            .and_then(crate::resolve::safe_repository_identifier),
+                    ),
                     (PROJECT_FIELD_NAME, ctx.project.clone()),
                 ] {
                     if let Some(metadata) = metadata
@@ -891,6 +914,45 @@ mod tests {
     }
 
     #[test]
+    fn repository_metadata_is_canonical_and_legacy_credentials_only_match_in_memory() {
+        let config = Config::default();
+        let ctx = StoreContext {
+            dir: Path::new("/work/project"),
+            config: &config,
+            project: None,
+            repository: Some(
+                "https://deploy-user:ghp_dummy-secret@github.com/example/repo.git?token=query-secret"
+                    .to_string(),
+            ),
+        };
+        let fields = OpBackend::migration_fields(&ctx);
+        let repository = fields
+            .iter()
+            .find(|field| field["label"] == REPOSITORY_FIELD_NAME)
+            .unwrap();
+        assert_eq!(repository["value"], "github.com/example/repo.git");
+        assert!(!repository.to_string().contains("ghp_dummy-secret"));
+        assert!(!repository.to_string().contains("query-secret"));
+
+        let legacy_item = serde_json::json!({
+            "fields": [{
+                "label": REPOSITORY_FIELD_NAME,
+                "value": "https://old-user:old-token@github.com/example/repo.git?token=old-query"
+            }]
+        });
+        assert!(OpBackend::item_matches_text_field(
+            &legacy_item,
+            REPOSITORY_FIELD_NAME,
+            "github.com/example/repo.git"
+        ));
+        assert!(!OpBackend::item_matches_text_field(
+            &legacy_item,
+            REPOSITORY_FIELD_NAME,
+            "github.com/example/other.git"
+        ));
+    }
+
+    #[test]
     fn upsert_json_field_updates_a_field_matching_by_label_or_id() {
         let mut item = serde_json::json!({
             "fields": [
@@ -993,8 +1055,7 @@ mod tests {
         )));
         assert!(assignments.contains(&"project[text]=example".to_string()));
         assert!(
-            assignments
-                .contains(&"repository[text]=git@github.com:example/example.git".to_string())
+            assignments.contains(&"repository[text]=github.com/example/example.git".to_string())
         );
     }
 
