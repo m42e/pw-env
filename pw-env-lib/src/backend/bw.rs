@@ -832,6 +832,7 @@ impl BwBackend {
         });
     }
 
+    #[cfg(test)]
     fn run_bw(args: &[&str]) -> Result<String> {
         Self::run_bw_with(args, None)
     }
@@ -900,6 +901,7 @@ impl BwBackend {
     }
 
     /// Get a specific field from a Bitwarden item JSON.
+    #[cfg(test)]
     fn extract_field_from_item(item_json: &str, field_name: &str) -> Result<String> {
         let item: serde_json::Value =
             serde_json::from_str(item_json).context("Failed to parse Bitwarden item JSON")?;
@@ -1018,6 +1020,7 @@ impl BwBackend {
         Self::resolve_reference_folder_id_with(reference_folder, configured_folder, None)
     }
 
+    #[cfg(test)]
     fn resolve_reference_folder_id_with(
         reference_folder: Option<&str>,
         configured_folder: Option<&str>,

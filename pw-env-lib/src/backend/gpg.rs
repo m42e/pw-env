@@ -671,6 +671,7 @@ impl GpgBackend {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn validated_store_path(
         ctx_dir: &Path,
         config: &crate::config::Config,

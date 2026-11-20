@@ -1,6 +1,7 @@
 /// Generate shell hook code for the given shell.
 /// The hook wraps `cd` (or uses chpwd/fish events) to automatically run
 /// `pw-env export` when entering a directory with a .env file.
+#[cfg(test)]
 pub fn generate_hook(shell: &str) -> String {
     generate_hook_with_force(shell, false)
 }
