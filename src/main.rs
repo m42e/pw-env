@@ -221,6 +221,12 @@ impl backend::ResolutionInteraction for CliResolutionInteraction {
     arg_required_else_help = true
 )]
 struct Cli {
+    /// Disable automatic environment loading by shell hooks for this invocation
+    #[arg(long, global = true)]
+    no_autoload: bool,
+    /// Internal override used by `pw-env shell` for its child shell
+    #[arg(long, global = true, hide = true)]
+    force_autoload: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -231,6 +237,12 @@ enum Commands {
     Init {
         /// Shell to generate hook for: bash, zsh, fish, or powershell
         shell: String,
+    },
+    /// Start the current shell with the current project's environment loaded
+    Shell {
+        /// Shell executable to start (defaults to the shell in $SHELL)
+        #[arg(long)]
+        shell: Option<PathBuf>,
     },
     /// Execute a command with resolved environment variables only in the child process
     Exec {
@@ -578,12 +590,25 @@ fn resolve_environment(
 
 fn run(cli: Cli, config: config::Config) -> Result<()> {
     let interaction = CliResolutionInteraction::new();
+    let shell_launch_mode = std::env::var("PW_ENV_SHELL_START").ok();
+    let shell_launch = shell_launch_mode.as_deref() == Some("1");
+    let shell_launch_no_autoload = shell_launch_mode.as_deref() == Some("0");
 
     match cli.command {
         Commands::Init { shell } => {
-            print!("{}", shell::generate_hook(&shell));
+            let force_autoload = cli.force_autoload || shell_launch;
+            if force_autoload
+                || (!cli.no_autoload && !shell_launch_no_autoload && config.defaults.autoload)
+            {
+                print!(
+                    "{}",
+                    shell::generate_hook_with_force(&shell, force_autoload)
+                );
+            }
             Ok(())
         }
+
+        Commands::Shell { shell } => run_shell(shell, &interaction, cli.no_autoload),
 
         Commands::Exec {
             dir,
@@ -752,13 +777,20 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
                 _ => output::ShellSyntax::Posix,
             };
 
-            let hook_output = build_hook_output_with_interaction(
-                &dir,
-                shell_syntax,
-                &config,
-                std::env::var_os("PATH"),
-                Some(&interaction),
-            )?;
+            let force_autoload = cli.force_autoload || shell_launch;
+            let autoload_disabled =
+                cli.no_autoload || shell_launch_no_autoload || !config.defaults.autoload;
+            let hook_output = if autoload_disabled && !force_autoload {
+                String::new()
+            } else {
+                build_hook_output_with_interaction(
+                    &dir,
+                    shell_syntax,
+                    &config,
+                    std::env::var_os("PATH"),
+                    Some(&interaction),
+                )?
+            };
             print!("{hook_output}");
 
             Ok(())
@@ -915,7 +947,9 @@ fn run(cli: Cli, config: config::Config) -> Result<()> {
 fn maybe_check_for_release_update(command: &Commands, config: &config::Config) {
     if matches!(
         command,
-        Commands::Exec { .. }
+        Commands::Init { .. }
+            | Commands::Shell { .. }
+            | Commands::Exec { .. }
             | Commands::Export { .. }
             | Commands::Hook { .. }
             | Commands::ConfigWizard
@@ -1073,6 +1107,107 @@ fn resolve_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
                 .with_context(|| format!("Directory not found: {}", dir.display()))
         }
     }
+}
+
+fn run_shell(
+    shell_override: Option<PathBuf>,
+    interaction: &dyn backend::ResolutionInteraction,
+    no_autoload: bool,
+) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!("pw-env shell requires an interactive terminal");
+    }
+
+    let dir = resolve_dir(None)?;
+    let config = load_config_for_dir(&dir)?;
+    let shell_path = shell_override
+        .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
+        .or_else(default_windows_shell)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Could not determine the current shell; pass --shell <PATH>")
+        })?;
+    let shell_name = shell_path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .trim_start_matches('-')
+        .to_ascii_lowercase();
+    let hook_shell = match shell_name.as_str() {
+        "bash" | "zsh" | "fish" => Some(shell_name.as_str()),
+        "powershell" | "pwsh" => Some("powershell"),
+        _ => None,
+    };
+
+    let mut child = ProcessCommand::new(&shell_path);
+    child.current_dir(&dir);
+
+    if let Some(env_path) = find_env_path(&dir, &config) {
+        let env_file = env_file::EnvFile::parse(&env_path)?;
+        emit_plaintext_secret_warning(&env_file)?;
+        let managed_keys = env_file
+            .resolvable_entries()
+            .into_iter()
+            .map(|entry| entry.key.clone())
+            .collect::<Vec<_>>();
+
+        for key in &managed_keys {
+            child.env_remove(key);
+        }
+
+        if !config.effective_commands(&dir).is_empty() {
+            info!(
+                "Starting shell in command-scoped mode for {}",
+                env_path.display()
+            );
+        } else {
+            let resolved = resolve_environment(&env_file, &config, &dir, Some(interaction), false)?;
+            if should_warn_missing(false, config.effective_warn_missing(&dir)) {
+                emit_missing_entries_warning(&managed_keys, &resolved);
+            }
+            child.envs(&resolved);
+            info!(
+                "Prepared shell environment with {} variables from {}",
+                resolved.len(),
+                env_path.display()
+            );
+        }
+    }
+
+    if hook_shell.is_some() {
+        // The child shell's startup file can generate a forced hook. That hook
+        // includes the override on later directory changes, so this marker is
+        // only needed while `pw-env init` is generating the startup code.
+        child.env("PW_ENV_SHELL_START", if no_autoload { "0" } else { "1" });
+    } else {
+        child.env_remove("PW_ENV_SHELL_START");
+    }
+
+    #[cfg(unix)]
+    {
+        let error = child.exec();
+        Err(error).with_context(|| format!("Failed to start shell {}", shell_path.display()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = child
+            .status()
+            .with_context(|| format!("Failed to start shell {}", shell_path.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+#[cfg(windows)]
+fn default_windows_shell() -> Option<PathBuf> {
+    if std::env::var_os("PSModulePath").is_some() {
+        return Some(PathBuf::from("pwsh.exe"));
+    }
+    std::env::var_os("ComSpec").map(PathBuf::from)
+}
+
+#[cfg(not(windows))]
+fn default_windows_shell() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(test)]
@@ -1355,6 +1490,7 @@ fn check_config(config: &config::Config, dir: &std::path::Path) {
     if config_path.exists() {
         eprintln!("Configuration: {}", config_path.display());
         eprintln!("  Default backend: {}", config.defaults.backend);
+        eprintln!("  Shell autoload: {}", config.defaults.autoload);
         if let Some(ref vault) = config.defaults.op.vault {
             eprintln!("  1Password vault: {vault}");
         }
@@ -1729,6 +1865,9 @@ fn config_template() -> String {
 [defaults]
 # Default backend: "op" (1Password), "bw" (Bitwarden), or "gpg" (GPG encrypted file)
 backend = "op"
+# Automatically load project environments on shell directory changes.
+# Set false to disable shell autoloading globally; `pw-env shell` still loads the current project.
+autoload = true
 # Search parent directories for .env until the git workspace root (default: true)
 # search_parent_env = true
 

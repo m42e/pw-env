@@ -2,15 +2,38 @@
 /// The hook wraps `cd` (or uses chpwd/fish events) to automatically run
 /// `pw-env export` when entering a directory with a .env file.
 pub fn generate_hook(shell: &str) -> String {
+    generate_hook_with_force(shell, false)
+}
+
+pub fn generate_hook_with_force(shell: &str, force_autoload: bool) -> String {
     match shell {
-        "bash" => generate_bash_hook(),
-        "zsh" => generate_zsh_hook(),
-        "fish" => generate_fish_hook(),
-        "powershell" => generate_powershell_hook(),
+        "bash" => finish_hook(generate_bash_hook(), "bash", force_autoload),
+        "zsh" => finish_hook(generate_zsh_hook(), "zsh", force_autoload),
+        "fish" => finish_hook(generate_fish_hook(), "fish", force_autoload),
+        "powershell" | "pwsh" => {
+            finish_hook(generate_powershell_hook(), "powershell", force_autoload)
+        }
         other => format!(
             "# Unsupported shell: {other}\n# Supported shells: bash, zsh, fish, powershell\n"
         ),
     }
+}
+
+fn finish_hook(mut hook: String, shell: &str, force_autoload: bool) -> String {
+    if !force_autoload {
+        return hook;
+    }
+
+    hook = hook.replace("pw-env hook", "pw-env --force-autoload hook");
+    match shell {
+        "bash" | "zsh" => hook.push_str("\nunset PW_ENV_SHELL_START\n"),
+        "fish" => hook.push_str("\nset -e PW_ENV_SHELL_START\n"),
+        "powershell" => {
+            hook.push_str("\nRemove-Item Env:PW_ENV_SHELL_START -ErrorAction SilentlyContinue\n")
+        }
+        _ => {}
+    }
+    hook
 }
 
 fn generate_bash_hook() -> String {

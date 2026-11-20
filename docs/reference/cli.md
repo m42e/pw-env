@@ -7,6 +7,7 @@
 | Command | Purpose |
 | --- | --- |
 | `init` | Generate shell hook code for `bash`, `zsh`, `fish`, or `powershell` |
+| `shell` | Start an interactive shell with the current project's environment loaded |
 | `exec` | Run a command with resolved secrets only in the child process |
 | `export` | Print shell exports for the current project |
 | `load` | Show a human-readable view of the current resolution state |
@@ -24,7 +25,7 @@
 ## `init`
 
 ```console
-pw-env init <SHELL>
+pw-env [--no-autoload] init <SHELL>
 ```
 
 Generate shell hook code for automatic loading on directory change. Supported shells are `bash`, `zsh`, `fish`, and
@@ -32,6 +33,22 @@ Generate shell hook code for automatic loading on directory change. Supported sh
 
 If the active project config defines `commands`, the generated hook installs transient wrappers for the matching
 executable names instead of exporting resolved secrets into the parent shell.
+
+`--no-autoload` suppresses hook generation for this invocation. To disable automatic loading in all shells, set
+`autoload = false` under `[defaults]` in the global config file. An already-installed hook also checks this setting on
+each directory change.
+
+## `shell`
+
+```console
+pw-env shell [--shell <PATH>]
+```
+
+Start the shell named by `$SHELL` (or the path passed with `--shell`) in the current directory. The current project's
+resolved variables are loaded into the child shell, and its normal interactive startup files run. The pw-env hook is
+enabled inside this nested shell even when global autoloading is disabled, so directory changes work as usual there.
+Project configs that scope secrets to commands keep them out of the shell environment and install the configured
+wrappers through the startup hook.
 
 ## `exec`
 

@@ -239,6 +239,7 @@ impl<W: Write> Drop for TerminalSession<W> {
 #[derive(Clone)]
 struct ConfigWizardState {
     backend: BackendChoice,
+    autoload: bool,
     search_parent_env: bool,
     source_all: bool,
     warn_missing: bool,
@@ -268,6 +269,7 @@ impl ConfigWizardState {
     fn from_config(config: &Config) -> Self {
         Self {
             backend: BackendChoice::from_value(&config.defaults.backend),
+            autoload: config.defaults.autoload,
             search_parent_env: config.defaults.search_parent_env,
             source_all: config.defaults.source_all,
             warn_missing: config.defaults.warn_missing,
@@ -299,6 +301,7 @@ impl ConfigWizardState {
         Config {
             defaults: crate::config::Defaults {
                 backend: self.backend.as_str().to_string(),
+                autoload: self.autoload,
                 search_parent_env: self.search_parent_env,
                 source_all: self.source_all,
                 warn_missing: self.warn_missing,
@@ -345,6 +348,7 @@ impl ConfigWizardState {
             String::new(),
             "[defaults]".to_string(),
             format!("backend = {}", quoted(self.backend.as_str())),
+            format!("autoload = {}", self.autoload),
             format!("search_parent_env = {}", self.search_parent_env),
             format!("source_all = {}", self.source_all),
             format!("warn_missing = {}", self.warn_missing),
@@ -664,6 +668,7 @@ enum WizardOutcome {
 #[derive(Clone, Copy)]
 enum FieldId {
     Backend,
+    Autoload,
     SearchParentEnv,
     SourceAll,
     WarnMissing,
@@ -687,7 +692,7 @@ enum FieldId {
     UpdateCheckIntervalHours,
 }
 
-const ALL_FIELDS: [FieldId; 22] = [
+const ALL_FIELDS: [FieldId; 23] = [
     FieldId::Backend,
     FieldId::SearchParentEnv,
     FieldId::SourceAll,
@@ -709,6 +714,7 @@ const ALL_FIELDS: [FieldId; 22] = [
     FieldId::LogLevel,
     FieldId::LogFile,
     FieldId::UpdatesEnabled,
+    FieldId::Autoload,
     FieldId::UpdateCheckIntervalHours,
 ];
 
@@ -716,6 +722,7 @@ impl FieldId {
     fn label(self) -> &'static str {
         match self {
             Self::Backend => "Default backend",
+            Self::Autoload => "Automatic shell loading",
             Self::SearchParentEnv => "Search parent .env files",
             Self::SourceAll => "Export plaintext values too",
             Self::WarnMissing => "Warn on unresolved entries",
@@ -743,6 +750,9 @@ impl FieldId {
     fn help(self) -> &'static str {
         match self {
             Self::Backend => "Which backend should pw-env use by default for empty .env values?",
+            Self::Autoload => {
+                "Should shell hooks load project environments automatically on directory changes?"
+            }
             Self::SearchParentEnv => {
                 "Should pw-env search parent directories up to the git root for a .env file?"
             }
@@ -832,6 +842,7 @@ impl FieldId {
     fn value(self, state: &ConfigWizardState) -> String {
         match self {
             Self::Backend => state.backend.as_str().to_string(),
+            Self::Autoload => yes_no(state.autoload),
             Self::SearchParentEnv => yes_no(state.search_parent_env),
             Self::SourceAll => yes_no(state.source_all),
             Self::WarnMissing => yes_no(state.warn_missing),
@@ -899,6 +910,7 @@ impl FieldId {
     fn adjust(self, state: &mut ConfigWizardState, direction: i8) {
         match self {
             Self::Backend => state.backend = state.backend.cycle(direction),
+            Self::Autoload => state.autoload = !state.autoload,
             Self::SearchParentEnv => state.search_parent_env = !state.search_parent_env,
             Self::SourceAll => state.source_all = !state.source_all,
             Self::WarnMissing => state.warn_missing = !state.warn_missing,
@@ -1104,6 +1116,7 @@ mod tests {
         let config = Config {
             defaults: Defaults {
                 backend: "bw".to_string(),
+                autoload: true,
                 search_parent_env: false,
                 source_all: true,
                 warn_missing: true,
@@ -1199,6 +1212,7 @@ mod tests {
     fn render_config_includes_live_values_and_project_overrides() {
         let state = ConfigWizardState {
             backend: BackendChoice::Gpg,
+            autoload: true,
             search_parent_env: true,
             source_all: false,
             warn_missing: true,

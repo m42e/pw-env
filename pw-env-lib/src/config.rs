@@ -211,6 +211,9 @@ fn default_update_check_interval_hours() -> u64 {
 pub struct Defaults {
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Whether shell hooks automatically load project environments on directory changes.
+    #[serde(default = "default_autoload")]
+    pub autoload: bool,
     #[serde(default = "default_search_parent_env")]
     pub search_parent_env: bool,
     /// When true, plaintext (non-secret) values from `.env` are also exported
@@ -238,6 +241,7 @@ impl Default for Defaults {
     fn default() -> Self {
         Self {
             backend: default_backend(),
+            autoload: default_autoload(),
             search_parent_env: default_search_parent_env(),
             source_all: false,
             warn_missing: false,
@@ -252,6 +256,10 @@ impl Default for Defaults {
 
 fn default_backend() -> String {
     "op".to_string()
+}
+
+fn default_autoload() -> bool {
+    true
 }
 
 fn default_search_parent_env() -> bool {

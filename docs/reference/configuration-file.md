@@ -15,6 +15,9 @@ questions on the left and the generated TOML on the right, then saves the result
 [defaults]
 # Default backend: "op" (1Password), "bw" (Bitwarden), or "gpg" (GPG encrypted file)
 backend = "op"
+# Automatically load project environments from shell hooks on directory changes.
+# Set false to disable this globally; `pw-env shell` remains available for an explicit session.
+autoload = true
 # Search parent directories for .env until the git workspace root
 # search_parent_env = true
 # Also export plaintext (non-secret) values from .env alongside resolved secrets
@@ -99,7 +102,7 @@ check_interval_hours = 24
 
 | Section | Keys | Notes |
 | --- | --- | --- |
-| `[defaults]` | `backend`, `search_parent_env`, `source_all`, `fallback_example_env` | Selects the default backend for empty `.env` values, controls parent `.env` discovery, controls whether plaintext values are exported, and enables `.env.example` fallback |
+| `[defaults]` | `backend`, `autoload`, `search_parent_env`, `source_all`, `fallback_example_env` | Selects the default backend for empty `.env` values, controls global shell autoloading, parent `.env` discovery, plaintext exports, and `.env.example` fallback |
 | `[defaults.cache]` | `enabled`, `ttl_hours` | Enables OS-keyring caching of resolved secrets and sets the expiry window |
 | `[defaults.op]` | `vault`, `account`, `item` | Default 1Password lookup settings; `vault` may use a configured alias |
 | `[defaults.op.vault_aliases]` | `<alias> = <vault>` | Maps user-friendly 1Password vault aliases to real vault names; also applies to `op://<alias>/...` references |

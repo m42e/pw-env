@@ -60,6 +60,20 @@ Invoke-Expression (& pw-env init powershell)
 Add the same command to your startup file (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`, or `$PROFILE` in
 PowerShell).
 
+To disable automatic loading globally, set `autoload = false` in `[defaults]` in `~/.config/pw-env/config.toml`:
+
+```toml
+[defaults]
+autoload = false
+```
+
+The installed hook then clears pw-env-managed shell state and skips loading on directory changes. You can also disable
+hook generation in a shell startup command with `pw-env --no-autoload init bash` (use the matching shell name).
+
+Run `pw-env shell` to start a nested interactive shell with the current project's environment loaded. The shell's
+normal startup files run; when they load the pw-env hook, it is enabled for that nested shell even if global autoloading
+is off. `pw-env shell --shell <PATH>` selects a shell executable when `$SHELL` does not identify the current shell.
+
 ## What the generated hook does
 
 1. Tracks which directory last loaded pw-env shell state.

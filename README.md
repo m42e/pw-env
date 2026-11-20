@@ -298,6 +298,11 @@ Invoke-Expression (& pw-env init powershell)
 
 Add that to your PowerShell profile (`$PROFILE`).
 
+To disable automatic shell loading globally, add `autoload = false` under `[defaults]` in
+`~/.config/pw-env/config.toml`. You can disable hook generation for a startup command with
+`pw-env --no-autoload init bash`. Use `pw-env shell` to start a nested shell with the current project's environment
+loaded and its normal startup files run; the pw-env hook is enabled within that nested shell.
+
 The generated hooks unset previously exported variables when you leave a directory and load new ones when entering a
 directory containing `.env`. Warnings from `pw-env export` are written to stderr, so they remain visible when the shell
 hook auto-loads a directory.
@@ -465,6 +470,7 @@ pw-env --help
 Main subcommands:
 
 - `pw-env init <bash|zsh|fish>` prints shell hook code
+- `pw-env shell [--shell <path>]` starts the current shell with project variables loaded
 - `pw-env exec [--dir <dir>] -- <command> [args...]` runs one command with transient secrets
 - `pw-env export [dir] --shell <bash|zsh|fish>` prints resolved exports for shell evaluation
 - `pw-env load [dir]` prints a human-readable resolution summary and masked export statements; pass `--reveal` to show
