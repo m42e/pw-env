@@ -15,7 +15,7 @@ concurrency:
 jobs:
   finalize:
     name: Poll Apple notarization
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
