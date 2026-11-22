@@ -218,6 +218,10 @@ Type "pw-env migrate ."
 Enter
 Sleep 2s
 Enter
+Sleep 1s
+Type "n"
+Sleep 2s
+Type "y"
 Sleep 5s
 
 Type "cat .env"
